@@ -1,0 +1,14 @@
+absl-py
+diffusers==0.31.0
+einops
+huggingface-hub
+matplotlib
+numpy
+PyYAML
+regex
+requests
+scikit-learn
+scipy
+tqdm
+transformers
+minari

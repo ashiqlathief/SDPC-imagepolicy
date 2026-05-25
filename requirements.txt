@@ -1,0 +1,36 @@
+# Core deep learning
+torch>=2.0.0
+torchvision
+numpy>=1.26.0
+scipy
+
+# Diffusion model utilities
+diffusers>=0.31.0
+einops
+timm
+
+# Image & data
+pillow
+zarr
+h5py
+
+# Visualization & logging
+matplotlib
+wandb
+
+# Utilities
+PyYAML
+tqdm
+scikit-learn
+
+# D3IL experiment (robot arm, offline RL dataset)
+gymnasium>=0.29.0
+gymnasium-robotics
+mujoco
+minari
+
+# Isaac Lab experiment (crazyflie)
+# Isaac Lab and IsaacSim must be installed separately following:
+# https://isaac-sim.github.io/IsaacLab/main/source/setup/installation
+# Additional packages on top of IsaacLab (see requirements_dpcc_isaac.txt):
+#   pip install -r requirements_dpcc_isaac.txt

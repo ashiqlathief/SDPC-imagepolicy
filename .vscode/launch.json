@@ -1,0 +1,28 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "evalcopy: avoiding-crazyflie",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/evalcopy.py",
+            "args": [
+                "--run_dir", "isaac/scripts/logs/avoiding-crazyflie/diffusion/H16_K20_Dmodels.GaussianDiffusion/9",
+                "--enable_cameras"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "python": "/home/ashiqali/anaconda3/envs/env_isaaclab/bin/python"
+        }
+    ]
+}
