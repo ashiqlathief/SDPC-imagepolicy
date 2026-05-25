@@ -50,13 +50,6 @@ pip install -r requirements_dpcc_isaac.txt
 pip install -e .
 ```
 
-**Packages in `requirements_dpcc_isaac.txt`:**
-```
-diffusers, einops, huggingface-hub, matplotlib,
-numpy, PyYAML, regex, requests, scikit-learn,
-scipy, tqdm, transformers, minari
-```
-
 ---
 
 ## Training
