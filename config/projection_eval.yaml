@@ -4,7 +4,7 @@ exps: [
   # 'avoiding-crazyflie',
   'avoiding-d3il',
   ]
-seeds: [9]  #[0, 1, 2, 3, 4]6
+seeds: [9]  #[0, 1, 2, 3, 4]6[9, 42, 123, 7, 55]
 avoiding_halfspace_variants: [
   'top-right-hard',    # /
   'top-left-hard',    # \

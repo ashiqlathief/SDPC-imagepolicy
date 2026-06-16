@@ -315,11 +315,11 @@ def save_frame_result(raw_img, heatmap, frame_idx, x_pos_val,
     axes[2].set_title("Overlay (α=0.5)", fontsize=11)
     axes[2].axis("off")
 
-    fig.suptitle(
-        f"{encoder_type} — frame {frame_idx:02d} — "
-        f"x_pos={x_pos_val:.3f}  ({method_name})",
-        fontsize=12
-    )
+    # fig.suptitle(
+    #     f"{encoder_type} — frame {frame_idx:02d} — "
+    #     f"x_pos={x_pos_val:.3f}  ({method_name})",
+    #     fontsize=12
+    # )
     fig.tight_layout()
 
     fname = os.path.join(out_dir, f"frame_{frame_idx:02d}_{method_name.lower()}.png")
@@ -350,18 +350,18 @@ def save_summary_grid(overlays, x_pos_vals, out_dir,
 
     for i, (overlay, xp) in enumerate(zip(overlays, x_pos_vals)):
         axes[i].imshow(overlay)
-        axes[i].set_title(f"x_pos={xp:.2f}", fontsize=9)
+        # axes[i].set_title(f"x_pos={xp:.2f}", fontsize=9)
         axes[i].axis("off")
 
     # hide unused axes
     for j in range(i + 1, len(axes)):
         axes[j].axis("off")
 
-    fig.suptitle(
-        f"{encoder_type} — {method_name} — {n} representative frames\n"
-        f"(ordered by corridor progress, left→right, top→bottom)",
-        fontsize=12
-    )
+    # fig.suptitle(
+    #     f"{encoder_type} — {method_name} — {n} representative frames\n"
+    #     f"(ordered by corridor progress, left→right, top→bottom)",
+    #     fontsize=12
+    # )
     fig.tight_layout()
 
     fname = os.path.join(out_dir, f"summary_grid_{method_name.lower()}.png")

@@ -82,7 +82,7 @@ class ViTObsEncoder(nn.Module):
         mlp_ratio: float = 4.0,
         dropout: float = 0.0,
         attn_dropout: float = 0.0,
-        cond_dim: int = 256,
+        cond_dim: int = 512,
         To: int = 2,
         temporal_pool: str = "mean",   # "mean" or "last"
     ):
@@ -177,7 +177,7 @@ class ViTObsEncoderPretrained(nn.Module):
         self,
         image_size: int = 96,
         patch_size: int = 16,
-        cond_dim: int = 256,
+        cond_dim: int = 512,
         temporal_pool: str = "mean",      # "mean" or "last"
         pretrained: bool = True,          # set False to compare random-init
         model_name: str = "vit_small_patch8_224",  # timm model name

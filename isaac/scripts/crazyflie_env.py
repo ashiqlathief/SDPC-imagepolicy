@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from time import perf_counter
 import argparse
 from isaaclab.app import AppLauncher
+from warp import pos
 _parser = argparse.ArgumentParser(add_help=False)
 AppLauncher.add_app_launcher_args(_parser)
 _app_args, _ = _parser.parse_known_args()
@@ -22,7 +23,7 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.scene import InteractiveScene
 
 
-from .crazyflie_env_cfg import CrazyflieSceneCfg
+from .crazyflie_env_cfg import CrazyflieSceneCfg, CYLINDERS
 
 def quat_to_yaw(quat_xyzw: torch.Tensor) -> torch.Tensor:
     """quat_xyzw: (...,4) -> yaw (...,)"""
@@ -51,8 +52,8 @@ def quat_to_euler_xyzw(q_xyzw: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor
 
 def sample_targets(num_envs: int, device, env_origins,
                    x_min=4.0, x_max=4.0,
-                   y_max=0.94, y_min=0.6, #y_min=-0.94, y_max=-0.6, y_min=0.94, y_max=0.6,
-                   z_min=0.75, z_max=0.25):
+                   y_max=0.9, y_min=0.6, #y_min=-0.94, y_max=-0.6, y_min=0.94, y_max=0.6,
+                   z_min=0.75, z_max=0.75):
     """
     Sample one random target position per environment.
     Returns a tensor of shape (num_envs, 3).
@@ -266,8 +267,10 @@ class CrazyflieEnvCfg:
     min_z: float = 0.02         # if z < 0.2 -> fail
     reset_on_fail: bool = False # if True, env auto-resets inside step()
     success_radius: float = 0.2
+    dynamic_obstacles: bool = False
+    obs_amplitude: float = 0.25   # sinusoid amplitude in metres
+    obs_frequency: float = 0.25   # oscillation frequency in Hz
 
-    
     goal_y = 1.0
     goal_z = 1.0
     
@@ -332,6 +335,62 @@ class Crazyflie(gym.Env):
         # target
         self.target_pos = sample_targets(self.num_envs, self.device, self.env_origins)
 
+        # dynamic obstacle state (disabled unless cfg.dynamic_obstacles=True)
+        self._dynamic_obs = cfg.dynamic_obstacles
+        if self._dynamic_obs:
+            self._dyn_cyls = [self.scene[f"cyl_{i:02d}"] for i in range(len(CYLINDERS))]
+            self._cyl_x0   = [float(CYLINDERS[i][0]) for i in range(len(CYLINDERS))]
+            self._cyl_y0   = [float(CYLINDERS[i][1]) for i in range(len(CYLINDERS))]
+            self._cyl_z0   = [float(CYLINDERS[i][2]) for i in range(len(CYLINDERS))]
+            self._obs_phases = [2.0 * math.pi * i / len(CYLINDERS) for i in range(len(CYLINDERS))]
+            self._obs_amplitude = cfg.obs_amplitude
+            self._obs_frequency = cfg.obs_frequency
+        self._obs_t = 0.0
+
+    # ------------------------------------------------------------------
+    # Dynamic obstacle helpers
+    # ------------------------------------------------------------------
+    def _step_dynamic_obstacles(self, dt: float) -> None:
+        """Sinusoidal y-oscillation for all kinematic cylinders. Called
+        every physics sub-step inside step() when dynamic_obstacles=True."""
+        for i, cyl_obj in enumerate(self._dyn_cyls):
+            new_y = self._cyl_y0[i] + self._obs_amplitude * math.sin(
+                2.0 * math.pi * self._obs_frequency * self._obs_t + self._obs_phases[i]
+            )
+            new_y = max(-0.85, min(0.85, new_y))
+            pose = torch.zeros(self.num_envs, 7, device=self.device)
+            pose[:, 0] = self._cyl_x0[i]
+            pose[:, 1] = new_y
+            pose[:, 2] = self._cyl_z0[i]
+            pose[:, 3] = 1.0  # quaternion w=1 (identity rotation)
+            cyl_obj.write_root_pose_to_sim(pose)
+        self._obs_t += dt
+
+    def _reset_dynamic_obstacles(self) -> None:
+        """Return all kinematic cylinders to their rest positions."""
+        for i, cyl_obj in enumerate(self._dyn_cyls):
+            pose = torch.zeros(self.num_envs, 7, device=self.device)
+            pose[:, 0] = self._cyl_x0[i]
+            pose[:, 1] = self._cyl_y0[i]
+            pose[:, 2] = self._cyl_z0[i]
+            pose[:, 3] = 1.0
+            cyl_obj.write_root_pose_to_sim(pose)
+
+    def get_cylinder_positions(self) -> list:
+        """Returns current (x, y) of every cylinder.
+        When dynamic_obstacles=False returns the static rest positions."""
+        if not self._dynamic_obs:
+            return [(float(CYLINDERS[i][0]), float(CYLINDERS[i][1]))
+                    for i in range(len(CYLINDERS))]
+        positions = []
+        for i in range(len(CYLINDERS)):
+            new_y = self._cyl_y0[i] + self._obs_amplitude * math.sin(
+                2.0 * math.pi * self._obs_frequency * self._obs_t + self._obs_phases[i]
+            )
+            new_y = max(-0.85, min(0.85, new_y))
+            positions.append((self._cyl_x0[i], new_y))
+        return positions
+
     def reset(self, *, seed: int | None = None):
         
         if seed is not None:
@@ -354,6 +413,10 @@ class Crazyflie(gym.Env):
 
         self.success_acc = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.fell_acc = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # reset dynamic obstacles to rest positions
+        if self._dynamic_obs:
+            self._obs_t = 0.0
+            self._reset_dynamic_obstacles()
         # ── Reset PID integrator state ──────────────────────────────
         if hasattr(controller_motor_forces, "vel_int"):
             controller_motor_forces.vel_int.zero_()
@@ -378,8 +441,10 @@ class Crazyflie(gym.Env):
         act = torch.as_tensor(action, device=self.device, dtype=torch.float32)
         forces = torch.zeros(self.num_envs, 4, 3, device=self.device)
         torques = torch.zeros_like(forces)
+        if self._dynamic_obs:
+            self._step_dynamic_obstacles(self._sim.get_physics_dt())
+            
         for _ in range(self.count):
-
             forces[..., 2] = controller_motor_forces(
                 self.robot.data.root_state_w,
                 act,
@@ -435,16 +500,16 @@ class Crazyflie(gym.Env):
     
     def get_observation(self) -> np.ndarray:
         root = self.robot.data.root_state_w  # (N,13)
-        pos = root[:, 0:2]
+        pos = root[:, 0:3]
         pos1 = root[:, 0:3]
         
         pos_err = self.target_pos - pos1
 
-        print("x:", pos1[0,0].item(), "y:", pos1[0,1].item(), "z:", pos1[0,2].item())
+        print("x:", pos[0,0].item(), "y:", pos[0,1].item(), "z:", pos[0,2].item())
         # print("pos_err x :", pos_err[0,0].item(),"pos_err y:", pos_err[0,1].item(),"pos_err z:", pos_err[0, 2].item())
 
-        obs = torch.cat([pos,pos], dim=-1)
-
+        # obs = torch.cat([pos,pos], dim=-1)
+        obs = torch.cat([pos], dim=-1)
         return obs.detach().cpu().numpy()
 
     def get_reward(self):

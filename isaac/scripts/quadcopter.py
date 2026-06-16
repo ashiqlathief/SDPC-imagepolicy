@@ -36,7 +36,7 @@ save_now = False
 clear_now = False
 recording = True 
 
-data_dir = project_path("isaac", "dataset", "avoiding_crazyflie", "data")
+data_dir = project_path("isaac", "dataset", "avoiding_crazyflie", "data0")
 os.makedirs(data_dir, exist_ok=True)
 print("Resolved data path:", data_dir)
 

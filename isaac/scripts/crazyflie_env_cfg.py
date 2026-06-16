@@ -3,7 +3,7 @@ from __future__ import annotations
 import isaaclab.sim as sim_utils
 from isaaclab.utils import configclass
 from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.assets import ArticulationCfg
+from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -17,7 +17,7 @@ CRAZYFLIE = ArticulationCfg(
         spawn=sim_utils.MultiUsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Bitcraze/Crazyflie/cf2x.usd",
             # usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Bitcraze/Crazyflie/cf2x.usd",
-            
+
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 max_depenetration_velocity=10.0,
@@ -62,66 +62,71 @@ CEILING_Z_CENTER = CEILING_HEIGHT + WALL_THICKNESS / 2.0   # centre of roof slab
 
 # Obstacles: (x, y, z) in corridor frame (z is center height of the primitive)
 BOXES = [
-    # (3.5,  0.2, WALL_HEIGHT / 2.0),
-    # (2.2, -0.2, WALL_HEIGHT / 2.0),
-    # (1.6,  0.2, WALL_HEIGHT / 2.0),
-    # (3.7, -0.3, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
-    # (2.8, -0.2, WALL_HEIGHT / 2.0),
-    # (1.0, -0.3, WALL_HEIGHT / 2.0),
+    #experiment1
     (3.0,  0.2, WALL_HEIGHT / 2.0),
     (2.0, -0.2, WALL_HEIGHT / 2.0),
     (1.1,  0.2, WALL_HEIGHT / 2.0),
     (3.2, -0.3, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
     (2.3, -0.2, WALL_HEIGHT / 2.0),
-    (0.6, -0.3, WALL_HEIGHT / 2.0),
+    (1.6, -0.3, WALL_HEIGHT / 2.0),
+
+    #experiment2
     # (3.5, -0.4, WALL_HEIGHT / 2.0),
     # (2.2, -0.4, WALL_HEIGHT / 2.0),
     # (1.6, -0.4, WALL_HEIGHT / 2.0),
     # (3.7, -0.4, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
     # (2.8, -0.4,  WALL_HEIGHT / 2.0),
     # (1.0, -0.4, WALL_HEIGHT / 2.0),
-
     # (3.5, 0.7, WALL_HEIGHT / 2.0),
     # (2.2, 0.7, WALL_HEIGHT / 2.0),
     # (1.6, 0.7, WALL_HEIGHT / 2.0),
     # (3.7, 0.7, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
     # (2.8, 0.7,  WALL_HEIGHT / 2.0),
     # (1.0, 0.7, WALL_HEIGHT / 2.0),
+
+    #experiment3
+    # (3.0, 0.2, WALL_HEIGHT / 2.0),
+    # (2.0, -0.2, WALL_HEIGHT / 2.0),
+    # (1.1, 0.2, WALL_HEIGHT / 2.0),
+    # (0.5, -0.7, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
+    # (0.5, 0.7,  WALL_HEIGHT / 2.0),
+    # (1.6, -0.3, WALL_HEIGHT / 2.0),
+
 ]
 CYLINDERS = [
+    #experiment1
     (1.0, -0.2, WALL_HEIGHT / 2.0),
     (2.3,  0.3, WALL_HEIGHT / 2.0),
-    (0.7,  0.4, WALL_HEIGHT / 2.0),
+    (1.7,  0.4, WALL_HEIGHT / 2.0),
     (3.0,  0.4, WALL_HEIGHT / 2.0),
     (1.5, 0.4, WALL_HEIGHT / 2.0),#(2.0,  0.4, WALL_HEIGHT / 2.0), --- IGNORE ---
     (2.0,  0.3, WALL_HEIGHT / 2.0),
 
-    # (1.4, -0.2, WALL_HEIGHT / 2.0),
-    # (2.8,  0.3, WALL_HEIGHT / 2.0),
-    # (1.2,  0.4, WALL_HEIGHT / 2.0),
-    # (3.5,  0.4, WALL_HEIGHT / 2.0),
-    # (2.0, 0.4, WALL_HEIGHT / 2.0),#(2.0,  0.4, WALL_HEIGHT / 2.0), --- IGNORE ---
-    # (2.5,  0.3, WALL_HEIGHT / 2.0),
-
+    #experiment2
     # (1.4, 0.4, WALL_HEIGHT / 2.0),
     # (2.8, 0.3, WALL_HEIGHT / 2.0),
     # (1.2, 0.4, WALL_HEIGHT / 2.0),
     # (3.5, 0.3, WALL_HEIGHT / 2.0),
     # (2.0, 0.4, WALL_HEIGHT / 2.0),#(2.0,  0.4, WALL_HEIGHT / 2.0),
     # (2.5, 0.4, WALL_HEIGHT / 2.0),
-    
     # (1.4, -0.7, WALL_HEIGHT / 2.0),
     # (2.8, -0.8, WALL_HEIGHT / 2.0),
     # (1.2, -0.7, WALL_HEIGHT / 2.0),
     # (3.5, -0.8, WALL_HEIGHT / 2.0),
     # (3.2, -0.7, WALL_HEIGHT / 2.0),#(2.0,  0.4, WALL_HEIGHT / 2.0),
     # (2.5, -0.7, WALL_HEIGHT / 2.0),
+
+    #experiment3
+    # (1.0, -0.2, WALL_HEIGHT / 2.0),
+    # (2.3, 0.3, WALL_HEIGHT / 2.0),
+    # (1.7, 0.4, WALL_HEIGHT / 2.0),
+    # (3.0, 0.4, WALL_HEIGHT / 2.0),
+    # (1.5, 0.4, WALL_HEIGHT / 2.0),#(2.0,  0.4, WALL_HEIGHT / 2.0),
+    # (2.0, 0.3, WALL_HEIGHT / 2.0),
     ]
 
 @configclass
 class CrazyflieSceneCfg(InteractiveSceneCfg):
-    """Configuration for the Crazyflie quadcopter."""
-
     # -------------------------
     # Robot
     # -------------------------
@@ -147,9 +152,9 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
             pos=(0.0, 0.0, 0.02),     # move camera slightly forward and up
             rot=(0.5, -0.5, 0.5, -0.5),   # quaternion (w,x,y,z); pointing forward in ROS convention
             convention="ros",
-        ),   
+        ),
     )
-    
+
     # -------------------------
     # Environment geometry
     # -------------------------
@@ -208,217 +213,33 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-
     # -------------------------
     # Obstacles (boxes + cylinders)
     # -------------------------
+    # vars() in a class body returns the class namespace directly,
+    # so assignments here become real class attributes picked up by @configclass.
+    for _i, _pos in enumerate(BOXES):
+        vars()[f"box_{_i:02d}"] = AssetBaseCfg(
+            prim_path=f"/World/envs/env_.*/Box{_i:02d}",
+            spawn=sim_utils.CuboidCfg(
+                visual_material=RED_MAT,
+                size=(0.20, 0.20, WALL_HEIGHT),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=_pos),
+        )
+    del _i, _pos  # prevent loop vars from leaking into the class namespace
 
-    # # Boxes
-    # box_00 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box00",
-    #     spawn=sim_utils.CuboidCfg(
-    #         visual_material=RED_MAT,
-    #         size=(0.20, 0.20, WALL_HEIGHT),
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #     ),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[0]),
-    # )
-    # box_01 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box01",
-    #     spawn=sim_utils.CuboidCfg(visual_material=RED_MAT,
-    #                               size=(0.20, 0.20, WALL_HEIGHT),
-    #                               collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[1]),
-    # )
-    # box_02 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box02",
-    #     spawn=sim_utils.CuboidCfg(visual_material=RED_MAT,
-    #                               size=(0.20, 0.20, WALL_HEIGHT),
-    #                               collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[2]),
-    # )
-    # box_03 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box03",
-    #     spawn=sim_utils.CuboidCfg(visual_material=RED_MAT,
-    #                               size=(0.20, 0.20,WALL_HEIGHT),
-    #                               collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[3]),
-    # )
-    # box_04 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box04",
-    #     spawn=sim_utils.CuboidCfg(visual_material=RED_MAT,
-    #                               size=(0.20, 0.20, WALL_HEIGHT),
-    #                               collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[4]),
-    # )
-    # box_05 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box05",
-    #     spawn=sim_utils.CuboidCfg(visual_material=RED_MAT,
-    #                               size=(0.20, 0.20, WALL_HEIGHT),
-    #                               collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[5]),
-    # )
-
-    # # Boxes on the other side of the corridor
-    # box_06 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box06",
-    #     spawn=sim_utils.CuboidCfg(
-    #         visual_material=RED_MAT,
-    #         size=(0.20, 0.20, WALL_HEIGHT),
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #     ),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[6]),
-    # )
-    # box_07 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box07",
-    #     spawn=sim_utils.CuboidCfg(visual_material=RED_MAT,
-    #                               size=(0.20, 0.20, WALL_HEIGHT),
-    #                               collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[7]),
-    # )
-    # box_08 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box08",
-    #     spawn=sim_utils.CuboidCfg(visual_material=RED_MAT,
-    #                               size=(0.20, 0.20, WALL_HEIGHT),
-    #                               collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[8]),
-    # )
-    # box_09 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box09",
-    #     spawn=sim_utils.CuboidCfg(visual_material=RED_MAT,
-    #                               size=(0.20, 0.20,WALL_HEIGHT),
-    #                               collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[9]),
-    # )
-    # box_10 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box10",
-    #     spawn=sim_utils.CuboidCfg(visual_material=RED_MAT,
-    #                               size=(0.20, 0.20, WALL_HEIGHT),
-    #                               collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[10]),
-    # )
-    # box_11 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Box11",
-    #     spawn=sim_utils.CuboidCfg(visual_material=RED_MAT,
-    #                               size=(0.20, 0.20, WALL_HEIGHT),
-    #                               collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=BOXES[11]),
-    # )
-
-
-    # # Cylinders (stand-ins for cones)
-    # cyl_00 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl00",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #         radius=0.06,
-    #         height=WALL_HEIGHT,
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #     ),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[0]),
-    # )
-    # cyl_01 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl01",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[1]),
-    # )
-    # cyl_02 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl02",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[2]),
-    # )
-    # cyl_03 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl03",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[3]),
-    # )
-    # cyl_04 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl04",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[4]),
-    # )
-    # cyl_05 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl05",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[5]),
-    # )
-
-
-
-
-
-
-    # cyl_06 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl06",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #         radius=0.06,
-    #         height=WALL_HEIGHT,
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #     ),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[6]),
-    # )
-    # cyl_07 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl07",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[7]),
-    # )
-    # cyl_08 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl08",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[8]),
-    # )
-    # cyl_09 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl09",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[9]),
-    # )
-    # cyl_10 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl10",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[10]),
-    # )
-    # cyl_11 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl11",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[11]),
-    # )
-    # cyl_12 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl12",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[12]),
-    # )
-    # cyl_13 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl13",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[13]),
-    # )
-    # cyl_14 = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Cyl14",
-    #     spawn=sim_utils.CylinderCfg(visual_material=RED_MAT,
-    #                                 radius=0.06, height=WALL_HEIGHT,
-    #                                 collision_props=sim_utils.CollisionPropertiesCfg()),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=CYLINDERS[14]),
-    # )
+    for _i, _pos in enumerate(CYLINDERS):
+        vars()[f"cyl_{_i:02d}"] = RigidObjectCfg(
+            prim_path=f"/World/envs/env_.*/Cyl{_i:02d}",
+            spawn=sim_utils.CylinderCfg(
+                visual_material=RED_MAT,
+                radius=0.06,
+                height=WALL_HEIGHT,
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=_pos, rot=(1, 0, 0, 0)),
+        )
+    del _i, _pos  # prevent loop vars from leaking into the class namespace
