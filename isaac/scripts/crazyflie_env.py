@@ -270,6 +270,7 @@ class CrazyflieEnvCfg:
     dynamic_obstacles: bool = False
     obs_amplitude: float = 0.25   # sinusoid amplitude in metres
     obs_frequency: float = 0.25   # oscillation frequency in Hz
+    dynamic_cyl_indices: list | None = None  # which cylinders move; None = all
 
     goal_y = 1.0
     goal_z = 1.0
@@ -338,11 +339,14 @@ class Crazyflie(gym.Env):
         # dynamic obstacle state (disabled unless cfg.dynamic_obstacles=True)
         self._dynamic_obs = cfg.dynamic_obstacles
         if self._dynamic_obs:
-            self._dyn_cyls = [self.scene[f"cyl_{i:02d}"] for i in range(len(CYLINDERS))]
-            self._cyl_x0   = [float(CYLINDERS[i][0]) for i in range(len(CYLINDERS))]
-            self._cyl_y0   = [float(CYLINDERS[i][1]) for i in range(len(CYLINDERS))]
-            self._cyl_z0   = [float(CYLINDERS[i][2]) for i in range(len(CYLINDERS))]
-            self._obs_phases = [2.0 * math.pi * i / len(CYLINDERS) for i in range(len(CYLINDERS))]
+            dyn_idx = list(cfg.dynamic_cyl_indices) if cfg.dynamic_cyl_indices is not None \
+                      else list(range(len(CYLINDERS)))
+            self._dyn_indices = dyn_idx
+            self._dyn_cyls   = [self.scene[f"cyl_{i:02d}"] for i in dyn_idx]
+            self._cyl_x0     = [float(CYLINDERS[i][0]) for i in dyn_idx]
+            self._cyl_y0     = [float(CYLINDERS[i][1]) for i in dyn_idx]
+            self._cyl_z0     = [float(CYLINDERS[i][2]) for i in dyn_idx]
+            self._obs_phases  = [2.0 * math.pi * k / len(dyn_idx) for k in range(len(dyn_idx))]
             self._obs_amplitude = cfg.obs_amplitude
             self._obs_frequency = cfg.obs_frequency
         self._obs_t = 0.0
@@ -378,17 +382,22 @@ class Crazyflie(gym.Env):
 
     def get_cylinder_positions(self) -> list:
         """Returns current (x, y) of every cylinder.
-        When dynamic_obstacles=False returns the static rest positions."""
+        Static cylinders return their rest position; only dynamic ones oscillate."""
         if not self._dynamic_obs:
             return [(float(CYLINDERS[i][0]), float(CYLINDERS[i][1]))
                     for i in range(len(CYLINDERS))]
+        dyn_set = {idx: k for k, idx in enumerate(self._dyn_indices)}
         positions = []
         for i in range(len(CYLINDERS)):
-            new_y = self._cyl_y0[i] + self._obs_amplitude * math.sin(
-                2.0 * math.pi * self._obs_frequency * self._obs_t + self._obs_phases[i]
-            )
-            new_y = max(-0.85, min(0.85, new_y))
-            positions.append((self._cyl_x0[i], new_y))
+            x0 = float(CYLINDERS[i][0])
+            y0 = float(CYLINDERS[i][1])
+            if i in dyn_set:
+                k = dyn_set[i]
+                y0 = y0 + self._obs_amplitude * math.sin(
+                    2.0 * math.pi * self._obs_frequency * self._obs_t + self._obs_phases[k]
+                )
+                y0 = max(-0.85, min(0.85, y0))
+            positions.append((x0, y0))
         return positions
 
     def reset(self, *, seed: int | None = None):
@@ -443,7 +452,7 @@ class Crazyflie(gym.Env):
         torques = torch.zeros_like(forces)
         if self._dynamic_obs:
             self._step_dynamic_obstacles(self._sim.get_physics_dt())
-            
+
         for _ in range(self.count):
             forces[..., 2] = controller_motor_forces(
                 self.robot.data.root_state_w,

@@ -203,18 +203,14 @@ def plot_constraint_overlay(ax, boxes, cylinders, tighten=0.03, drone_radius=0.0
                                 linewidth=1.2, linestyle="--", zorder=3))
 
     # --- corridor bounds (blue shaded strips outside the allowed region) ---
-    xmin, xmax = x_bounds
-    ymin, ymax = y_bounds
-    zmin, zmax = z_bounds
-
-    # strip below y_min (out-of-bounds zone)
-    ax.axhspan(ax.get_ylim()[0], ymin, color="royalblue", alpha=0.08, zorder=1)
-    # strip above y_max
-    ax.axhspan(ymax, ax.get_ylim()[1], color="royalblue", alpha=0.08, zorder=1)
-    # strip left of x_min
-    ax.axvspan(ax.get_xlim()[0], xmin, color="royalblue", alpha=0.08, zorder=1)
-    # strip right of x_max
-    ax.axvspan(xmax, ax.get_xlim()[1], color="royalblue", alpha=0.08, zorder=1)
+    if x_bounds is not None:
+        xmin, xmax = x_bounds
+        ax.axvspan(ax.get_xlim()[0], xmin, color="royalblue", alpha=0.08, zorder=1)
+        ax.axvspan(xmax, ax.get_xlim()[1], color="royalblue", alpha=0.08, zorder=1)
+    if y_bounds is not None:
+        ymin, ymax = y_bounds
+        ax.axhspan(ax.get_ylim()[0], ymin, color="royalblue", alpha=0.08, zorder=1)
+        ax.axhspan(ymax, ax.get_ylim()[1], color="royalblue", alpha=0.08, zorder=1)
 
     # # solid boundary lines
     # for yval in [ymin, ymax]:
@@ -308,8 +304,8 @@ def add_dynamic_cylinders_xy(ax, cyl_rest, cand_snapshots, obs_amplitude,
     excl_r = cyl_radius + drone_radius   # total exclusion radius
 
     for (x0, y0) in cyl_rest:
-        ylo = max(-0.85, y0 - obs_amplitude)
-        yhi = min( 0.85, y0 + obs_amplitude)
+        ylo = max(-0.85, y0 ) #- obs_amplitude
+        yhi = min( 0.85, y0 ) #+ obs_amplitude
         # swept exclusion band
         ax.add_patch(Rectangle(
             (x0 - excl_r, ylo), 2 * excl_r, yhi - ylo,
@@ -730,7 +726,7 @@ def main():
     parser.add_argument("--trajectory_selection",type=str,default="first",choices=["first", "temporal_consistency", "minimum_projection_cost"],)
     parser.add_argument("--dynamic_obstacles", action="store_true", default=False,
                         help="Enable sinusoidal cylinder movement during evaluation")
-    parser.add_argument("--obs_amplitude", type=float, default=0.55,
+    parser.add_argument("--obs_amplitude", type=float, default=0.35,
                         help="Obstacle oscillation amplitude in metres")
     parser.add_argument("--obs_frequency", type=float, default=0.25,
                         help="Obstacle oscillation frequency in Hz")
@@ -740,6 +736,9 @@ def main():
     parser.add_argument("--drone_radius", type=float, default=0.10,
                         help="Drone bounding circle radius in metres (Minkowski expansion "
                              "applied to all XY obstacle constraints). Default 0.10m for Crazyflie.")
+    parser.add_argument("--dynamic_cyl_indices", type=int, nargs="*", default=None,
+                        help="Indices of cylinders to move (0-based). Omit to move all cylinders. "
+                             "Example: --dynamic_cyl_indices 0 2 4")
     args, _unknown = parser.parse_known_args()
     from isaac.scripts.crazyflie_env import Crazyflie, CrazyflieEnvCfg
     device = torch.device(args.device)
@@ -751,6 +750,7 @@ def main():
         dynamic_obstacles=args.dynamic_obstacles,
         obs_amplitude=args.obs_amplitude,
         obs_frequency=args.obs_frequency,
+        dynamic_cyl_indices=args.dynamic_cyl_indices,
     )
     env = Crazyflie(cfg)
 
@@ -802,17 +802,13 @@ def main():
 
         if vcfg["use_projection"]:
             proj_dt = vcfg["dt"] if vcfg["dt"] is not None else 0.1
-            # When dynamic obstacles are on and we are NOT doing per-step rebuild,
-            # expand cylinder radii by the full oscillation amplitude (worst-case).
-            static_obs_amplitude = (args.obs_amplitude
-                                    if args.dynamic_obstacles and not args.dynamic_proj_update
-                                    else 0.0)
+            # All cylinders (static and dynamic) use the same base radius.
+            # Dynamic ones get their actual positions via --dynamic_proj_update.
             pos_projector = build_position_projector(
                 horizon_H=horizon, gradient=gradient, device=device,
                 boxes=BOXES, cylinders=CYLINDERS,
                 normalizer=None, tighten=vcfg["tighten"], dt=proj_dt,
                 use_dynamics=vcfg.get("use_dynamics", True),
-                obs_amplitude=static_obs_amplitude,
                 drone_radius=args.drone_radius,
             )
             # ── run once per variant to confirm bounds are wired correctly ──
@@ -909,13 +905,15 @@ def main():
 
             # ── per-step projector update for dynamic obstacles ──────────
             if args.dynamic_obstacles and args.dynamic_proj_update and vcfg["use_projection"]:
+                # get_cylinder_positions() returns current positions for ALL cylinders
+                # (static ones at rest, dynamic ones at actual current position)
                 cyl_now = env.get_cylinder_positions()
                 pos_projector = build_position_projector(
                     horizon_H=horizon, gradient=gradient, device=device,
                     boxes=BOXES, cylinders=cyl_now,
                     normalizer=None, tighten=vcfg["tighten"], dt=proj_dt,
                     use_dynamics=vcfg.get("use_dynamics", True),
-                    obs_amplitude=0.0,
+                    obs_amplitude=0.0,  # exact positions — no extra radius needed
                     drone_radius=args.drone_radius,
                 )
 
@@ -1073,11 +1071,16 @@ def main():
             ax.scatter(target[0], target[1], marker="*", s=180, label="target")
 
             # Obstacles overlay
-            add_obstacles_xy(ax, BOXES,CYLINDERS,box_size_xy=0.20, cyl_radius=0.06)  # boxes only
+            add_obstacles_xy(ax, BOXES, [], box_size_xy=0.20, cyl_radius=0.06)  # boxes only
             if args.dynamic_obstacles:
-                # pass
+                dyn_idx = args.dynamic_cyl_indices if args.dynamic_cyl_indices is not None \
+                          else list(range(len(CYLINDERS)))
+                dyn_set = set(dyn_idx)
+                static_cyls = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i not in dyn_set]
+                dyn_cyls    = [CYLINDERS[i] for i in dyn_idx]
+                add_obstacles_xy(ax, [], static_cyls, box_size_xy=0.20, cyl_radius=0.06)
                 add_dynamic_cylinders_xy(
-                    ax, CYLINDERS, cand_snapshots,
+                    ax, dyn_cyls, cand_snapshots,
                     obs_amplitude=args.obs_amplitude, cyl_radius=0.06,
                     drone_radius=args.drone_radius,
                 )
@@ -1091,13 +1094,25 @@ def main():
             tighten_val = vcfg.get("tighten", 0.0)
             constraint_handles = []
             if vcfg["use_projection"]:
-                constraint_handles = plot_constraint_overlay(
-                    ax, BOXES, CYLINDERS,
-                    tighten=tighten_val,
-                    drone_radius=args.drone_radius,
-                    x_bounds=(-0.5, 4.5),
-                    y_bounds=(-1.0, 1.0),
-                )
+                if args.dynamic_obstacles:
+                    _dyn_set_plot = set(args.dynamic_cyl_indices) if args.dynamic_cyl_indices is not None \
+                                    else set(range(len(CYLINDERS)))
+                    _static_c = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i not in _dyn_set_plot]
+                    _dyn_c    = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i in     _dyn_set_plot]
+                    # dynamic cylinders: no blue circle — orange swept band already shows range
+                    constraint_handles = plot_constraint_overlay(
+                        ax, BOXES, _static_c,
+                        tighten=tighten_val, drone_radius=args.drone_radius,
+                        x_bounds=(-0.5, 4.5), y_bounds=(-1.0, 1.0),
+                    )
+                else:
+                    constraint_handles = plot_constraint_overlay(
+                        ax, BOXES, CYLINDERS,
+                        tighten=tighten_val,
+                        drone_radius=args.drone_radius,
+                        x_bounds=(-0.5, 4.5),
+                        y_bounds=(-1.0, 1.0),
+                    )
             # --------------------------------------------
 
             # Overlay candidate rollouts snapshots
