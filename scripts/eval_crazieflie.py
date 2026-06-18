@@ -48,7 +48,7 @@ BOXES = [
 
 CYLINDERS = [
     #experiment1
-    (1.0, -0.2),
+    (2.5, -0.4),
     (2.3,  0.3),
     (1.7,  0.4),
     (3.0,  0.4),
@@ -1034,6 +1034,19 @@ def main():
             # save first N snapshots to keep file size reasonable
             snap_pos    = np.array([s["pos"]    for s in cand_snapshots[:50]]),
             snap_chosen = np.array([s["chosen"] for s in cand_snapshots[:50]]),
+
+            # ── dynamic cylinder positions per step (T, N_cyl, 2) ──
+            cyl_xy_traj = np.array(
+                [s["cyl_xy"] for s in cand_snapshots if s.get("cyl_xy") is not None],
+                dtype=np.float32,
+            ) if any(s.get("cyl_xy") is not None for s in cand_snapshots) else np.zeros((0, len(CYLINDERS), 2), dtype=np.float32),
+            dynamic_cyl_indices = np.array(
+                args.dynamic_cyl_indices if args.dynamic_cyl_indices is not None else list(range(len(CYLINDERS))),
+                dtype=np.int32,
+            ) if args.dynamic_obstacles else np.array([], dtype=np.int32),
+            obs_amplitude  = float(args.obs_amplitude),
+            obs_frequency  = float(args.obs_frequency),
+            dynamic_obstacles = bool(args.dynamic_obstacles),
         )
         print(f"[TRAJ] saved: {traj_path}")
 
