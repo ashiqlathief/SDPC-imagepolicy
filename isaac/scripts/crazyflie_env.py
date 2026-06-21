@@ -23,7 +23,7 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.scene import InteractiveScene
 
 
-from .crazyflie_env_cfg import CrazyflieSceneCfg, CYLINDERS
+from .crazyflie_env_cfg import CrazyflieSceneCfg, CYLINDERS, CORRIDOR_LENGTH
 
 def quat_to_yaw(quat_xyzw: torch.Tensor) -> torch.Tensor:
     """quat_xyzw: (...,4) -> yaw (...,)"""
@@ -271,6 +271,9 @@ class CrazyflieEnvCfg:
     obs_amplitude: float = 0.25   # sinusoid amplitude in metres
     obs_frequency: float = 0.25   # oscillation frequency in Hz
     dynamic_cyl_indices: list | None = None  # which cylinders move; None = all
+    obs_axes: list | None = None  # per-dynamic-cylinder motion axis: "x", "y", or "xy".
+                                   # None = all "y" (legacy lateral-only behaviour).
+                                   # Must match length of dynamic_cyl_indices (or len(CYLINDERS) if that's None).
 
     goal_y = 1.0
     goal_z = 1.0
@@ -293,7 +296,7 @@ class Crazyflie(gym.Env):
 
         # render_interval=render_interval
     
-        sim_cfg = sim_utils.SimulationCfg(dt=0.01, device = cfg.device)
+        sim_cfg = sim_utils.SimulationCfg(dt=cfg.dt, device = cfg.device)
         self._sim = sim_utils.SimulationContext(sim_cfg)
         self._sim.set_camera_view([2.5, 2.5, 2.5], [0.0, 0.0, 0.0])
 
@@ -301,6 +304,8 @@ class Crazyflie(gym.Env):
         self.scene = InteractiveScene(scene_cfg)
         self.robot = self.scene["crazyflie"]
         self.cam = self.scene["FPV_CAMERA_CFG"]
+        self.chase_cam = self.scene["CHASE_CAMERA_CFG"]
+        self.spectator_cam = self.scene["SPECTATOR_CAMERA_CFG"]
 
         self._sim.reset()
         self.robot.update(self._sim.get_physics_dt())
@@ -349,21 +354,42 @@ class Crazyflie(gym.Env):
             self._obs_phases  = [2.0 * math.pi * k / len(dyn_idx) for k in range(len(dyn_idx))]
             self._obs_amplitude = cfg.obs_amplitude
             self._obs_frequency = cfg.obs_frequency
+
+            axes = list(cfg.obs_axes) if cfg.obs_axes is not None else ["y"] * len(dyn_idx)
+            if len(axes) != len(dyn_idx):
+                raise ValueError(
+                    f"obs_axes length ({len(axes)}) must match dynamic_cyl_indices length ({len(dyn_idx)})"
+                )
+            self._obs_axes = axes
+            # Keep oscillation within the playable corridor regardless of axis.
+            self._x_clamp = (0.3, CORRIDOR_LENGTH - 0.3)
+            self._y_clamp = (-0.85, 0.85)
         self._obs_t = 0.0
 
     # ------------------------------------------------------------------
     # Dynamic obstacle helpers
     # ------------------------------------------------------------------
+    def _oscillate(self, axis: str, x0: float, y0: float, delta: float) -> tuple:
+        """Apply a sinusoidal offset `delta` to x and/or y depending on `axis`
+        ("x", "y", or "xy"), clamped to stay inside the corridor."""
+        new_x, new_y = x0, y0
+        if "x" in axis:
+            new_x = max(self._x_clamp[0], min(self._x_clamp[1], x0 + delta))
+        if "y" in axis:
+            new_y = max(self._y_clamp[0], min(self._y_clamp[1], y0 + delta))
+        return new_x, new_y
+
     def _step_dynamic_obstacles(self, dt: float) -> None:
-        """Sinusoidal y-oscillation for all kinematic cylinders. Called
-        every physics sub-step inside step() when dynamic_obstacles=True."""
+        """Sinusoidal oscillation for all kinematic cylinders, along the axis
+        configured per-cylinder via obs_axes. Called every physics sub-step
+        inside step() when dynamic_obstacles=True."""
         for i, cyl_obj in enumerate(self._dyn_cyls):
-            new_y = self._cyl_y0[i] + self._obs_amplitude * math.sin(
+            delta = self._obs_amplitude * math.sin(
                 2.0 * math.pi * self._obs_frequency * self._obs_t + self._obs_phases[i]
             )
-            new_y = max(-0.85, min(0.85, new_y))
+            new_x, new_y = self._oscillate(self._obs_axes[i], self._cyl_x0[i], self._cyl_y0[i], delta)
             pose = torch.zeros(self.num_envs, 7, device=self.device)
-            pose[:, 0] = self._cyl_x0[i]
+            pose[:, 0] = new_x
             pose[:, 1] = new_y
             pose[:, 2] = self._cyl_z0[i]
             pose[:, 3] = 1.0  # quaternion w=1 (identity rotation)
@@ -393,10 +419,10 @@ class Crazyflie(gym.Env):
             y0 = float(CYLINDERS[i][1])
             if i in dyn_set:
                 k = dyn_set[i]
-                y0 = y0 + self._obs_amplitude * math.sin(
+                delta = self._obs_amplitude * math.sin(
                     2.0 * math.pi * self._obs_frequency * self._obs_t + self._obs_phases[k]
                 )
-                y0 = max(-0.85, min(0.85, y0))
+                x0, y0 = self._oscillate(self._obs_axes[k], x0, y0, delta)
             positions.append((x0, y0))
         return positions
 
@@ -506,6 +532,18 @@ class Crazyflie(gym.Env):
         rgb = rgb[0].detach().cpu().numpy().astype(np.uint8)  # convert to uint8 [0,255]
         self._last_rgb = rgb
         return rgb
+
+    def get_chase_rgb(self):
+        """Third-person, drone-mounted view for presentation video; not used as policy input."""
+        rgb = self.chase_cam.data.output["rgb"]  # (N,H,W,3), float [0,1]
+        rgb = rgb[0].detach().cpu().numpy().astype(np.uint8)
+        return rgb
+
+    def get_spectator_rgb(self):
+        """Fixed, environment-mounted outside view; not used as policy input."""
+        rgb = self.spectator_cam.data.output["rgb"]  # (N,H,W,3), float [0,1]
+        rgb = rgb[0].detach().cpu().numpy().astype(np.uint8)
+        return rgb
     
     def get_observation(self) -> np.ndarray:
         root = self.robot.data.root_state_w  # (N,13)
@@ -514,7 +552,7 @@ class Crazyflie(gym.Env):
         
         pos_err = self.target_pos - pos1
 
-        print("x:", pos[0,0].item(), "y:", pos[0,1].item(), "z:", pos[0,2].item())
+        # print("x:", pos[0,0].item(), "y:", pos[0,1].item(), "z:", pos[0,2].item())
         # print("pos_err x :", pos_err[0,0].item(),"pos_err y:", pos_err[0,1].item(),"pos_err z:", pos_err[0, 2].item())
 
         # obs = torch.cat([pos,pos], dim=-1)

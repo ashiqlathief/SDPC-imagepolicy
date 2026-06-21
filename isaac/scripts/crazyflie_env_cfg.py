@@ -23,6 +23,9 @@ CRAZYFLIE = ArticulationCfg(
                 max_depenetration_velocity=10.0,
                 enable_gyroscopic_forces=True,
             ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+            ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
                 solver_position_iteration_count=4,
@@ -53,46 +56,47 @@ CRAZYFLIE = ArticulationCfg(
         },
     )
 
-CORRIDOR_LENGTH = 5.0     # x direction
+CORRIDOR_LENGTH = 4.5     # x direction
 CORRIDOR_WIDTH = 2.0       # y direction (clearance between walls)
 WALL_THICKNESS = 0.10
 WALL_HEIGHT = 1.0
 CEILING_HEIGHT  = WALL_HEIGHT          # = 1.0  (flush with obstacle tops)
 CEILING_Z_CENTER = CEILING_HEIGHT + WALL_THICKNESS / 2.0   # centre of roof slab
 
-# Obstacles: (x, y, z) in corridor frame (z is center height of the primitive)
-BOXES = [
-    #experiment1
-    (3.0,  0.2, WALL_HEIGHT / 2.0),
-    (2.0, -0.2, WALL_HEIGHT / 2.0),
-    (1.1,  0.2, WALL_HEIGHT / 2.0),
-    (3.2, -0.3, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
-    (2.3, -0.2, WALL_HEIGHT / 2.0),
-    (1.6, -0.3, WALL_HEIGHT / 2.0),
+# # Obstacles: (x, y, z) in corridor frame (z is center height of the primitive)
+# BOXES = [
+#     #experiment1
+#     # (3.0,  0.2, WALL_HEIGHT / 2.0),
+#     # (2.0, -0.2, WALL_HEIGHT / 2.0),
+#     # (1.1,  0.2, WALL_HEIGHT / 2.0),
+#     # (3.2, -0.3, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
+#     # (2.3, -0.2, WALL_HEIGHT / 2.0),
+#     # (1.6, -0.3, WALL_HEIGHT / 2.0),
 
-    #experiment2
-    # (3.5, -0.4, WALL_HEIGHT / 2.0),
-    # (2.2, -0.4, WALL_HEIGHT / 2.0),
-    # (1.6, -0.4, WALL_HEIGHT / 2.0),
-    # (3.7, -0.4, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
-    # (2.8, -0.4,  WALL_HEIGHT / 2.0),
-    # (1.0, -0.4, WALL_HEIGHT / 2.0),
-    # (3.5, 0.7, WALL_HEIGHT / 2.0),
-    # (2.2, 0.7, WALL_HEIGHT / 2.0),
-    # (1.6, 0.7, WALL_HEIGHT / 2.0),
-    # (3.7, 0.7, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
-    # (2.8, 0.7,  WALL_HEIGHT / 2.0),
-    # (1.0, 0.7, WALL_HEIGHT / 2.0),
+#     #experiment2
+#     # (3.5, -0.4, WALL_HEIGHT / 2.0),
+#     # (2.2, -0.4, WALL_HEIGHT / 2.0),
+#     # (1.6, -0.4, WALL_HEIGHT / 2.0),
+#     # (3.7, -0.4, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
+#     # (2.8, -0.4,  WALL_HEIGHT / 2.0),
+#     # (1.0, -0.4, WALL_HEIGHT / 2.0),
+#     # (3.5, 0.7, WALL_HEIGHT / 2.0),
+#     # (2.2, 0.7, WALL_HEIGHT / 2.0),
+#     # (1.6, 0.7, WALL_HEIGHT / 2.0),
+#     # (3.7, 0.7, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
+#     # (2.8, 0.7,  WALL_HEIGHT / 2.0),
+#     # (1.0, 0.7, WALL_HEIGHT / 2.0),
 
-    #experiment3
-    # (3.0, 0.2, WALL_HEIGHT / 2.0),
-    # (2.0, -0.2, WALL_HEIGHT / 2.0),
-    # (1.1, 0.2, WALL_HEIGHT / 2.0),
-    # (0.5, -0.7, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
-    # (0.5, 0.7,  WALL_HEIGHT / 2.0),
-    # (1.6, -0.3, WALL_HEIGHT / 2.0),
+#     #experiment3
+#     # (3.0, 0.2, WALL_HEIGHT / 2.0),
+#     # (2.0, -0.2, WALL_HEIGHT / 2.0),
+#     # (1.1, 0.2, WALL_HEIGHT / 2.0),
+#     # (0.5, -0.7, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
+#     # (0.5, 0.7,  WALL_HEIGHT / 2.0),
+#     # (1.6, -0.3, WALL_HEIGHT / 2.0),
 
-]
+# ]
+
 CYLINDERS = [
     #experiment1
     (2.5, -0.4, WALL_HEIGHT / 2.0),
@@ -102,6 +106,13 @@ CYLINDERS = [
     (1.5, 0.4, WALL_HEIGHT / 2.0),#(2.0,  0.4, WALL_HEIGHT / 2.0), --- IGNORE ---
     (2.0,  0.3, WALL_HEIGHT / 2.0),
 
+
+    (3.0,  0.2, WALL_HEIGHT / 2.0),
+    (2.0, -0.2, WALL_HEIGHT / 2.0),
+    (1.1,  0.2, WALL_HEIGHT / 2.0),
+    (3.2, -0.3, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
+    (2.3, -0.2, WALL_HEIGHT / 2.0),
+    (1.6, -0.3, WALL_HEIGHT / 2.0),
     #experiment2
     # (1.4, 0.4, WALL_HEIGHT / 2.0),
     # (2.8, 0.3, WALL_HEIGHT / 2.0),
@@ -155,6 +166,67 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         ),
     )
 
+    # Third-person "chase" camera: same body, same forward-facing orientation
+    # as FPV_CAMERA_CFG (reusing the proven rotation rather than deriving a
+    # new one), just offset further back and up, with a wider field of view
+    # and higher resolution — for human-watchable presentation video, not
+    # used as policy input.
+    CHASE_CAMERA_CFG = CameraCfg(
+        prim_path="/World/envs/env_.*/Crazyflie/body/chasecam",
+        update_period=0.0,        # render only when explicitly queried
+        height=480,
+        width=854,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=12.0,            # wider FOV than the FPV (24.0)
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 1000.0),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(-0.6, 0.0, 0.35),    # behind and above the drone body
+            rot=(0.5, -0.5, 0.5, -0.5),   # same forward-facing orientation as FPV
+            convention="ros",
+        ),
+    )
+
+    SPECTATOR_CAMERA_CFG = CameraCfg(
+        prim_path="/World/envs/env_.*/SpectatorCam",
+        update_period=0.0,
+        height=540,
+        width=960,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=10.0,            # wide FOV to fit the whole corridor
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 1000.0),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(2.5, 0.0, 3.5),
+            rot=(0.0, 1.0, 0.0, 0.0),
+            convention="ros",
+        ),
+    )
+    #SPECTATOR_CAMERA_CFG = CameraCfg(
+    #     prim_path="/World/envs/env_.*/SpectatorCam",
+    #     update_period=0.0,
+    #     height=540,
+    #     width=960,
+    #     data_types=["rgb"],
+    #     spawn=sim_utils.PinholeCameraCfg(
+    #         focal_length=10.0,            # wide FOV to fit the whole corridor
+    #         focus_distance=400.0,
+    #         horizontal_aperture=20.955,
+    #         clipping_range=(0.1, 1000.0),
+    #     ),
+    #     offset=CameraCfg.OffsetCfg(
+    #         pos=(-1.0, 0.0, 3.5),
+    #         rot=(0.2549804, -0.6595339, 0.6595339, -0.2549804),
+    #         convention="ros",
+    #     ),
+    # )
+
     # -------------------------
     # Environment geometry
     # -------------------------
@@ -201,6 +273,18 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         ),
     )
 
+    goal = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/Goal",
+        spawn=sim_utils.CuboidCfg(
+            visual_material=GREEN_MAT,
+            size=(WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, 0.1),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(4.0, 0.0, 0.05),
+        ),
+    )
+
     ceiling_light = AssetBaseCfg(
         prim_path="/World/CeilingLight",
         spawn=sim_utils.DomeLightCfg(
@@ -213,22 +297,22 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # -------------------------
-    # Obstacles (boxes + cylinders)
-    # -------------------------
-    # vars() in a class body returns the class namespace directly,
-    # so assignments here become real class attributes picked up by @configclass.
-    for _i, _pos in enumerate(BOXES):
-        vars()[f"box_{_i:02d}"] = AssetBaseCfg(
-            prim_path=f"/World/envs/env_.*/Box{_i:02d}",
-            spawn=sim_utils.CuboidCfg(
-                visual_material=RED_MAT,
-                size=(0.20, 0.20, WALL_HEIGHT),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
-            ),
-            init_state=AssetBaseCfg.InitialStateCfg(pos=_pos),
-        )
-    del _i, _pos  # prevent loop vars from leaking into the class namespace
+    # # -------------------------
+    # # Obstacles (boxes + cylinders)
+    # # -------------------------
+    # # vars() in a class body returns the class namespace directly,
+    # # so assignments here become real class attributes picked up by @configclass.
+    # for _i, _pos in enumerate(BOXES):
+    #     vars()[f"box_{_i:02d}"] = AssetBaseCfg(
+    #         prim_path=f"/World/envs/env_.*/Box{_i:02d}",
+    #         spawn=sim_utils.CuboidCfg(
+    #             visual_material=RED_MAT,
+    #             size=(0.20, 0.20, WALL_HEIGHT),
+    #             collision_props=sim_utils.CollisionPropertiesCfg(),
+    #         ),
+    #         init_state=AssetBaseCfg.InitialStateCfg(pos=_pos),
+    #     )
+    # del _i, _pos  # prevent loop vars from leaking into the class namespace
 
     for _i, _pos in enumerate(CYLINDERS):
         vars()[f"cyl_{_i:02d}"] = RigidObjectCfg(

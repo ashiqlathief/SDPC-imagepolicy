@@ -1,5 +1,6 @@
 import argparse
 import os
+import cv2
 from collections import deque
 from pathlib import Path
 import time
@@ -15,13 +16,13 @@ from diffuser.sampling.projection import Projector
 from metrics_logger import MetricsLogger   
 
 BOXES = [
-    #experiment1
-    (3.0,  0.2),
-    (2.0, -0.2),
-    (1.1,  0.2),
-    (3.2, -0.3), #(3.7, -0.3),
-    (2.3, -0.2),
-    (1.6, -0.3),
+    # #experiment1
+    # (3.0,  0.2),
+    # (2.0, -0.2),
+    # (1.1,  0.2),
+    # (3.2, -0.3), #(3.7, -0.3),
+    # (2.3, -0.2),
+    # (1.6, -0.3),
 
 #   #experiment2
     # (3.5, -0.4),
@@ -54,6 +55,13 @@ CYLINDERS = [
     (3.0,  0.4),
     (1.5, 0.4),#(2.0,  0.4), --- IGNORE ---
     (2.0,  0.3),
+
+    (3.0,  0.2),
+    (2.0, -0.2),
+    (1.1,  0.2),
+    (3.2, -0.3), #(3.7, -0.3),
+    (2.3, -0.2),
+    (1.6, -0.3),
 
 #   #experiment2
     # (1.4, 0.4),
@@ -99,10 +107,10 @@ z_halfspaces = [
 projection_variants = [
 #   'dpcc-r', 
 #   'dpcc-r-tightened',
-  'dpcc-c',
-  'dpcc-c-tightened',
-  'dpcc-t',
-  'dpcc-t-tightened',
+#   'dpcc-c',
+#   'dpcc-c-tightened',
+#   'dpcc-t',
+#   'dpcc-t-tightened',
   'diffuser',
   'gradient',
   'gradient-tightened',
@@ -292,25 +300,40 @@ def add_obstacles_xy(ax, boxes, cylinders, box_size_xy=0.20, cyl_radius=0.06):
             )
         )
 
-def add_dynamic_cylinders_xy(ax, cyl_rest, cand_snapshots, obs_amplitude,
-                              cyl_radius=0.06, drone_radius=0.0):
+def add_dynamic_cylinders_xy(ax, cyl_rest, cyl_axes, cand_snapshots, obs_amplitude,
+                              cyl_radius=0.06, drone_radius=0.0,
+                              x_clamp=(0.3, 4.7), y_clamp=(-0.85, 0.85)):
     """
     Draw dynamic cylinder visualisation on an XY axes:
-      - orange band  = full oscillation sweep of the exclusion zone
-                       (cyl_radius + drone_radius wide, y0 ± amplitude tall)
+      - orange band  = oscillation sweep of the exclusion zone, shaped per cylinder's
+                        motion axis ("y": vertical band, "x": horizontal band,
+                        "xy": square bounding box — diagonal motion is a 1D line through
+                        it, so the square is a conservative over-approximation, not exact)
       - dashed circle = exclusion zone at rest position
       - faded dots    = physical cylinder position sampled every few steps
+    `cyl_axes` must be the same length/order as `cyl_rest` (one axis per cylinder).
     """
     excl_r = cyl_radius + drone_radius   # total exclusion radius
 
-    for (x0, y0) in cyl_rest:
-        ylo = max(-0.85, y0 ) #- obs_amplitude
-        yhi = min( 0.85, y0 ) #+ obs_amplitude
-        # swept exclusion band
-        ax.add_patch(Rectangle(
-            (x0 - excl_r, ylo), 2 * excl_r, yhi - ylo,
-            facecolor="tab:orange", alpha=0.15, zorder=1,
-        ))
+    for (x0, y0), axis in zip(cyl_rest, cyl_axes):
+        if axis == "y":
+            ylo = max(y_clamp[0], y0 - obs_amplitude)
+            yhi = min(y_clamp[1], y0 + obs_amplitude)
+            band = Rectangle((x0 - excl_r, ylo), 2 * excl_r, yhi - ylo,
+                              facecolor="tab:orange", alpha=0.15, zorder=1)
+        elif axis == "x":
+            xlo = max(x_clamp[0], x0 - obs_amplitude)
+            xhi = min(x_clamp[1], x0 + obs_amplitude)
+            band = Rectangle((xlo, y0 - excl_r), xhi - xlo, 2 * excl_r,
+                              facecolor="tab:orange", alpha=0.15, zorder=1)
+        else:  # "xy" — diagonal motion; draw a conservative bounding square
+            xlo = max(x_clamp[0], x0 - obs_amplitude) - excl_r
+            xhi = min(x_clamp[1], x0 + obs_amplitude) + excl_r
+            ylo = max(y_clamp[0], y0 - obs_amplitude) - excl_r
+            yhi = min(y_clamp[1], y0 + obs_amplitude) + excl_r
+            band = Rectangle((xlo, ylo), xhi - xlo, yhi - ylo,
+                              facecolor="tab:orange", alpha=0.15, zorder=1)
+        ax.add_patch(band)
         # exclusion zone at rest (dashed ring)
         ax.add_patch(Circle(
             (x0, y0), excl_r,
@@ -718,41 +741,72 @@ def main():
     parser.add_argument("--run_dir", type=str, required=True)
     parser.add_argument("--ckpt", type=str, default="state_best.pt")
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--max_steps", type=int, default=1000)
-    parser.add_argument("--action_scale", type=float, default=10.0)
+    parser.add_argument("--max_steps", type=int, default=1500)
+    parser.add_argument("--action_scale", type=float, default=5.0)
     parser.add_argument("--projection_yaml", type=str, default=None)
     parser.add_argument("--episodes", type=int, default=1)   # how many episodes to roll
     parser.add_argument("--num_candidates", type=int, default=4)
     parser.add_argument("--trajectory_selection",type=str,default="first",choices=["first", "temporal_consistency", "minimum_projection_cost"],)
-    parser.add_argument("--dynamic_obstacles", action="store_true", default=False,
-                        help="Enable sinusoidal cylinder movement during evaluation")
+    parser.add_argument("--dynamic_obstacles", type=str, nargs="*", default=None, metavar="IDX:AXIS",
+                        help="Enable sinusoidal cylinder movement. Omit this flag entirely to disable. "
+                             "Pass with no values to move ALL cylinders laterally (axis 'y'). "
+                             "Or give 'idx:axis' tokens (axis is 'x', 'y', or 'xy'; ':axis' optional, "
+                             "defaults to 'y'), e.g. --dynamic_obstacles 0:y 2:x 4:xy")
     parser.add_argument("--obs_amplitude", type=float, default=0.35,
-                        help="Obstacle oscillation amplitude in metres")
+                        help="Obstacle oscillation amplitude in metres (shared by all moving cylinders)")
     parser.add_argument("--obs_frequency", type=float, default=0.25,
-                        help="Obstacle oscillation frequency in Hz")
-    parser.add_argument("--dynamic_proj_update", action="store_true", default=False,
+                        help="Obstacle oscillation frequency in Hz (shared by all moving cylinders)")
+    parser.add_argument("--dynamic_proj_update", dest="dynamic_proj_update", action="store_true", default=True,
                         help="Rebuild projector every step with actual cylinder positions "
-                             "(accurate but slower). Default: worst-case radius expansion.")
-    parser.add_argument("--drone_radius", type=float, default=0.10,
-                        help="Drone bounding circle radius in metres (Minkowski expansion "
-                             "applied to all XY obstacle constraints). Default 0.10m for Crazyflie.")
-    parser.add_argument("--dynamic_cyl_indices", type=int, nargs="*", default=None,
-                        help="Indices of cylinders to move (0-based). Omit to move all cylinders. "
-                             "Example: --dynamic_cyl_indices 0 2 4")
+                             "(accurate but slower). On by default; use --no_dynamic_proj_update to disable.")
+    parser.add_argument("--no_dynamic_proj_update", dest="dynamic_proj_update", action="store_false",
+                        help="Disable per-step projector rebuild; use static worst-case radius expansion instead.")
+    parser.add_argument("--drone_radius", type=float, default=0.10)
+    parser.add_argument("--dt", type=float, default=None)
+    parser.add_argument("--record_video", action="store_true", default=False,
+                        help="Save an .mp4 of each recorded variant's episode to "
+                             "<run_dir>/videos/eval_<variant>_<camera>.mp4")
+    parser.add_argument("--camera", type=str, nargs="+", default=["spectator"],
+                        choices=["spectator", "chase", "fpv"],
+                        help="Which camera(s) to record from when --record_video is set "
+                             "-- pass more than one (e.g. --camera spectator chase) to record "
+                             "them simultaneously from the same episode, one .mp4 per camera: "
+                             "'spectator' is the fixed environment-mounted outside view "
+                             "(SPECTATOR_CAMERA_CFG), 'chase' is a third-person view mounted "
+                             "on the drone (CHASE_CAMERA_CFG), 'fpv' is the same onboard "
+                             "camera the policy sees (get_rgb()/FPV_CAMERA_CFG).")
+    parser.add_argument("--record_variants", type=str, nargs="*", default=None,
+                        help="Subset of variant names (from projection_variants) to record "
+                             "when --record_video is set. Omit to record every variant run "
+                             "this invocation.")
+    parser.add_argument("--video_fps", type=int, default=20,
+                        help="Playback fps of saved videos (independent of sim dt).")
     args, _unknown = parser.parse_known_args()
+
+    # ── parse --dynamic_obstacles "idx:axis" tokens into (enabled, indices, axes) ──
+    if args.dynamic_obstacles is None:
+        args.dynamic_obstacles_enabled = False
+        args.dynamic_cyl_indices = None
+        args.obs_axes = None
+    else:
+        args.dynamic_obstacles_enabled = True
+        if len(args.dynamic_obstacles) == 0:
+            args.dynamic_cyl_indices = None   # all cylinders
+            args.obs_axes = None              # all axis "y"
+        else:
+            indices, axes = [], []
+            for tok in args.dynamic_obstacles:
+                idx_str, _, axis = tok.partition(":")
+                axis = axis or "y"
+                if axis not in ("x", "y", "xy"):
+                    parser.error(f"--dynamic_obstacles: invalid axis '{axis}' in '{tok}' (must be x, y, or xy)")
+                indices.append(int(idx_str))
+                axes.append(axis)
+            args.dynamic_cyl_indices = indices
+            args.obs_axes = axes
+
     from isaac.scripts.crazyflie_env import Crazyflie, CrazyflieEnvCfg
     device = torch.device(args.device)
-
-    # ------------------ Create env ------------------
-    cfg = CrazyflieEnvCfg(
-        num_envs=1,
-        device=str(device),
-        dynamic_obstacles=args.dynamic_obstacles,
-        obs_amplitude=args.obs_amplitude,
-        obs_frequency=args.obs_frequency,
-        dynamic_cyl_indices=args.dynamic_cyl_indices,
-    )
-    env = Crazyflie(cfg)
 
     # ------------------ Load trained experiment ------------------
     print(f"[INFO] Loading run dir: {args.run_dir}")
@@ -762,6 +816,37 @@ def main():
     dataset = diff_exp.dataset
     diffusion = diff_exp.diffusion.to(device)
     diffusion.eval()
+
+    # ── derive eval dt from the trained dataset ───────────────────────────
+    # a0_real is a displacement over `dataset.control_dt` seconds of sim time
+    # (control_dt = stride * collection_dt). The eval env's sim dt must match
+    # this or every action gets applied over the wrong amount of physical
+    # time, making the drone fly too fast/slow relative to what the model
+    # intends. Auto-derive it here instead of hardcoding it in env config.
+    expected_dt = getattr(dataset, "control_dt", getattr(dataset, "dt", None))
+    if args.dt is not None:
+        if expected_dt is not None and not np.isclose(args.dt, expected_dt, rtol=1e-3):
+            print(f"[WARN] --dt={args.dt} explicitly overrides dataset control_dt={expected_dt} "
+                  "— running at a deliberately mismatched dt.")
+        eval_dt = args.dt
+    elif expected_dt is not None:
+        eval_dt = expected_dt
+    else:
+        eval_dt = CrazyflieEnvCfg.dt  # old run without stored stride/dt metadata
+    print(f"[INFO] Using eval dt={eval_dt} (dataset control_dt={expected_dt})")
+
+    # ------------------ Create env ------------------
+    cfg = CrazyflieEnvCfg(
+        num_envs=1,
+        device=str(device),
+        dynamic_obstacles=args.dynamic_obstacles_enabled,
+        obs_amplitude=args.obs_amplitude,
+        obs_frequency=args.obs_frequency,
+        dynamic_cyl_indices=args.dynamic_cyl_indices,
+        obs_axes=args.obs_axes,
+        dt=eval_dt,
+    )
+    env = Crazyflie(cfg)
 
     run_name = Path(args.run_dir).parent.name  # e.g. "H16_K20_ENCvit_LAT256"
     enc_match = re.search(r'E([^_]+)', run_name)
@@ -786,8 +871,19 @@ def main():
         num_candidates=args.num_candidates,
         corridor_halfspaces  = corridor_halfspaces,
         boxes                = BOXES,
-        cylinders            = CYLINDERS,              
-    )    
+        cylinders            = CYLINDERS,
+    )
+
+    # ------------------ Video recording setup ------------------
+    camera_fns = {
+        "spectator": env.get_spectator_rgb,
+        "chase": env.get_chase_rgb,
+        "fpv": env.get_rgb,
+    }
+    video_dir = os.path.join(args.run_dir, "videos")
+    if args.record_video:
+        os.makedirs(video_dir, exist_ok=True)
+
     # ------------------ Episodes ------------------
     # for ep in range(args.episodes):
     for ep, variant_name in enumerate(projection_variants):
@@ -822,7 +918,7 @@ def main():
 
         print(f"\n[INFO] ===== Episode {ep+1}/{args.episodes}_{variant_name} =====")
         _ = env.reset(seed=ep)
-        logger.begin_episode(variant_name, episode=ep, seed=ep) 
+        logger.begin_episode(variant_name, episode=ep, seed=ep)
 
         # Camera warm-up (important for Isaac/Replicator)
         for _ in range(3):
@@ -832,7 +928,32 @@ def main():
                 env.step(cmd_xyz)
             except Exception:
                 pass
-        
+
+        # ── per-episode video writers, one per requested --camera, recorded
+        # simultaneously from the same rollout (only for variants the caller asked for) ──
+        record_this_episode = args.record_video and (
+            args.record_variants is None or variant_name in args.record_variants
+        )
+        video_writers = {}
+        video_paths = {}
+        if record_this_episode:
+            for cam_name in args.camera:
+                get_video_frame = camera_fns[cam_name]
+                frame0 = get_video_frame()
+                vh, vw = frame0.shape[:2]
+                video_path = os.path.join(video_dir, f"eval_{variant_name}_{cam_name}.mp4")
+                video_writers[cam_name] = cv2.VideoWriter(
+                    video_path, cv2.VideoWriter_fourcc(*"mp4v"), args.video_fps, (vw, vh)
+                )
+                video_paths[cam_name] = video_path
+                print(f"[INFO] Recording '{cam_name}' camera video ({vw}x{vh} @ {args.video_fps}fps) -> {video_path}")
+
+        def write_video_frame():
+            for cam_name, writer in video_writers.items():
+                writer.write(cv2.cvtColor(camera_fns[cam_name](), cv2.COLOR_RGB2BGR))
+
+        write_video_frame()
+
 
         # init rgb history
         rgb0 = get_rgb_from_env(env)
@@ -863,6 +984,7 @@ def main():
                 obs_next, rew, done_vec, info = env.step(cmd_xyz)
                 rgb = get_rgb_from_env(env)
                 rgb_hist.append(rgb)
+                write_video_frame()
                 pos2 = obs_next[0]
                 traj_xyz.append(pos2.copy())
                 actions_taken.append(cmd_xyz[:3] - pos[:3])
@@ -903,8 +1025,12 @@ def main():
             # )
             # which = int(np.argmin(proj_costs))
 
-            # ── per-step projector update for dynamic obstacles ──────────
-            if args.dynamic_obstacles and args.dynamic_proj_update and vcfg["use_projection"]:
+            # ── per-step projector update ──────────
+            # Always gated on --dynamic_proj_update alone (not on dynamic_obstacles):
+            # get_cylinder_positions() returns rest positions for static cylinders, so
+            # rebuilding every step is a harmless no-op when nothing is actually moving,
+            # and keeps the same code path for static-only and mixed static/dynamic runs.
+            if args.dynamic_proj_update and vcfg["use_projection"]:
                 # get_cylinder_positions() returns current positions for ALL cylinders
                 # (static ones at rest, dynamic ones at actual current position)
                 cyl_now = env.get_cylinder_positions()
@@ -952,6 +1078,8 @@ def main():
             a0_real = a_candidates_proj_real[which, 0] * float(args.action_scale)
             prev_actions_real = a_candidates_proj_real[which:which+1]
 
+            
+
             # print("[PROJ] costs:", proj_costs)
             # delta_change = np.linalg.norm(a_candidates_proj_real - a_candidates_real, axis=(1,2))  # (K,)
             # print("[PROJ] mean|proj-change|:", float(delta_change.mean()), "min:", float(delta_change.min()), "max:", float(delta_change.max()))
@@ -960,12 +1088,13 @@ def main():
             cmd_xyz = pos.copy()
             cmd_xyz[:action_dim] = cmd_xyz[:action_dim] + a0_real[:action_dim]
             # cmd_xyz[2] = 0.3 # If you want fixed altitude, uncomment:
-
+            print(f"[MODEL OUTPUT] which={which} a0_real={a0_real}" f" cmd_xyz={cmd_xyz[:3]}")
             obs_next, rew, done_vec, info = env.step(cmd_xyz)
 
             # update rgb history after step
             rgb = get_rgb_from_env(env)
             rgb_hist.append(rgb)
+            write_video_frame()
             # if step % 500 == 0:
             #     plt.imshow(rgb)
             #     plt.title("FPV Camera Frame")
@@ -982,7 +1111,7 @@ def main():
             logger.step(pos=pos, action=a0_real)
 
             done = bool(done_vec[0]) if isinstance(done_vec, (list, tuple, np.ndarray, torch.Tensor)) else bool(done_vec)
-            print(f"step {step:04d} pos={pos2} target={target} done={done}")
+            print(f"step {step:04d} pos={pos2} done={done}")
 
             traj_xy = integrate_candidates_xy(pos2, a_candidates_real)  # (K,H+1,2)
             cand_snapshots.append({
@@ -990,14 +1119,19 @@ def main():
                 "pos": pos2.copy(),
                 "traj_xy": traj_xy,
                 "chosen": int(which),
-                "cyl_xy": env.get_cylinder_positions() if args.dynamic_obstacles else None,
+                "cyl_xy": env.get_cylinder_positions() if args.dynamic_obstacles_enabled else None,
             })
 
             if done:
                 print("[INFO] Done=True. Breaking episode loop.")
                 break
-        success = bool(info["success"][0])                             
-        fell    = bool(info["fell"][0])                                
+
+        for cam_name, writer in video_writers.items():
+            writer.release()
+            print(f"[INFO] Video saved -> {video_paths[cam_name]}")
+
+        success = bool(info["success"][0])
+        fell    = bool(info["fell"][0])
         logger.end_episode(success=success, fell=fell)
         if (ep + 1) % 5 == 0:
             logger.print_live_summary()
@@ -1043,10 +1177,15 @@ def main():
             dynamic_cyl_indices = np.array(
                 args.dynamic_cyl_indices if args.dynamic_cyl_indices is not None else list(range(len(CYLINDERS))),
                 dtype=np.int32,
-            ) if args.dynamic_obstacles else np.array([], dtype=np.int32),
+            ) if args.dynamic_obstacles_enabled else np.array([], dtype=np.int32),
             obs_amplitude  = float(args.obs_amplitude),
             obs_frequency  = float(args.obs_frequency),
-            dynamic_obstacles = bool(args.dynamic_obstacles),
+            obs_axes = np.array(
+                args.obs_axes if args.obs_axes is not None
+                else (["y"] * len(CYLINDERS) if args.dynamic_obstacles_enabled else []),
+                dtype="U2",
+            ),
+            dynamic_obstacles = bool(args.dynamic_obstacles_enabled),
         )
         print(f"[TRAJ] saved: {traj_path}")
 
@@ -1085,15 +1224,16 @@ def main():
 
             # Obstacles overlay
             add_obstacles_xy(ax, BOXES, [], box_size_xy=0.20, cyl_radius=0.06)  # boxes only
-            if args.dynamic_obstacles:
+            if args.dynamic_obstacles_enabled:
                 dyn_idx = args.dynamic_cyl_indices if args.dynamic_cyl_indices is not None \
                           else list(range(len(CYLINDERS)))
+                dyn_axes_resolved = args.obs_axes if args.obs_axes is not None else ["y"] * len(dyn_idx)
                 dyn_set = set(dyn_idx)
                 static_cyls = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i not in dyn_set]
                 dyn_cyls    = [CYLINDERS[i] for i in dyn_idx]
                 add_obstacles_xy(ax, [], static_cyls, box_size_xy=0.20, cyl_radius=0.06)
                 add_dynamic_cylinders_xy(
-                    ax, dyn_cyls, cand_snapshots,
+                    ax, dyn_cyls, dyn_axes_resolved, cand_snapshots,
                     obs_amplitude=args.obs_amplitude, cyl_radius=0.06,
                     drone_radius=args.drone_radius,
                 )
@@ -1107,7 +1247,7 @@ def main():
             tighten_val = vcfg.get("tighten", 0.0)
             constraint_handles = []
             if vcfg["use_projection"]:
-                if args.dynamic_obstacles:
+                if args.dynamic_obstacles_enabled:
                     _dyn_set_plot = set(args.dynamic_cyl_indices) if args.dynamic_cyl_indices is not None \
                                     else set(range(len(CYLINDERS)))
                     _static_c = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i not in _dyn_set_plot]

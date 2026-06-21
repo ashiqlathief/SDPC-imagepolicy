@@ -42,6 +42,8 @@ for seed in seeds:
         returns_scale=args.max_path_length,               # Because the reward is <= 1 in each timestep
         # returns_scale=args.n_diffusion_steps,
         discount=args.discount,
+        stride=getattr(args, 'stride', 1),
+        dt=getattr(args, 'dt', 0.005),
     )
 
     dataset = dataset_config() # <class 'diffuser.datasets.sequence.SequenceDataset'>

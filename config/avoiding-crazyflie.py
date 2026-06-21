@@ -19,12 +19,12 @@ logbase = 'isaac/logs'
 base = {
     'diffusion': {
         ## model
-        'model': 'models.ImageCondUNet1DTemporalCondModel', #ImageCondTransformer1DModel, ImageCondUNet1DTemporalCondModel
+        'model': 'models.ImageCondTransformer1DModel', #ImageCondTransformer1DModel, ImageCondUNet1DTemporalCondModel
         'diffusion': 'models.GaussianDiffusion',
-        'encoder_type': 'vit',   # "vit", "vitp", or "cnn" or "raw_pixels"
+        'encoder_type': 'raw_pixels',   # "vit", "vitp", or "cnn" or "raw_pixels"
         'horizon': 16,
         'n_obs_steps': 2,
-        'image_cond_dim': 256,   # 96*96*3 for raw pixels 27648
+        'image_cond_dim': 27648,   # 96*96*3 for raw pixels 27648
         'n_diffusion_steps': 20,
         'loss_type': 'l2',
         'loss_discount': 1.0,
@@ -59,6 +59,8 @@ base = {
 
         ## dataset
         'loader': 'datasets.CrazyflieImageDataset',
+        'stride': 2,
+        'dt': 0.005,
         'normalizer': 'LimitsNormalizer',
         'preprocess_fns': [],
         'clip_denoised': False,
@@ -110,7 +112,7 @@ base = {
         'dynamic_loss': False,
 
         ## loading
-        'diffusion_loadpath': 'f:diffusionseed/H{horizon}_K{n_diffusion_steps}_D{diffusion}',
+        'diffusion_loadpath': 'f:diffusiondt/H{horizon}_K{n_diffusion_steps}_D{diffusion}',
         'value_loadpath': 'f:values/H{horizon}_K{n_diffusion_steps}',
 
         'diffusion_epoch': 'best',      # 'latest'

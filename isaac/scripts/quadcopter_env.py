@@ -13,7 +13,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.sim import SimulationContext
 from isaaclab.scene import InteractiveScene
 
-from crazyflie_env_cfg import CrazyflieSceneCfg, BOXES, CYLINDERS, WALL_HEIGHT
+from crazyflie_env_cfg import CrazyflieSceneCfg
 
 def main():
     """Main function."""
