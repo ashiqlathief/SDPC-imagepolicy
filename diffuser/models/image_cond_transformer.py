@@ -11,12 +11,13 @@ class RawPixelEncoder(nn.Module):
     True raw pixel baseline.
     Full 96x96 image flattened directly as conditioning vector.
     """
-    def __init__(self):
+    def __init__(self, in_chans=3, img_size=96):
         super().__init__()
-        self.out_dim = 3 * 96 * 96  # 27648
+        self.in_chans = in_chans
+        self.out_dim = in_chans * img_size * img_size  # 27648 for 3x96x96
 
     def forward(self, obs_rgb: torch.Tensor) -> torch.Tensor:
-        if obs_rgb.shape[-1] == 3:
+        if obs_rgb.shape[-1] == self.in_chans and obs_rgb.shape[2] != self.in_chans:
             obs_rgb = obs_rgb.permute(0, 1, 4, 2, 3).contiguous()
 
         B, To, C, H, W = obs_rgb.shape
@@ -56,6 +57,7 @@ class ImageCondTransformer1DModel(nn.Module):
         returns_condition: bool = False,
         condition_dropout: float = 0.1,
         device=None,
+        use_depth: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -63,6 +65,8 @@ class ImageCondTransformer1DModel(nn.Module):
         self.action_dim = action_dim
         self.encoder_type = encoder_type.lower()
         self.image_cond_dim = image_cond_dim
+        self.use_depth = use_depth
+        self.in_chans = 4 if use_depth else 3
 
         if self.encoder_type == "vitp":
             self.encoder = ViTObsEncoderPretrained(
@@ -70,6 +74,7 @@ class ImageCondTransformer1DModel(nn.Module):
                 patch_size=vit_patch_size,
                 cond_dim=image_cond_dim,
                 pretrained=True,
+                in_chans=self.in_chans,
             )
         elif self.encoder_type == "vit":
             self.encoder = ViTObsEncoder(
@@ -82,17 +87,25 @@ class ImageCondTransformer1DModel(nn.Module):
                 mlp_ratio=vit_mlp_ratio,
                 dropout=vit_dropout,
                 attn_dropout=vit_attn_dropout,
+                in_chans=self.in_chans,
             )
         elif self.encoder_type == "raw_pixels":
-            self.encoder = RawPixelEncoder()
-            self.image_cond_dim = self.encoder.out_dim 
+            self.encoder = RawPixelEncoder(in_chans=self.in_chans, img_size=vit_img_size)
+            self.image_cond_dim = self.encoder.out_dim
         elif self.encoder_type == "cnn":
             self.encoder = ImageObsEncoder(  #CNN
                 cond_dim=image_cond_dim,
-                pretrained=True
+                pretrained=True,
+                in_chans=self.in_chans,
             )
         else:
             raise ValueError(f"Unsupported encoder_type: {encoder_type}")
+
+        # consistency check: every encoder branch above sets self.encoder.in_chans
+        assert self.encoder.in_chans == self.in_chans, (
+            f"Encoder in_chans mismatch: encoder built with {self.encoder.in_chans}, "
+            f"model expected {self.in_chans} (use_depth={use_depth})"
+        )
 
         # Transformer denoiser
         self.core = Transformer1DDenoisingModel(

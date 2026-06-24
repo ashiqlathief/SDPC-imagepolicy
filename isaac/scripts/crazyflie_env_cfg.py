@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import importlib
 import isaaclab.sim as sim_utils
 from isaaclab.utils import configclass
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -10,6 +10,21 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors.camera import CameraCfg
 from isaaclab.sim.spawners.materials import PreviewSurfaceCfg
 
+cfg = importlib.import_module("config.avoiding-crazyflie")
+
+_BOXES_XY = cfg.BOXES
+_CYLINDERS_XY = cfg.CYLINDERS
+USE_DEPTH = cfg.USE_DEPTH
+DEPTH_NEAR = cfg.DEPTH_NEAR
+DEPTH_FAR = cfg.DEPTH_FAR
+CORRIDOR_LENGTH = 4.5     # x direction
+CORRIDOR_WIDTH = 2.0       # y direction (clearance between walls)
+WALL_THICKNESS = 0.10
+WALL_HEIGHT = 2.0
+CEILING_HEIGHT  = WALL_HEIGHT          # = 1.0  (flush with obstacle tops)
+CEILING_Z_CENTER = CEILING_HEIGHT + WALL_THICKNESS / 2.0   # centre of roof slab
+BOXES = [(x, y, 1.0 / 2.0) for (x, y) in _BOXES_XY]
+CYLINDERS = [(x, y, 1.0 / 2.0) for (x, y) in _CYLINDERS_XY]
 RED_MAT = PreviewSurfaceCfg(diffuse_color=(0.85, 0.10, 0.10))
 GREEN_MAT = PreviewSurfaceCfg(diffuse_color=(0.10, 0.85, 0.10))
 
@@ -56,86 +71,6 @@ CRAZYFLIE = ArticulationCfg(
         },
     )
 
-CORRIDOR_LENGTH = 4.5     # x direction
-CORRIDOR_WIDTH = 2.0       # y direction (clearance between walls)
-WALL_THICKNESS = 0.10
-WALL_HEIGHT = 1.0
-CEILING_HEIGHT  = WALL_HEIGHT          # = 1.0  (flush with obstacle tops)
-CEILING_Z_CENTER = CEILING_HEIGHT + WALL_THICKNESS / 2.0   # centre of roof slab
-
-# # Obstacles: (x, y, z) in corridor frame (z is center height of the primitive)
-# BOXES = [
-#     #experiment1
-#     # (3.0,  0.2, WALL_HEIGHT / 2.0),
-#     # (2.0, -0.2, WALL_HEIGHT / 2.0),
-#     # (1.1,  0.2, WALL_HEIGHT / 2.0),
-#     # (3.2, -0.3, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
-#     # (2.3, -0.2, WALL_HEIGHT / 2.0),
-#     # (1.6, -0.3, WALL_HEIGHT / 2.0),
-
-#     #experiment2
-#     # (3.5, -0.4, WALL_HEIGHT / 2.0),
-#     # (2.2, -0.4, WALL_HEIGHT / 2.0),
-#     # (1.6, -0.4, WALL_HEIGHT / 2.0),
-#     # (3.7, -0.4, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
-#     # (2.8, -0.4,  WALL_HEIGHT / 2.0),
-#     # (1.0, -0.4, WALL_HEIGHT / 2.0),
-#     # (3.5, 0.7, WALL_HEIGHT / 2.0),
-#     # (2.2, 0.7, WALL_HEIGHT / 2.0),
-#     # (1.6, 0.7, WALL_HEIGHT / 2.0),
-#     # (3.7, 0.7, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
-#     # (2.8, 0.7,  WALL_HEIGHT / 2.0),
-#     # (1.0, 0.7, WALL_HEIGHT / 2.0),
-
-#     #experiment3
-#     # (3.0, 0.2, WALL_HEIGHT / 2.0),
-#     # (2.0, -0.2, WALL_HEIGHT / 2.0),
-#     # (1.1, 0.2, WALL_HEIGHT / 2.0),
-#     # (0.5, -0.7, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
-#     # (0.5, 0.7,  WALL_HEIGHT / 2.0),
-#     # (1.6, -0.3, WALL_HEIGHT / 2.0),
-
-# ]
-
-CYLINDERS = [
-    #experiment1
-    (2.5, -0.4, WALL_HEIGHT / 2.0),
-    (2.3,  0.3, WALL_HEIGHT / 2.0),
-    (1.7,  0.4, WALL_HEIGHT / 2.0),
-    (3.0,  0.4, WALL_HEIGHT / 2.0),
-    (1.5, 0.4, WALL_HEIGHT / 2.0),#(2.0,  0.4, WALL_HEIGHT / 2.0), --- IGNORE ---
-    (2.0,  0.3, WALL_HEIGHT / 2.0),
-
-
-    (3.0,  0.2, WALL_HEIGHT / 2.0),
-    (2.0, -0.2, WALL_HEIGHT / 2.0),
-    (1.1,  0.2, WALL_HEIGHT / 2.0),
-    (3.2, -0.3, WALL_HEIGHT / 2.0), #(3.7, -0.3, WALL_HEIGHT / 2.0),
-    (2.3, -0.2, WALL_HEIGHT / 2.0),
-    (1.6, -0.3, WALL_HEIGHT / 2.0),
-    #experiment2
-    # (1.4, 0.4, WALL_HEIGHT / 2.0),
-    # (2.8, 0.3, WALL_HEIGHT / 2.0),
-    # (1.2, 0.4, WALL_HEIGHT / 2.0),
-    # (3.5, 0.3, WALL_HEIGHT / 2.0),
-    # (2.0, 0.4, WALL_HEIGHT / 2.0),#(2.0,  0.4, WALL_HEIGHT / 2.0),
-    # (2.5, 0.4, WALL_HEIGHT / 2.0),
-    # (1.4, -0.7, WALL_HEIGHT / 2.0),
-    # (2.8, -0.8, WALL_HEIGHT / 2.0),
-    # (1.2, -0.7, WALL_HEIGHT / 2.0),
-    # (3.5, -0.8, WALL_HEIGHT / 2.0),
-    # (3.2, -0.7, WALL_HEIGHT / 2.0),#(2.0,  0.4, WALL_HEIGHT / 2.0),
-    # (2.5, -0.7, WALL_HEIGHT / 2.0),
-
-    #experiment3
-    # (1.0, -0.2, WALL_HEIGHT / 2.0),
-    # (2.3, 0.3, WALL_HEIGHT / 2.0),
-    # (1.7, 0.4, WALL_HEIGHT / 2.0),
-    # (3.0, 0.4, WALL_HEIGHT / 2.0),
-    # (1.5, 0.4, WALL_HEIGHT / 2.0),#(2.0,  0.4, WALL_HEIGHT / 2.0),
-    # (2.0, 0.3, WALL_HEIGHT / 2.0),
-    ]
-
 @configclass
 class CrazyflieSceneCfg(InteractiveSceneCfg):
     # -------------------------
@@ -151,7 +86,7 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         update_period=0.005,       # update every physics step (matches sim dt)
         height=96,
         width=96,
-        data_types=["rgb"],
+        data_types=["rgb", "distance_to_camera"] if USE_DEPTH else ["rgb"],
         spawn=sim_utils.PinholeCameraCfg(   # camera intrinsics
             focal_length=24.0,
             focus_distance=400.0,
@@ -166,11 +101,6 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # Third-person "chase" camera: same body, same forward-facing orientation
-    # as FPV_CAMERA_CFG (reusing the proven rotation rather than deriving a
-    # new one), just offset further back and up, with a wider field of view
-    # and higher resolution — for human-watchable presentation video, not
-    # used as policy input.
     CHASE_CAMERA_CFG = CameraCfg(
         prim_path="/World/envs/env_.*/Crazyflie/body/chasecam",
         update_period=0.0,        # render only when explicitly queried
@@ -273,6 +203,19 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         ),
     )
 
+    # Ceiling: closes the corridor top so the FPV depth camera doesn't see
+    # through to open space above the walls (was returning inf depth there).
+    ceiling = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/Ceiling",
+        spawn=sim_utils.CuboidCfg(
+            size=(CORRIDOR_LENGTH + WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, WALL_THICKNESS),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(CORRIDOR_LENGTH / 2.0, 0.0, CEILING_Z_CENTER),
+        ),
+    )
+
     goal = AssetBaseCfg(
         prim_path="/World/envs/env_.*/Goal",
         spawn=sim_utils.CuboidCfg(
@@ -320,7 +263,7 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
             spawn=sim_utils.CylinderCfg(
                 visual_material=RED_MAT,
                 radius=0.06,
-                height=WALL_HEIGHT,
+                height=1.0,
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
             ),

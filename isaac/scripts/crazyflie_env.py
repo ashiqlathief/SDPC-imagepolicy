@@ -23,7 +23,7 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.scene import InteractiveScene
 
 
-from .crazyflie_env_cfg import CrazyflieSceneCfg, CYLINDERS, CORRIDOR_LENGTH
+from .crazyflie_env_cfg import CrazyflieSceneCfg, CYLINDERS, CORRIDOR_LENGTH, DEPTH_FAR
 
 def quat_to_yaw(quat_xyzw: torch.Tensor) -> torch.Tensor:
     """quat_xyzw: (...,4) -> yaw (...,)"""
@@ -532,6 +532,30 @@ class Crazyflie(gym.Env):
         rgb = rgb[0].detach().cpu().numpy().astype(np.uint8)  # convert to uint8 [0,255]
         self._last_rgb = rgb
         return rgb
+
+    def get_depth(self):
+        """Depth channel for the FPV camera. Requires the camera to be configured
+        with "distance_to_camera" in data_types (see USE_DEPTH in crazyflie_env_cfg.py)."""
+        if "distance_to_camera" not in self.cam.data.output:
+            raise RuntimeError(
+                "FPV camera was not configured for depth output. "
+                "Set USE_DEPTH=True in crazyflie_env_cfg.py to enable distance_to_camera."
+            )
+        depth = self.cam.data.output["distance_to_camera"]  # (N,H,W,1), float meters
+        depth = depth[0].detach().cpu().numpy().astype(np.float32)
+        # Rays that miss everything within clipping_range come back as inf (occasionally
+        # nan); replace with DEPTH_FAR so raw saved data never carries non-finite values.
+        non_finite = ~np.isfinite(depth)
+        if non_finite.any():
+            depth[non_finite] = DEPTH_FAR
+        self._last_depth = depth
+        return depth
+
+    def get_rgbd(self):
+        """Concatenated RGB + depth for the FPV camera, as (H,W,4): uint8 RGB, float32 depth."""
+        rgb = self.get_rgb()
+        depth = self.get_depth()
+        return rgb, depth
 
     def get_chase_rgb(self):
         """Third-person, drone-mounted view for presentation video; not used as policy input."""

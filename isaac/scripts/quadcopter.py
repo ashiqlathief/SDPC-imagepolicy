@@ -2,6 +2,8 @@ import argparse
 from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="This script demonstrates how to simulate a quadcopter.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
+parser.add_argument("--use_depth", action="store_true",
+                     help="Also record depth (distance_to_camera) alongside RGB for RGBD datasets.")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -27,16 +29,22 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.scene import InteractiveScene
 
 from diffuser.utils.path import project_path
-from isaac.scripts.crazyflie_env_cfg import CrazyflieSceneCfg, BOXES, CYLINDERS
+from isaac.scripts.crazyflie_env_cfg import CrazyflieSceneCfg, BOXES, CYLINDERS, DEPTH_FAR
 
 scene_cfg = CrazyflieSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
+if args_cli.use_depth:
+    # FPV_CAMERA_CFG defaults to RGB-only (see USE_DEPTH in crazyflie_env_cfg.py);
+    # override here so --use_depth is the single switch controlling this script.
+    scene_cfg.FPV_CAMERA_CFG = scene_cfg.FPV_CAMERA_CFG.replace(
+        data_types=["rgb", "distance_to_camera"]
+    )
 
 reset = False
 save_now = False
 clear_now = False
 recording = True 
 
-data_dir = project_path("isaac", "dataset", "avoiding_crazyflie", "data0")
+data_dir = project_path("isaac", "dataset", "avoiding_crazyflie", "data")
 os.makedirs(data_dir, exist_ok=True)
 print("Resolved data path:", data_dir)
 
@@ -86,8 +94,8 @@ def quat_to_euler_xyzw(q):
 
 def sample_targets(num_envs: int, device, env_origins,
                    x_min=4.0, x_max=4.0,
-                   y_min=-0.94, y_max=0.94, #y_min=-0.94, y_max=-0.6, y_min=0.94, y_max=0.6,
-                   z_min=0.75, z_max=0.75):
+                   y_min=-0.9, y_max=0.9, #y_min=-0.94, y_max=-0.6, y_min=0.94, y_max=0.6,
+                   z_min=0.65, z_max=0.65):
     """
     Sample one random target position per environment.
     Returns a tensor of shape (num_envs, 3).
@@ -105,7 +113,10 @@ def save_dataset_for_all_envs(episodes_states,
                               curr_states,
                               curr_images,
                               num_envs,
-                              data_dir,zarr_writer=None):
+                              data_dir,zarr_writer=None,
+                              episodes_depths=None,
+                              curr_depths=None):
+    use_depth = curr_depths is not None
 
     # 1) Flush the current (possibly partial) episode into episodes_*
     if len(curr_states) > 0:
@@ -118,6 +129,11 @@ def save_dataset_for_all_envs(episodes_states,
         curr_states.clear()
         curr_images.clear()
 
+        if use_depth:
+            ep_depths = np.stack(curr_depths, axis=0)  # (T, N, H, W)
+            episodes_depths.append(ep_depths)
+            curr_depths.clear()
+
     if len(episodes_states) == 0:
         print("[INFO] No data recorded, nothing to save.")
         return
@@ -128,7 +144,8 @@ def save_dataset_for_all_envs(episodes_states,
     for env_id in range(num_envs):
         env_states_list  = []
         env_images_list = []
-        
+        env_depths_list = []
+
         prefix = f"env_{env_id:03d}_"
         existing = [f for f in os.listdir(data_dir)
                     if f.startswith(prefix) and f.endswith(".pkl")]
@@ -144,6 +161,9 @@ def save_dataset_for_all_envs(episodes_states,
             # ep_s: (T_i, N, state_dim)
             env_states_list.append(ep_s[:, env_id, :])   # (T_i, state_dim)
             env_images_list.append(ep_img[:, env_id, ...])  # (T_i, H, W, 3)
+        if use_depth:
+            for ep_d in episodes_depths:
+                env_depths_list.append(ep_d[:, env_id, ...])  # (T_i, H, W)
 
         dataset_env = {
             "states": env_states_list,
@@ -155,7 +175,11 @@ def save_dataset_for_all_envs(episodes_states,
 
         images_arr = np.concatenate(env_images_list, axis=0)  # or keep list if variable lengths
         total_steps = int(sum(s.shape[0] for s in env_states_list))
-        np.savez_compressed(images_path, rgb=images_arr)
+        if use_depth:
+            depths_arr = np.concatenate(env_depths_list, axis=0)
+            np.savez_compressed(images_path, rgb=images_arr, depth=depths_arr)
+        else:
+            np.savez_compressed(images_path, rgb=images_arr)
 
         print(f"[INFO] Env {env_id}: total_steps={total_steps}, images={images_arr.shape}")
         print(f"[INFO] Saved env {env_id} data to: {save_path}")
@@ -163,8 +187,13 @@ def save_dataset_for_all_envs(episodes_states,
 
     # append to zarr
     assert zarr_writer is not None
-    for ep_s, ep_img in zip(episodes_states, episodes_images):
-        zarr_writer.append_episode(ep_s, ep_img)
+    if use_depth:
+        for ep_s, ep_img, ep_d in zip(episodes_states, episodes_images, episodes_depths):
+            zarr_writer.append_episode(ep_s, ep_img, ep_depths=ep_d)
+        episodes_depths.clear()
+    else:
+        for ep_s, ep_img in zip(episodes_states, episodes_images):
+            zarr_writer.append_episode(ep_s, ep_img)
 
     episodes_images.clear()
     episodes_states.clear()
@@ -351,12 +380,13 @@ def controller_motor_forces(
 
 class ZarrEpisodeWriter:
     def __init__(self, root_dir: str, num_envs: int, img_h: int, img_w: int,
-                 state_dim: int, chunk_t: int = 256):
+                 state_dim: int, chunk_t: int = 256, use_depth: bool = False):
         self.root_dir = root_dir
         self.num_envs = num_envs
         self.img_h = img_h
         self.img_w = img_w
         self.state_dim = state_dim
+        self.use_depth = use_depth
 
         os.makedirs(root_dir, exist_ok=True)
 
@@ -377,6 +407,15 @@ class ZarrEpisodeWriter:
                     dtype="uint8",
                     # compressor=[compressor],
                 )
+            if self.use_depth and "depth" not in g:
+                g.create_array(
+                    "depth",
+                    shape=(0, img_h, img_w),
+                    chunks=(min(chunk_t, 64), img_h, img_w),
+                    dtype="float32",
+                    # compressor=[compressor],
+                )
+            g.attrs["use_depth"] = self.use_depth
             if "states" not in g:
                 g.create_array(
                     "states",
@@ -406,13 +445,16 @@ class ZarrEpisodeWriter:
 
         self._episode_counter = [0 for _ in range(num_envs)]
 
-    def append_episode(self, ep_states, ep_images):
+    def append_episode(self, ep_states, ep_images, ep_depths=None):
         """
         ep_states:  (T, N, state_dim)
         ep_images:  (T, N, H, W, 3) uint8
+        ep_depths:  (T, N, H, W) float32, required if self.use_depth
         """
         T, N, _ = ep_states.shape
         assert N == self.num_envs
+        if self.use_depth:
+            assert ep_depths is not None, "use_depth=True but no depth data was provided"
 
         terminals = np.zeros((T,), dtype=np.uint8)
         terminals[-1] = 1
@@ -427,6 +469,9 @@ class ZarrEpisodeWriter:
             ep_ids = np.full((T,), eid, dtype=np.int32)
 
             g["rgb"].append(rgb)
+            if self.use_depth:
+                depth = ep_depths[:, env_id, ...]    # (T, H, W)
+                g["depth"].append(depth.astype(np.float32))
             g["states"].append(st.astype(np.float32))
             g["terminals"].append(terminals)
             g["episode_id"].append(ep_ids)
@@ -481,9 +526,11 @@ def main():
     # --------- Trajectory logging buffers ---------
     episodes_states = []   # list of np arrays, one per episode
     episodes_images = []
+    episodes_depths = [] if args_cli.use_depth else None
 
     curr_images = []
     curr_states = []       # list of (num_envs, state_dim)
+    curr_depths = [] if args_cli.use_depth else None
 
     # Simulate physics
     while simulation_app.is_running():
@@ -501,7 +548,9 @@ def main():
                     curr_states,
                     curr_images,
                     num_envs,
-                    data_dir,zarr_writer=zarr_writer
+                    data_dir,zarr_writer=zarr_writer,
+                    episodes_depths=episodes_depths,
+                    curr_depths=curr_depths,
                 )
 
         if reset:
@@ -552,6 +601,9 @@ def main():
             episodes_images.clear()
             curr_images.clear()
             curr_states.clear()
+            if args_cli.use_depth:
+                episodes_depths.clear()
+                curr_depths.clear()
             print("[INFO] Cleared all recorded data (no files deleted).")
         
         root_state = robot.data.root_state_w
@@ -605,6 +657,24 @@ def main():
         rgb = cam.data.output["rgb"]
         rgb_np = rgb.detach().cpu().numpy().astype(np.uint8)
 
+        depth_np = None
+        if args_cli.use_depth:
+            if "distance_to_camera" not in cam.data.output:
+                raise RuntimeError(
+                    "--use_depth was set but the FPV camera was not configured with "
+                    "distance_to_camera output. Check the scene_cfg.FPV_CAMERA_CFG override above."
+                )
+            depth = cam.data.output["distance_to_camera"]
+            depth_np = depth.detach().cpu().numpy().astype(np.float32)[..., 0]  # (N,H,W,1) -> (N,H,W)
+            # Rays that miss everything within clipping_range come back as inf (occasionally
+            # nan); replace with DEPTH_FAR so the saved zarr/npz data never carries non-finite
+            # values (np.clip alone won't fix nan, so this has to happen at the source).
+            non_finite = ~np.isfinite(depth_np)
+            if non_finite.any():
+                print(f"[WARN] {non_finite.sum()} non-finite depth pixels this step "
+                      f"(no hit within clipping_range) -> clamped to DEPTH_FAR={DEPTH_FAR}")
+                depth_np[non_finite] = DEPTH_FAR
+
         if "zarr_writer" not in locals():
             img_h, img_w = rgb_np.shape[1], rgb_np.shape[2]   # rgb_np is (N, H, W, 3)
             state_dim = state_np.shape[1]
@@ -614,13 +684,16 @@ def main():
                 img_h=img_h,
                 img_w=img_w,
                 state_dim=state_dim,
+                use_depth=args_cli.use_depth,
             )
-        
+
         if warmup_steps > 0:
             warmup_steps -= 1
         else:
             curr_states.append(state_np)
             curr_images.append(rgb_np)
+            if args_cli.use_depth:
+                curr_depths.append(depth_np)
         
         # curr_states.append(state_np)
         # # IMG_STRIDE = 10  # e.g., save at 20 Hz instead of 200 Hz
@@ -647,7 +720,9 @@ def main():
                 curr_states,
                 curr_images,
                 num_envs,
-                data_dir,zarr_writer=zarr_writer
+                data_dir,zarr_writer=zarr_writer,
+                episodes_depths=episodes_depths,
+                curr_depths=curr_depths,
             )
 
             # Reset sim to initial pose (your reset block already does this) 

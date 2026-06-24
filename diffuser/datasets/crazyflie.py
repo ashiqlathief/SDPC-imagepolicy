@@ -1,4 +1,5 @@
 from collections import namedtuple
+import importlib
 import os
 import glob
 import numpy as np
@@ -7,6 +8,14 @@ import zarr
 
 from diffuser.utils.path import project_path
 from .normalization import LimitsNormalizer
+
+# DEPTH_NEAR/DEPTH_FAR default from the single source of truth in
+# config/avoiding-crazyflie.py (importlib since that filename has a hyphen),
+# so the clip range used here matches what quadcopter.py clamps non-finite
+# depth pixels to at collection time.
+_scene_cfg_module = importlib.import_module("config.avoiding-crazyflie")
+_DEFAULT_DEPTH_NEAR = _scene_cfg_module.DEPTH_NEAR
+_DEFAULT_DEPTH_FAR = _scene_cfg_module.DEPTH_FAR
 
 # Keep the same “shape” of outputs as other datasets
 Batch = namedtuple("Batch", "trajectories conditions")
@@ -21,7 +30,8 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
     Returns samples:
         trajectories: (H, action_dim)  float32  (normalized to [-1,1] via LimitsNormalizer)
         conditions: {
-            "rgb": (To, 3, H_img, W_img) float32 in [0,1]
+            "obs_rgb": (To, 3, H_img, W_img) float32 in [0,1]   if use_depth=False
+            "obs_rgb": (To, 4, H_img, W_img) float32 in [0,1]   if use_depth=True (4th chan = normalized depth)
         }
     """
 
@@ -40,6 +50,9 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         zarr_subdir="zarr",
         stride=1,                   # frames-per-action-step at collection rate (see `dt`)
         dt=0.005,                   # sim dt the raw zarr frames were collected at
+        use_depth=False,            # load and concat the depth channel collected via quadcopter.py --use_depth
+        depth_near=None,            # metres; defaults to config/avoiding-crazyflie.py DEPTH_NEAR
+        depth_far=None,             # metres; defaults to config/avoiding-crazyflie.py DEPTH_FAR
     ):
         super().__init__()
         self.env = env
@@ -51,6 +64,10 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         self.max_path_length = int(max_path_length)
         self.stride = int(stride)
         self.dt = float(dt)
+        self.use_depth = bool(use_depth)
+        self.in_chans = 4 if self.use_depth else 3
+        self.depth_near = float(depth_near) if depth_near is not None else _DEFAULT_DEPTH_NEAR
+        self.depth_far = float(depth_far) if depth_far is not None else _DEFAULT_DEPTH_FAR
         # The wall-clock time one predicted action step spans. eval's sim dt
         # must equal this for a0_real to mean what the model thinks it means.
         self.control_dt = self.stride * self.dt
@@ -68,6 +85,15 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
             raise FileNotFoundError(f"No env_*.zarr stores found in: {data_dir}")
 
         self.groups = [zarr.open_group(p, mode="r") for p in zarr_paths]
+
+        if self.use_depth:
+            for p, g in zip(zarr_paths, self.groups):
+                if not bool(g.attrs.get("use_depth", False)) or "depth" not in g:
+                    raise ValueError(
+                        f"use_depth=True but zarr store has no depth data: {p}. "
+                        "Re-collect with `quadcopter.py --use_depth`, or set use_depth=False."
+                    )
+
         # --- Sanity / dims from first store ---
         g0 = self.groups[0]
         self.img_h, self.img_w = int(g0["rgb"].shape[1]), int(g0["rgb"].shape[2])
@@ -183,6 +209,21 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         rgb = g["rgb"][t_start - To + 1 : t_start + 1]  # (To, H, W, 3) uint8
         # convert to float32 in [0,1], and channel-first for PyTorch
         rgb = (rgb.astype(np.float32) / 255.0).transpose(0, 3, 1, 2)  # (To, 3, H, W)
+
+        if self.use_depth:
+            depth = g["depth"][t_start - To + 1 : t_start + 1]  # (To, H, W) float32 metres
+            # quadcopter.py clamps inf/nan to DEPTH_FAR at collection time, but np.clip alone
+            # would NOT fix nan (np.clip(nan, lo, hi) == nan), so guard here too in case older
+            # data was collected before that fix.
+            non_finite = ~np.isfinite(depth)
+            if non_finite.any():
+                depth = depth.copy()
+                depth[non_finite] = self.depth_far
+            depth = np.clip(depth, self.depth_near, self.depth_far)
+            depth = (depth - self.depth_near) / (self.depth_far - self.depth_near)  # -> [0,1]
+            depth = depth[:, None, :, :].astype(np.float32)  # (To, 1, H, W)
+            assert np.isfinite(depth).all(), "non-finite values in normalized depth after clipping"
+            rgb = np.concatenate([rgb, depth], axis=1)  # (To, 4, H, W)
 
         # --- target: action chunk starting at t_start ---
         # actions = g["actions"][t_start : t_start + H].astype(np.float32)  # (H, action_dim)

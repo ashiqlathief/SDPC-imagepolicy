@@ -1,8 +1,50 @@
+import os
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
+
 import numpy as np
 import torch
 from scipy.optimize import minimize, Bounds
 
 # uses SLSQP optimization
+
+
+def _build_slsqp_constraints(C, d, A, b, obstacle_specs, transition_dim, horizon):
+    """Build the SLSQP constraint tuple for one solve. Shared by the serial path
+    (built once, reused across the batch) and each parallel worker (rebuilt locally
+    since the lambdas can't cross a process boundary)."""
+    constraints = ()
+    for (P, q, v) in obstacle_specs:
+        for t in range(1, horizon):
+            start_idx = t * transition_dim
+            end_idx = (t + 1) * transition_dim
+            constraints += ({'type': 'ineq',
+                              'fun': lambda x, start_idx=start_idx, end_idx=end_idx, P=P, q=q, v=v: -x[start_idx: end_idx] @ P @ x[start_idx: end_idx] - q @ x[start_idx: end_idx] + v,
+                              'jac': lambda x, start_idx=start_idx, end_idx=end_idx, P=P, q=q: np.concatenate([np.zeros(start_idx), -2 * P @ x[start_idx: end_idx] - q, np.zeros(len(x) - end_idx)])},)
+    if C.size > 0:
+        constraints += ({'type': 'ineq', 'fun': lambda x: -C @ x + d, 'jac': lambda x: -C},)
+    if A.size > 0:
+        constraints += ({'type': 'eq', 'fun': lambda x: A @ x - b, 'jac': lambda x: A},)
+    return constraints
+
+
+def _solve_slsqp_candidate(x0, r_i, Q, C, d, A, b, obstacle_specs, transition_dim, horizon):
+    """Pickle-safe, module-level worker: solves one candidate's SLSQP problem.
+    Used by the process pool; produces exactly the same optimization problem as
+    the serial loop in Projector.project()."""
+    constraints = _build_slsqp_constraints(C, d, A, b, obstacle_specs, transition_dim, horizon)
+    cost_fun = lambda x: 0.5 * x @ Q @ x + r_i @ x
+    jac_cost_fun = lambda x: Q @ x + r_i
+    res = minimize(fun=cost_fun,
+                    x0=x0,
+                    constraints=constraints,
+                    method='SLSQP',
+                    jac=jac_cost_fun,
+                    bounds=Bounds(-5 * np.ones_like(x0), 5 * np.ones_like(x0)),
+                    tol=1e-6,
+                    options={'maxiter': 1000, 'disp': False})
+    return res.x
+
 
 class Projector:
     # Projects sampled trajectories onto a feasible set (safety, dynamics, obstacles).
@@ -23,7 +65,8 @@ class Projector:
         self.device = device # Torch device (e.g., 'cuda' or 'cpu').
         self.solver = solver
         self.parallelize = parallelize
-        
+        self._pool = None  # lazily created ProcessPoolExecutor, see _get_pool()
+
         # Determine whether to include actions in the projection
         if normalizer is None:
             # No normalization
@@ -140,72 +183,71 @@ class Projector:
 
         # Creates inequality constraints for obstacles. Each obstacle has parameters (P, q, v) describing a quadratic region: st⊤*​P*st​+q⊤*st​−v≤0
         # For each time step and obstacle, it creates:
-        # fun: computes the value of the inequality (must be ≥0 for SLSQP) 
+        # fun: computes the value of the inequality (must be ≥0 for SLSQP)
         # jac: its analytical gradient (Jacobian) That’s how SLSQP knows how to enforce obstacle avoidance.
-        constraints = ()
-        for constraint_idx in range(len(self.obstacle_constraints.P_list)):
-            P = self.obstacle_constraints.P_list[constraint_idx]
-            q = self.obstacle_constraints.q_list[constraint_idx]
-            v = self.obstacle_constraints.v_list[constraint_idx]
-            for t in range(1, self.horizon):                        # Obstacle constraints
-                start_idx = t * self.transition_dim
-                end_idx = (t + 1) * self.transition_dim
-                constraints += ({'type': 'ineq',
-                                  'fun': lambda x, start_idx=start_idx, end_idx=end_idx, P=P, q=q, v=v: -x[start_idx: end_idx] @ P @ x[start_idx: end_idx] - q @ x[start_idx: end_idx] + v,
-                                  'jac': lambda x, start_idx=start_idx, end_idx=end_idx, P=P, q=q: np.concatenate([np.zeros(start_idx), -2 * P @ x[start_idx: end_idx] - q, np.zeros(len(x) - end_idx)])},)
+        obstacle_specs = list(zip(self.obstacle_constraints.P_list,
+                                   self.obstacle_constraints.q_list,
+                                   self.obstacle_constraints.v_list))
 
-        #Adds any linear constraints into the solver’s constraint list.
-        # Note the sign flip for inequalities: C x ≤ d → -C x + d ≥ 0, because SLSQP expects “≥ 0”.
-        if C.size > 0:
-            constraints += ({'type': 'ineq', 'fun': lambda x: -C @ x + d, 'jac': lambda x: -C},)
-        if A.size > 0:
-            constraints += ({'type': 'eq', 'fun': lambda x: A @ x - b, 'jac': lambda x: A},)   
-        
         #Prepare arrays to store the solution and cost for each trajectory in the batch.
         projection_costs = np.ones(batch_size, dtype=np.float32)
         sol_np = np.zeros((batch_size, self.horizon * self.transition_dim), dtype=np.float32)
 
+        # Each candidate i solves an independent SLSQP problem (same A,b,C,d,obstacles,
+        # different x0/r_np_double[i]) — embarrassingly parallel across the batch. Run
+        # them concurrently in worker processes when there's more than one candidate;
+        # fall back to the proven serial path otherwise or if parallel execution fails.
+        ran_parallel = False
+        if self.parallelize and batch_size > 1:
+            try:
+                pool = self._get_pool(min(batch_size, os.cpu_count() or 1))
+                futures = [
+                    pool.submit(_solve_slsqp_candidate, trajectory_np_double[i], r_np_double[i],
+                                Q, C, d, A, b, obstacle_specs, self.transition_dim, self.horizon)
+                    for i in range(batch_size)
+                ]
+                for i, fut in enumerate(futures):
+                    sol_np[i] = fut.result()
+                ran_parallel = True
+            except Exception as e:
+                print(f"[Projection] parallel SLSQP solve failed ({e}); falling back to serial.")
+
+        if not ran_parallel:
+            # Built once and reused across the batch — identical constraints for every i.
+            constraints = _build_slsqp_constraints(C, d, A, b, obstacle_specs, self.transition_dim, self.horizon)
+            for i in range(batch_size):
+                cost_fun = lambda x: 0.5 * x @ Q @ x + r_np_double[i] @ x # + (A_double @ x - b_double) @ (A_double @ x - b_double)
+                jac_cost_fun = lambda x: Q @ x + r_np_double[i]
+                #Run the optimizer
+                res = minimize(fun=cost_fun,
+                                x0=trajectory_np_double[i],
+                                constraints=constraints,
+                                method='SLSQP',
+                                jac=jac_cost_fun,
+                                bounds=Bounds(-5 * np.ones_like(trajectory_np_double[i]), 5 * np.ones_like(trajectory_np_double[i])),
+                                tol=1e-6,
+                                options={'maxiter': 1000, 'disp': False})
+                sol_np[i] = res.x # Save the optimized trajectory vector.
+
+        #Compute a “projection cost” (a measure of how much the trajectory changed) for every candidate.
         for i in range(batch_size):
-            # Cost
-            cost_fun = lambda x: 0.5 * x @ Q @ x + r_np_double[i] @ x # + (A_double @ x - b_double) @ (A_double @ x - b_double)
-            jac_cost_fun = lambda x: Q @ x + r_np_double[i]
-            #Run the optimizer
-            res = minimize(fun=cost_fun, 
-                            x0=trajectory_np_double[i],
-                            constraints=constraints, 
-                            method='SLSQP', 
-                            jac=jac_cost_fun, 
-                            bounds=Bounds(-5 * np.ones_like(trajectory_np_double[i]), 5 * np.ones_like(trajectory_np_double[i])),
-                            tol=1e-6,
-                            options={'maxiter': 1000, 'disp': False})
-            # if not res.success:
-            #     print("[Projection] FAILED:", res.message)
-            # min_margin = 1e9
-            # for constraint_idx in range(len(self.obstacle_constraints.P_list)):
-            #     P = self.obstacle_constraints.P_list[constraint_idx]
-            #     q = self.obstacle_constraints.q_list[constraint_idx]
-            #     v = self.obstacle_constraints.v_list[constraint_idx]
-            #     for t in range(1, self.horizon):  # same as your constraint loop
-            #         s = res.x[t*self.transition_dim:(t+1)*self.transition_dim]
-            #         margin = s @ P @ s - q @ s + v
-            #         min_margin = min(min_margin, margin)
-
-            # print("[Projection] min obstacle margin:", float(min_margin))
-            
-            sol_np[i] = res.x # Save the optimized trajectory vector.
-            #Compute a “projection cost” (a measure of how much the trajectory changed).
             projection_costs[i] = 0.5 * sol_np[i] @ Q @ sol_np[i] + r_np[i] @ sol_np[i] + 0.5 * trajectory_np[i] @ Q @ trajectory_np[i]
-            # print("[Projection] cost:", projection_costs[i])
-
-            # if np.linalg.norm(A_double @ res.x - b_double) > 1e-3:
-            #     print('Equality constraints not satisfied!')
-            # if np.any(C_double @ res.x > d_double + 1e-3):
-            #     print('Inequality constraints not satisfied!')
 
         sol = torch.tensor(sol_np, device=self.device).reshape(dims) #Reshape the solution back to dims
 
         # print(f'Projection time {self.solver}:', time.time() - start_time)
-        return sol, projection_costs    # only implemented for proxsuite and scipy and parallelize=False
+        return sol, projection_costs    # only implemented for proxsuite and scipy
+
+    def _get_pool(self, n_workers):
+        # 'spawn' (not 'fork'): the parent process holds an active CUDA context
+        # (torch on self.device), and forking a CUDA-initialized process is unsafe.
+        if self._pool is None:
+            self._pool = ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context('spawn'))
+        return self._pool
+
+    def __del__(self):
+        if getattr(self, '_pool', None) is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
     
     def compute_gradient(self, trajectory, constraints=None):
         """
@@ -249,21 +291,23 @@ class Projector:
         grad1 = grad1.reshape(trajectory.shape)
         grad2 = grad2.reshape(trajectory.shape)
 
-        # Obstacle constraints
-        grad3 = np.zeros_like(trajectory_np)
+        # Obstacle constraints — vectorized across batch and timestep (was a triple-nested
+        # Python loop over obstacle x timestep x batch item; same math, same per-obstacle
+        # accumulation, just computed as batched array ops instead of scalar Python iterations).
+        batch_size = trajectory_np.shape[0]
+        S_all = trajectory_np.reshape(batch_size, self.horizon, self.transition_dim)
+        S = S_all[:, 1:, :]  # (B, horizon-1, transition_dim), t = 1..horizon-1
+        grad3 = np.zeros_like(S_all)
         for constraint_idx in range(len(self.obstacle_constraints.P_list)):
             P = self.obstacle_constraints.P_list[constraint_idx]
             q = self.obstacle_constraints.q_list[constraint_idx]
             v = self.obstacle_constraints.v_list[constraint_idx]
-            for t in range(1, self.horizon):
-                start_idx = t * self.transition_dim
-                end_idx = (t + 1) * self.transition_dim
-                for i in range(trajectory.shape[0]):
-                    if trajectory_np[i, start_idx: end_idx] @ P @ trajectory_np[i, start_idx: end_idx] + q @ trajectory_np[i, start_idx: end_idx] <= v:
-                        continue
-                    else:
-                        grad3[i, start_idx: end_idx] -= 2 * P @ trajectory_np[i, start_idx: end_idx] + q   
-        grad3 = torch.tensor(grad3, device=self.device).reshape(trajectory.shape)
+            s_dot_q = S @ q                                          # (B, T)
+            s_P_s = np.einsum('bti,ij,btj->bt', S, P, S)             # (B, T), s^T P s
+            violated = (s_P_s + s_dot_q) > v                         # (B, T)
+            grad_dir = 2.0 * (S @ P.T) + q                           # (B, T, transition_dim), == 2*P@s + q per (b,t)
+            grad3[:, 1:, :] -= grad_dir * violated[..., None]
+        grad3 = torch.tensor(grad3.reshape(trajectory_np.shape), device=self.device).reshape(trajectory.shape)
         
         if self.gradient_weights is not None:
             grad1 = grad1 * self.gradient_weights[0]

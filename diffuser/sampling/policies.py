@@ -11,6 +11,21 @@ from diffuser.datasets.preprocessing import get_policy_preprocess_fn
 Trajectories = namedtuple('Trajectories', 'actions observations')
 
 
+def temporal_consistency_distances(candidates, reference):
+    """Per-candidate distance between candidates[:, :-1] and reference[:, 1:]
+    (the overlap between this step's window and the previously chosen trajectory,
+    shifted by one). Lower means more consistent with what was already committed to."""
+    return np.linalg.norm(candidates[:, :-1, :] - reference[:, 1:, :], axis=(1, 2))
+
+
+def sum_projection_costs(projection_costs, batch_size):
+    """Sum a {timestep: per-candidate cost} dict into a single per-candidate total."""
+    costs_total = np.zeros(batch_size)
+    for _, cost in projection_costs.items():
+        costs_total = costs_total + np.asarray(cost)
+    return costs_total
+
+
 class Policy:
 
     def __init__(self, model, normalizer, scheduler=None, preprocess_fns=[], test_ret=0, projector=None, 
@@ -63,15 +78,12 @@ class Policy:
         
         # Sort according to similarity with previous observations
         if self.trajectory_selection == 'temporal_consistency' and not disable_projection and self.prev_observations is not None:   # Temporal consistency
-            order = np.argsort(np.linalg.norm(observations[:,:-1,:] - self.prev_observations[:,1:,:], axis=(1,2)))
+            order = np.argsort(temporal_consistency_distances(observations, self.prev_observations))
             which_trajectory = order[0]
             observations = observations[order]
 
         elif self.trajectory_selection == 'minimum_projection_cost' and not disable_projection:                                     # Minimum projection cost
-            costs_total = np.zeros(batch_size)
-            for timestep, cost in infos['projection_costs'].items():
-                costs_total += cost
-            which_trajectory = np.argmin(costs_total)
+            which_trajectory = np.argmin(sum_projection_costs(infos['projection_costs'], batch_size))
 
         else:                                                                                                                       # Random selection
             which_trajectory = 0

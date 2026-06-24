@@ -1,4 +1,5 @@
 import argparse
+import importlib
 import os
 import cv2
 from collections import deque
@@ -13,104 +14,31 @@ from matplotlib.patches import Rectangle, Circle
 
 import diffuser.utils as utils
 from diffuser.sampling.projection import Projector
+from diffuser.sampling.policies import temporal_consistency_distances, sum_projection_costs
 from metrics_logger import MetricsLogger   
-
-BOXES = [
-    # #experiment1
-    # (3.0,  0.2),
-    # (2.0, -0.2),
-    # (1.1,  0.2),
-    # (3.2, -0.3), #(3.7, -0.3),
-    # (2.3, -0.2),
-    # (1.6, -0.3),
-
-#   #experiment2
-    # (3.5, -0.4),
-    # (2.2, -0.4),
-    # (1.6, -0.4),
-    # (3.7, -0.4),
-    # (2.8, -0.4),
-    # (1.0, -0.4),
-    # (3.5, 0.7),
-    # (2.2, 0.7),
-    # (1.6, 0.7),
-    # (3.7, 0.7),
-    # (2.8, 0.7),
-    # (1.0, 0.7),
-
-    #experiment3
-    # (3.0,  0.2),
-    # (2.0, -0.2),
-    # (1.1,  0.2),
-    # (0.5, -0.7), #(3.7, -0.3),
-    # (0.5, 0.7),
-    # (1.6, -0.3),
-]
-
-CYLINDERS = [
-    #experiment1
-    (2.5, -0.4),
-    (2.3,  0.3),
-    (1.7,  0.4),
-    (3.0,  0.4),
-    (1.5, 0.4),#(2.0,  0.4), --- IGNORE ---
-    (2.0,  0.3),
-
-    (3.0,  0.2),
-    (2.0, -0.2),
-    (1.1,  0.2),
-    (3.2, -0.3), #(3.7, -0.3),
-    (2.3, -0.2),
-    (1.6, -0.3),
-
-#   #experiment2
-    # (1.4, 0.4),
-    # (2.8, 0.3),
-    # (1.2, 0.4),
-    # (3.5, 0.3),
-    # (2.0, 0.4),
-    # (2.5, 0.4),
-    # (1.4, -0.7),
-    # (2.8, -0.8),
-    # (1.2, -0.7),
-    # (3.5, -0.8),
-    # (3.2, -0.7),
-    # (2.5, -0.7),
-
-    # experiment3
-    # (1.0, -0.2),
-    # (2.3,  0.3),
-    # (1.7,  0.4),
-    # (3.0,  0.4),
-    # (1.5, 0.4), #(2.0,  0.4), --- IGNORE ---
-    # (2.0,  0.3),
-]
-
-corridor_halfspaces = [
-# [[-0.2, -0.2], [1.1, 0.0], 'above'],   # hard (\ shape)
-# [[-0.2, 0.2], [1.2, 0.0], 'below'],     # hard (/ shape) toprighthard
-# [[-0.2, -0.2], [1.1, 0.0], 'above'],   # easier (\ shape)
-# [[-0.2, 0.2], [1.2, 0.0], 'below'],   # easier (/ shape)
-# [[-0.2, -0.2], [1.1, 0.0], 'below'],   # easier (\ shape)
-# [[-0.2, 0.2], [1.2, 0.0], 'below'],   # easier (/ shape)
-]
+cfg = importlib.import_module("config.avoiding-crazyflie")
+BOXES = cfg.BOXES
+CYLINDERS = cfg.CYLINDERS
+corridor_halfspaces = cfg.CORRIDOR_HALFSPACES
+DEPTH_NEAR = cfg.DEPTH_NEAR
+DEPTH_FAR = cfg.DEPTH_FAR
 
 # Z flight-envelope halfspaces.
 # Format: (normal_3d, rhs)  →  normal · [x, y, z] <= rhs
 # tighten shrinks the envelope from both ends (ceiling down, floor up).
-WALL_HEIGHT = 1.0   # metres — obstacle / wall tops in the corridor
+# WALL_HEIGHT = 1.0   # metres — obstacle / wall tops in the corridor
 z_halfspaces = [
-    ([0.0, 0.0,  1.0], WALL_HEIGHT),   # z <=  1.0 m  — drone cannot fly above wall/ceiling
+    ([0.0, 0.0,  1.0], 1.0),   # z <=  1.0 m  — drone cannot fly above wall/ceiling
     ([0.0, 0.0, -1.0], 0.0),           # z >= 0.0 m   — drone cannot go underground
 ]
 
 projection_variants = [
-#   'dpcc-r', 
-#   'dpcc-r-tightened',
-#   'dpcc-c',
-#   'dpcc-c-tightened',
-#   'dpcc-t',
-#   'dpcc-t-tightened',
+  'dpcc-r', 
+  'dpcc-r-tightened',
+  'dpcc-c',
+  'dpcc-c-tightened',
+  'dpcc-t',
+  'dpcc-t-tightened',
   'diffuser',
   'gradient',
   'gradient-tightened',
@@ -364,6 +292,24 @@ def get_rgb_from_env(env):
     # print(frame.shape, frame.dtype, frame.min(), frame.max())
     return frame
 
+def get_obs_frame_from_env(env, use_depth):
+    """
+    Fetch one observation frame for the policy's history buffer.
+    Returns either:
+      - rgb: (H,W,3) uint8                          if use_depth=False
+      - (rgb, depth): (H,W,3) uint8, (H,W) float32  if use_depth=True
+    Depth comes from env.get_depth(), which already clamps non-finite
+    (inf/nan) pixels to DEPTH_FAR (see crazyflie_env.py), matching what
+    quadcopter.py does at collection time.
+    """
+    rgb = get_rgb_from_env(env)
+    if not use_depth:
+        return rgb
+    if not hasattr(env, "get_depth"):
+        raise RuntimeError("use_depth=True but env does not have get_depth() method.")
+    depth = env.get_depth()
+    return rgb, depth
+
 def preprocess_rgb_stack(rgb_hist):
     """
     rgb_hist: list/deque of To frames, each (H,W,3) uint8
@@ -374,6 +320,34 @@ def preprocess_rgb_stack(rgb_hist):
     arr = np.transpose(arr, (0, 3, 1, 2))  # (To,3,H,W)
     ten = torch.from_numpy(arr).unsqueeze(0)  # (1,To,3,H,W)
     return ten
+
+def preprocess_obs_stack(obs_hist, use_depth):
+    """
+    obs_hist: list/deque of To frames from get_obs_frame_from_env().
+    Returns torch tensor (1, To, 3, H, W) if use_depth=False,
+                          (1, To, 4, H, W) if use_depth=True (4th chan = normalized depth),
+    matching what CrazyflieImageDataset.__getitem__ builds for "obs_rgb" during training
+    (same DEPTH_NEAR/DEPTH_FAR clip-and-minmax normalization).
+    """
+    if not use_depth:
+        return preprocess_rgb_stack(obs_hist)
+
+    rgb_hist = [frame[0] for frame in obs_hist]
+    depth_hist = [frame[1] for frame in obs_hist]
+
+    rgb_ten = preprocess_rgb_stack(rgb_hist)  # (1,To,3,H,W)
+
+    depth = np.stack(depth_hist, axis=0)  # (To,H,W,1)
+    depth = np.squeeze(depth, axis=-1)  # (To,H,W)
+    non_finite = ~np.isfinite(depth)
+    if non_finite.any():
+        depth = depth.copy()
+        depth[non_finite] = DEPTH_FAR
+    depth = np.clip(depth, DEPTH_NEAR, DEPTH_FAR)
+    depth = (depth - DEPTH_NEAR) / (DEPTH_FAR - DEPTH_NEAR)  # -> [0,1]
+    depth_ten = torch.from_numpy(depth[None, :, None, :, :].astype(np.float32))  # (1,To,1,H,W)
+
+    return torch.cat([rgb_ten, depth_ten], dim=2)  # (1,To,4,H,W)
 
 def sample_action_candidates(diffusion, cond, horizon, action_dim, num_candidates, projector = None):
     """
@@ -403,17 +377,12 @@ def choose_trajectory(actions_real, infos, strategy="first", prev_actions_real=N
 
     if strategy == "temporal_consistency" and prev_actions_real is not None:
         # compare shifted action chunks
-        dists = np.linalg.norm(
-            actions_real[:, :-1, :] - prev_actions_real[:, 1:, :],
-            axis=(1, 2)
-        )
+        dists = temporal_consistency_distances(actions_real, prev_actions_real)
         return int(np.argmin(dists))
 
     if strategy == "minimum_projection_cost":
         if isinstance(infos, dict) and "projection_costs" in infos:
-            costs_total = np.zeros(K, dtype=np.float32)
-            for _, cost in infos["projection_costs"].items():
-                costs_total += np.asarray(cost, dtype=np.float32)
+            costs_total = sum_projection_costs(infos["projection_costs"], K)
             return int(np.argmin(costs_total))
 
     return 0
@@ -674,6 +643,7 @@ def build_position_projector(horizon_H, gradient, device, boxes, cylinders, norm
         diffusion_timestep_threshold=0.8,
         device=str(device),
         solver="scipy",           # your file uses scipy SLSQP path
+        parallelize=True,         # candidates solve independently — run them concurrently
     )
     return projector
 
@@ -686,25 +656,23 @@ def project_action_candidates_with_positions(projector, pos0, a_candidates_real,
       proj_costs: (K,)
     """
     K, H, _ = a_candidates_real.shape
-    proj_costs = np.zeros(K, dtype=np.float32)
-    a_proj_real = np.zeros_like(a_candidates_real, dtype=np.float32)
 
-    for k in range(K):
-        # integrate deltas -> positions (H+1,3)
-        pos_traj = np.zeros((H + 1, 3), dtype=np.float32)
-        pos_traj[0] = pos0.astype(np.float32)
-        pos_traj[1:] = pos_traj[0] + np.cumsum(a_candidates_real[k], axis=0)
+    # integrate deltas -> positions (K,H+1,3), all K candidates share pos0
+    pos_traj = np.zeros((K, H + 1, 3), dtype=np.float32)
+    pos_traj[:, 0] = pos0.astype(np.float32)
+    pos_traj[:, 1:] = pos_traj[:, :1] + np.cumsum(a_candidates_real, axis=1)
 
-        pos_t = torch.tensor(pos_traj[None, :, :], dtype=torch.float32, device=device)  # (1,H+1,3)
+    pos_t = torch.tensor(pos_traj, dtype=torch.float32, device=device)  # (K,H+1,3)
 
-        pos_proj_t, cost = projector.project(pos_t)  # (1,H+1,3), cost shape (1,)
-        pos_proj = pos_proj_t.squeeze(0).detach().cpu().numpy()  # (H+1,3)
+    # one batched call instead of K single-candidate calls — projector.project()
+    # already accepts a batched input, and building it once avoids rebuilding the
+    # (identical) constraint set K times.
+    pos_proj_t, proj_costs = projector.project(pos_t)  # (K,H+1,3), cost shape (K,)
+    pos_proj = pos_proj_t.detach().cpu().numpy()  # (K,H+1,3)
 
-        # convert back to deltas (H,3)
-        a_proj = pos_proj[1:] - pos_proj[:-1]
-
-        a_proj_real[k] = a_proj
-        proj_costs[k] = float(cost[0])
+    # convert back to deltas (K,H,3)
+    a_proj_real = (pos_proj[:, 1:] - pos_proj[:, :-1]).astype(np.float32)
+    proj_costs = proj_costs.astype(np.float32)
 
     return a_proj_real, proj_costs
 
@@ -733,6 +701,7 @@ def build_inloop_projector(horizon_H, device, tighten=0.0, dt=0.1):
         diffusion_timestep_threshold=0.8,
         device=str(device),
         solver="scipy",
+        parallelize=True,         # candidates solve independently — run them concurrently
     )
     return projector
 
@@ -756,11 +725,6 @@ def main():
                         help="Obstacle oscillation amplitude in metres (shared by all moving cylinders)")
     parser.add_argument("--obs_frequency", type=float, default=0.25,
                         help="Obstacle oscillation frequency in Hz (shared by all moving cylinders)")
-    parser.add_argument("--dynamic_proj_update", dest="dynamic_proj_update", action="store_true", default=True,
-                        help="Rebuild projector every step with actual cylinder positions "
-                             "(accurate but slower). On by default; use --no_dynamic_proj_update to disable.")
-    parser.add_argument("--no_dynamic_proj_update", dest="dynamic_proj_update", action="store_false",
-                        help="Disable per-step projector rebuild; use static worst-case radius expansion instead.")
     parser.add_argument("--drone_radius", type=float, default=0.10)
     parser.add_argument("--dt", type=float, default=None)
     parser.add_argument("--record_video", action="store_true", default=False,
@@ -805,7 +769,6 @@ def main():
             args.dynamic_cyl_indices = indices
             args.obs_axes = axes
 
-    from isaac.scripts.crazyflie_env import Crazyflie, CrazyflieEnvCfg
     device = torch.device(args.device)
 
     # ------------------ Load trained experiment ------------------
@@ -816,6 +779,24 @@ def main():
     dataset = diff_exp.dataset
     diffusion = diff_exp.diffusion.to(device)
     diffusion.eval()
+
+    # RGB vs RGBD is determined by the trained checkpoint, not a CLI flag here —
+    # the dataset and model agree at train time (see traintransformer.py's
+    # consistency assert), so trust the model's own in_chans/use_depth.
+    use_depth = bool(getattr(diffusion.model, "use_depth", False))
+    assert bool(getattr(dataset, "use_depth", False)) == use_depth, (
+        f"Loaded checkpoint's model.use_depth={use_depth} but dataset.use_depth="
+        f"{getattr(dataset, 'use_depth', False)} -- mismatched run dir?"
+    )
+    print(f"[INFO] Running evaluation in {'RGB-D' if use_depth else 'RGB'} mode "
+          f"(use_depth={use_depth}, in_chans={getattr(diffusion.model, 'in_chans', 3)})")
+
+    # Propagate the detected mode to the FPV camera config before crazyflie_env_cfg
+    # (which builds CrazyflieSceneCfg.FPV_CAMERA_CFG's data_types from cfg.USE_DEPTH
+    # at import time) is imported, so the simulated camera actually has a depth
+    # channel whenever the loaded checkpoint needs one.
+    cfg.USE_DEPTH = use_depth
+    from isaac.scripts.crazyflie_env import Crazyflie, CrazyflieEnvCfg
 
     # ── derive eval dt from the trained dataset ───────────────────────────
     # a0_real is a displacement over `dataset.control_dt` seconds of sim time
@@ -836,7 +817,7 @@ def main():
     print(f"[INFO] Using eval dt={eval_dt} (dataset control_dt={expected_dt})")
 
     # ------------------ Create env ------------------
-    cfg = CrazyflieEnvCfg(
+    env_cfg = CrazyflieEnvCfg(
         num_envs=1,
         device=str(device),
         dynamic_obstacles=args.dynamic_obstacles_enabled,
@@ -846,7 +827,7 @@ def main():
         obs_axes=args.obs_axes,
         dt=eval_dt,
     )
-    env = Crazyflie(cfg)
+    env = Crazyflie(env_cfg)
 
     run_name = Path(args.run_dir).parent.name  # e.g. "H16_K20_ENCvit_LAT256"
     enc_match = re.search(r'E([^_]+)', run_name)
@@ -899,7 +880,7 @@ def main():
         if vcfg["use_projection"]:
             proj_dt = vcfg["dt"] if vcfg["dt"] is not None else 0.1
             # All cylinders (static and dynamic) use the same base radius.
-            # Dynamic ones get their actual positions via --dynamic_proj_update.
+            # Dynamic ones get their actual positions via --dynamic_obstacles (see below).
             pos_projector = build_position_projector(
                 horizon_H=horizon, gradient=gradient, device=device,
                 boxes=BOXES, cylinders=CYLINDERS,
@@ -955,11 +936,11 @@ def main():
         write_video_frame()
 
 
-        # init rgb history
-        rgb0 = get_rgb_from_env(env)
+        # init rgb(d) history
+        rgb0 = get_obs_frame_from_env(env, use_depth)
         rgb_hist = deque(maxlen=To)
         for _ in range(To):
-            rgb_hist.append(rgb0.copy())
+            rgb_hist.append((rgb0[0].copy(), rgb0[1].copy()) if use_depth else rgb0.copy())
 
         traj_xyz = []
         actions_taken = []
@@ -982,7 +963,7 @@ def main():
                 cmd_xyz = pos.copy()
                 cmd_xyz[:3] = pos[:3] + gain * (target[:3] - pos[:3])
                 obs_next, rew, done_vec, info = env.step(cmd_xyz)
-                rgb = get_rgb_from_env(env)
+                rgb = get_obs_frame_from_env(env, use_depth)
                 rgb_hist.append(rgb)
                 write_video_frame()
                 pos2 = obs_next[0]
@@ -996,7 +977,7 @@ def main():
 
             # ── diffusion path ────────────────────────────────────────────
             # build condition
-            obs_rgb_t = preprocess_rgb_stack(rgb_hist).to(device)  # (1,To,3,H,W)
+            obs_rgb_t = preprocess_obs_stack(rgb_hist, use_depth).to(device)  # (1,To,3or4,H,W)
             cond = {"obs_rgb": obs_rgb_t}
             # a_chunk = sample_action_chunk(diffusion=diffusion,cond=cond,horizon=horizon,action_dim=action_dim,device=device,)
             # a_chunk_real = dataset.action_normalizer.unnormalize(a_chunk)
@@ -1026,11 +1007,11 @@ def main():
             # which = int(np.argmin(proj_costs))
 
             # ── per-step projector update ──────────
-            # Always gated on --dynamic_proj_update alone (not on dynamic_obstacles):
-            # get_cylinder_positions() returns rest positions for static cylinders, so
-            # rebuilding every step is a harmless no-op when nothing is actually moving,
-            # and keeps the same code path for static-only and mixed static/dynamic runs.
-            if args.dynamic_proj_update and vcfg["use_projection"]:
+            # Gated on --dynamic_obstacles: with no dynamic obstacles,
+            # get_cylinder_positions() returns the same rest positions every step, so
+            # rebuilding the projector (full constraint-matrix reconstruction) would be
+            # a no-op — skip it and keep reusing the projector built once above.
+            if args.dynamic_obstacles_enabled and vcfg["use_projection"]:
                 # get_cylinder_positions() returns current positions for ALL cylinders
                 # (static ones at rest, dynamic ones at actual current position)
                 cyl_now = env.get_cylinder_positions()
@@ -1091,8 +1072,8 @@ def main():
             print(f"[MODEL OUTPUT] which={which} a0_real={a0_real}" f" cmd_xyz={cmd_xyz[:3]}")
             obs_next, rew, done_vec, info = env.step(cmd_xyz)
 
-            # update rgb history after step
-            rgb = get_rgb_from_env(env)
+            # update rgb(d) history after step
+            rgb = get_obs_frame_from_env(env, use_depth)
             rgb_hist.append(rgb)
             write_video_frame()
             # if step % 500 == 0:
