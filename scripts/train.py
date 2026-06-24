@@ -7,9 +7,6 @@ import diffuser.utils as utils
 exp = 'avoiding-crazyflie'
 
 seeds = [9] 
-#Repeat the entire training pipeline across seeds(which is 5) to measure robustness 
-#or pick the best checkpoint. Why? Diffusion models (and RL/data-driven models generally) 
-#can vary with initialization; multiple seeds give a fairer estimate.
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -22,11 +19,6 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = False    # disables auto-tuner (non-deterministic)
     print(f"[seed] All RNG sources set to {seed}")
 
-def worker_init_fn(worker_id):
-    worker_seed = torch.initial_seed() % (2**32)
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-
 class Parser(utils.Parser):
     dataset: str = exp
     config: str = 'config.' + exp
@@ -34,9 +26,7 @@ class Parser(utils.Parser):
 for seed in seeds:
     args = Parser().parse_args(experiment='diffusion', seed=seed)
 
-    # args.seed = seed
     set_seed(args.seed)
-    # torch.manual_seed(args.seed)
 
     print(f"\n================= SEED {seed} =================")
     print(f"Dataset: {args.dataset}")
@@ -58,9 +48,7 @@ for seed in seeds:
         use_padding=args.use_padding,
         max_path_length=args.max_path_length,
         include_returns=args.include_returns,
-        # returns_scale=args.returns_scale,
         returns_scale=args.max_path_length,               # Because the reward is <= 1 in each timestep
-        # returns_scale=args.n_diffusion_steps,
         discount=args.discount,
         stride=getattr(args, 'stride', 1),
         dt=getattr(args, 'dt', 0.005),
@@ -80,7 +68,6 @@ for seed in seeds:
 
     print(f"Total episodes parsed: {len(dataset.episodes)}")
     print(f"Total training indices: {len(dataset.indices)}")
-    # if train_test_split < 1:
     print(f"Training samples: {int(0.9 * len(dataset.indices))}")
     print(f"Min/max action values pre-norm: {dataset.action_normalizer.mins}, {dataset.action_normalizer.maxs}")
 
@@ -148,9 +135,9 @@ for seed in seeds:
         args.diffusion,
         savepath=(args.savepath, 'diffusion_config.pkl'),
         horizon=args.horizon,
-        observation_dim=0,
+        observation_dim=observation_dim,
         action_dim=action_dim,
-        goal_dim=0,
+        goal_dim=goal_dim,
         n_timesteps=args.n_diffusion_steps,
         loss_type=args.loss_type,
         clip_denoised=args.clip_denoised,

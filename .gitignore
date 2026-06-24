@@ -25,4 +25,11 @@ all_variants_xy.pdf
 # Dead/orphaned code, kept on disk but untracked
 diffuser/models/mlp.py
 isaac/scripts/quadcopter_env.py
-diffuser/datasets/minari-dataset-generation/
+scripts/visualize_data_constraints.py
+scripts/plot_results.py
+scripts/plot_avoiding_env.py
+scripts/make_traj_gif.py
+scripts/load_results.py
+scripts/latent_viz.py
+scripts/eval.py
+scripts/attention_viz.py
