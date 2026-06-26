@@ -23,7 +23,8 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.scene import InteractiveScene
 
 
-from .crazyflie_env_cfg import CrazyflieSceneCfg, CYLINDERS, CORRIDOR_LENGTH, DEPTH_FAR
+from .crazyflie_env_cfg import (CrazyflieSceneCfg, CYLINDERS, CORRIDOR_LENGTH, DEPTH_FAR,
+                                _SPHERES_XYZ as SPHERES_XYZ, SPHERE_RADIUS)
 
 def quat_to_yaw(quat_xyzw: torch.Tensor) -> torch.Tensor:
     """quat_xyzw: (...,4) -> yaw (...,)"""
@@ -267,6 +268,7 @@ class CrazyflieEnvCfg:
     min_z: float = 0.02         # if z < 0.2 -> fail
     reset_on_fail: bool = False # if True, env auto-resets inside step()
     success_radius: float = 0.2
+    drone_radius: float = 0.10   # Crazyflie body radius (m) for collision checks
     dynamic_obstacles: bool = False
     obs_amplitude: float = 0.25   # sinusoid amplitude in metres
     obs_frequency: float = 0.25   # oscillation frequency in Hz
@@ -274,6 +276,9 @@ class CrazyflieEnvCfg:
     obs_axes: list | None = None  # per-dynamic-cylinder motion axis: "x", "y", or "xy".
                                    # None = all "y" (legacy lateral-only behaviour).
                                    # Must match length of dynamic_cyl_indices (or len(CYLINDERS) if that's None).
+    floating_spheres: bool = False     # enable planet-like floating sphere obstacles
+    sphere_amplitude: float = 0.20     # per-axis sinusoid amplitude for spheres (m)
+    sphere_frequency: float = 0.20     # base oscillation frequency for spheres (Hz)
 
     goal_y = 1.0
     goal_z = 1.0
@@ -330,7 +335,8 @@ class Crazyflie(gym.Env):
         self.robot_mass = self.robot.root_physx_view.get_masses().sum() #remove[0] if you want per-env mass
         self.gravity = torch.tensor(self._sim.cfg.gravity, device=self.device).norm()
         self.hover_thrust = self.robot_mass * self.gravity / 4.0  # per rotor
-        self.count= 100
+        self.count = 100
+        self._cyl_phys_radius = 0.06   # matches CylinderCfg radius in scene
 
         # episode bookkeeping
         self.success_count = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
@@ -355,7 +361,12 @@ class Crazyflie(gym.Env):
             self._obs_amplitude = cfg.obs_amplitude
             self._obs_frequency = cfg.obs_frequency
 
-            axes = list(cfg.obs_axes) if cfg.obs_axes is not None else ["y"] * len(dyn_idx)
+            if cfg.obs_axes is None:
+                axes = ["y"] * len(dyn_idx)
+            elif len(cfg.obs_axes) == 1:
+                axes = list(cfg.obs_axes) * len(dyn_idx)   # broadcast single axis to all
+            else:
+                axes = list(cfg.obs_axes)
             if len(axes) != len(dyn_idx):
                 raise ValueError(
                     f"obs_axes length ({len(axes)}) must match dynamic_cyl_indices length ({len(dyn_idx)})"
@@ -365,6 +376,29 @@ class Crazyflie(gym.Env):
             self._x_clamp = (0.3, CORRIDOR_LENGTH - 0.3)
             self._y_clamp = (-0.85, 0.85)
         self._obs_t = 0.0
+
+        # ── floating sphere state (always track objects; park when inactive) ──
+        self._floating_spheres = cfg.floating_spheres
+        if len(SPHERES_XYZ) > 0:
+            N = len(SPHERES_XYZ)
+            self._sph_objs  = [self.scene[f"sph_{i:02d}"] for i in range(N)]
+            self._sph_x0    = [float(p[0]) for p in SPHERES_XYZ]
+            self._sph_y0    = [float(p[1]) for p in SPHERES_XYZ]
+            self._sph_z0    = [float(p[2]) for p in SPHERES_XYZ]
+            self._sph_ph_x  = [2.0 * math.pi * k / N                   for k in range(N)]
+            self._sph_ph_y  = [2.0 * math.pi * k / N + math.pi / 3     for k in range(N)]
+            self._sph_ph_z  = [2.0 * math.pi * k / N + 2*math.pi / 3   for k in range(N)]
+            self._sph_amp   = cfg.sphere_amplitude
+            self._sph_freq  = cfg.sphere_frequency
+            self._sph_x_clamp = (0.3, CORRIDOR_LENGTH - 0.3)
+            self._sph_y_clamp = (-0.85, 0.85)
+            self._sph_z_clamp = (0.10, 1.80)
+            # Park spheres immediately if not active (they are in the corridor by default)
+            if not self._floating_spheres:
+                self._park_spheres()
+        else:
+            self._sph_objs = []
+
 
     # ------------------------------------------------------------------
     # Dynamic obstacle helpers
@@ -405,6 +439,69 @@ class Crazyflie(gym.Env):
             pose[:, 2] = self._cyl_z0[i]
             pose[:, 3] = 1.0
             cyl_obj.write_root_pose_to_sim(pose)
+
+    # ------------------------------------------------------------------
+    # Floating sphere helpers
+    # ------------------------------------------------------------------
+    def _step_floating_spheres(self, dt: float) -> None:
+        """Full 3D sinusoidal motion for floating sphere obstacles.
+        Each axis oscillates at a different frequency multiple so the
+        combined path never exactly repeats within a normal episode."""
+        t = self._obs_t
+        A = self._sph_amp
+        f = self._sph_freq
+        for i, sph_obj in enumerate(self._sph_objs):
+            dx = A * math.sin(2.0 * math.pi * f * 0.90 * t + self._sph_ph_x[i])
+            dy = A * math.sin(2.0 * math.pi * f * 1.30 * t + self._sph_ph_y[i])
+            dz = A * math.sin(2.0 * math.pi * f * 0.70 * t + self._sph_ph_z[i])
+            new_x = max(self._sph_x_clamp[0], min(self._sph_x_clamp[1], self._sph_x0[i] + dx))
+            new_y = max(self._sph_y_clamp[0], min(self._sph_y_clamp[1], self._sph_y0[i] + dy))
+            new_z = max(self._sph_z_clamp[0], min(self._sph_z_clamp[1], self._sph_z0[i] + dz))
+            pose = torch.zeros(self.num_envs, 7, device=self.device)
+            pose[:, 0] = new_x
+            pose[:, 1] = new_y
+            pose[:, 2] = new_z
+            pose[:, 3] = 1.0
+            sph_obj.write_root_pose_to_sim(pose)
+
+    def _reset_floating_spheres(self) -> None:
+        """Return all floating spheres to their rest positions."""
+        for i, sph_obj in enumerate(self._sph_objs):
+            pose = torch.zeros(self.num_envs, 7, device=self.device)
+            pose[:, 0] = self._sph_x0[i]
+            pose[:, 1] = self._sph_y0[i]
+            pose[:, 2] = self._sph_z0[i]
+            pose[:, 3] = 1.0
+            sph_obj.write_root_pose_to_sim(pose)
+
+    def _park_spheres(self) -> None:
+        """Move all sphere objects to z=5 m (above play area) so they don't collide."""
+        for sph_obj in self._sph_objs:
+            pose = torch.zeros(self.num_envs, 7, device=self.device)
+            pose[:, 0] = 0.0
+            pose[:, 1] = 0.0
+            pose[:, 2] = 5.0
+            pose[:, 3] = 1.0
+            sph_obj.write_root_pose_to_sim(pose)
+
+    def get_sphere_positions(self) -> list:
+        """Returns current (x, y, z) of every floating sphere.
+        If floating_spheres is disabled returns rest positions."""
+        if not self._floating_spheres or not SPHERES_XYZ:
+            return [(float(p[0]), float(p[1]), float(p[2])) for p in SPHERES_XYZ]
+        t = self._obs_t
+        A = self._sph_amp
+        f = self._sph_freq
+        positions = []
+        for i in range(len(SPHERES_XYZ)):
+            dx = A * math.sin(2.0 * math.pi * f * 0.90 * t + self._sph_ph_x[i])
+            dy = A * math.sin(2.0 * math.pi * f * 1.30 * t + self._sph_ph_y[i])
+            dz = A * math.sin(2.0 * math.pi * f * 0.70 * t + self._sph_ph_z[i])
+            x = max(self._sph_x_clamp[0], min(self._sph_x_clamp[1], self._sph_x0[i] + dx))
+            y = max(self._sph_y_clamp[0], min(self._sph_y_clamp[1], self._sph_y0[i] + dy))
+            z = max(self._sph_z_clamp[0], min(self._sph_z_clamp[1], self._sph_z0[i] + dz))
+            positions.append((x, y, z))
+        return positions
 
     def get_cylinder_positions(self) -> list:
         """Returns current (x, y) of every cylinder.
@@ -452,6 +549,10 @@ class Crazyflie(gym.Env):
         if self._dynamic_obs:
             self._obs_t = 0.0
             self._reset_dynamic_obstacles()
+        if self._floating_spheres:
+            self._reset_floating_spheres()
+        elif self._sph_objs:
+            self._park_spheres()
         # ── Reset PID integrator state ──────────────────────────────
         if hasattr(controller_motor_forces, "vel_int"):
             controller_motor_forces.vel_int.zero_()
@@ -478,6 +579,27 @@ class Crazyflie(gym.Env):
         torques = torch.zeros_like(forces)
         if self._dynamic_obs:
             self._step_dynamic_obstacles(self._sim.get_physics_dt())
+        if self._floating_spheres:
+            self._step_floating_spheres(self._sim.get_physics_dt())
+
+        # Pre-compute obstacle positions once per control step (cylinders don’t
+        # move during the inner sub-step loop, so this is correct and avoids
+        # rebuilding the tensor 100× per step).
+        _cyl_list = self.get_cylinder_positions()   # current positions (dynamic or static)
+        if _cyl_list:
+            _cyl_xy = torch.tensor(
+                [[p[0], p[1]] for p in _cyl_list], dtype=torch.float32, device=self.device
+            )  # (N_cyl, 2)
+            _cyl_collision_r = self._cyl_phys_radius + self.cfg.drone_radius
+        else:
+            _cyl_xy = None
+
+        if self._floating_spheres and self._sph_objs:
+            _sph_list = self.get_sphere_positions()
+            _sph_xyz = torch.tensor(_sph_list, dtype=torch.float32, device=self.device)  # (N_sph, 3)
+            _sph_collision_r = SPHERE_RADIUS + self.cfg.drone_radius
+        else:
+            _sph_xyz = None
 
         for _ in range(self.count):
             forces[..., 2] = controller_motor_forces(
@@ -496,17 +618,32 @@ class Crazyflie(gym.Env):
             self._sim.step()
             self.robot.update(self._sim.get_physics_dt())
             self.scene.update(self._sim.get_physics_dt()) #camera won’t refresh.
-            
+
             pos_world = self._pos_world()
             x = pos_world[:, 0]
             y = pos_world[:, 1]
             z = pos_world[:, 2]
 
-            
+            # goal
             self.success_acc |= (x >= self.cfg.gate_x_max)
-            self.fell_acc    |= (z < self.cfg.min_z)
-            self.fell_acc    |= (y >= self.cfg.goal_y)
-            self.fell_acc    |= (y <= -self.cfg.goal_y)
+
+            # floor / walls / ceiling
+            self.fell_acc |= (z < self.cfg.min_z)                   # hit ground
+            self.fell_acc |= (y >=  self.cfg.goal_y)                 # hit left wall
+            self.fell_acc |= (y <= -self.cfg.goal_y)                 # hit right wall
+            self.fell_acc |= (z > 1.0)                               # hit ceiling
+
+            # cylinder collision: drone centre within (cyl_radius + drone_radius) of any cyl
+            if _cyl_xy is not None:
+                drone_xy = pos_world[:, :2].unsqueeze(1)             # (N_env, 1, 2)
+                dists_cyl = torch.norm(drone_xy - _cyl_xy.unsqueeze(0), dim=-1)  # (N_env, N_cyl)
+                self.fell_acc |= (dists_cyl < _cyl_collision_r).any(dim=-1)
+
+            # floating sphere collision
+            if _sph_xyz is not None:
+                drone_xyz = pos_world.unsqueeze(1)                   # (N_env, 1, 3)
+                dists_sph = torch.norm(drone_xyz - _sph_xyz.unsqueeze(0), dim=-1)  # (N_env, N_sph)
+                self.fell_acc |= (dists_sph < _sph_collision_r).any(dim=-1)
 
             done = self.success_acc | self.fell_acc
             if done.all():

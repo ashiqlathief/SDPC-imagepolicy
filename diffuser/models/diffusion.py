@@ -143,6 +143,14 @@ class GaussianDiffusion(nn.Module):
         else:
             assert RuntimeError()
 
+        # In-loop SLSQP: project predicted-clean trajectory against obstacles before q_posterior
+        if projector is not None and getattr(projector, 'inloop_slsqp', False) and getattr(projector, 'pos0', None) is not None:
+            if self.goal_dim > 0:
+                x_proj = projector.project_inloop(x_recon[:, :, :-self.goal_dim])
+                x_recon = torch.cat([x_proj, x_recon[:, :, -self.goal_dim:]], dim=-1)
+            else:
+                x_recon = projector.project_inloop(x_recon)
+
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(
                 x_start=x_recon, x_t=x, t=t)
 
@@ -195,7 +203,12 @@ class GaussianDiffusion(nn.Module):
         for i in reversed(range(last_timestep, self.n_timesteps)):
             t = i if i >= 0 else 0
             timesteps = torch.full((batch_size,), t, device=device, dtype=torch.long)
-            if projector is not None and projector.gradient and t <= projector.diffusion_timestep_threshold * self.n_timesteps:
+            inloop_active = (
+                projector is not None and
+                t <= projector.diffusion_timestep_threshold * self.n_timesteps and
+                (projector.gradient or getattr(projector, 'inloop_slsqp', False))
+            )
+            if inloop_active:
                 x = self.p_sample(x, cond, timesteps, returns, projector=projector, constraints=constraints)
             else:
                 x = self.p_sample(x, cond, timesteps, returns)
@@ -205,7 +218,11 @@ class GaussianDiffusion(nn.Module):
 
             # x = apply_conditioning(x, cond, self.action_dim, goal_dim=self.goal_dim)
 
-            if projector is not None and not projector.gradient and t <= projector.diffusion_timestep_threshold * self.n_timesteps:
+            # Legacy action-space in-loop projection (old inloop_projector path).
+            # Skipped when inloop_slsqp=True — that case is handled inside p_mean_variance.
+            if (projector is not None and not projector.gradient
+                    and not getattr(projector, 'inloop_slsqp', False)
+                    and t <= projector.diffusion_timestep_threshold * self.n_timesteps):
                 if self.goal_dim > 0:
                     x[:,:,:-self.goal_dim], projection_costs = projector.project(x[:,:,:-self.goal_dim], constraints)
                     costs[i] = projection_costs

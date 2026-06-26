@@ -14,6 +14,8 @@ cfg = importlib.import_module("config.avoiding-crazyflie")
 
 _BOXES_XY = cfg.BOXES
 _CYLINDERS_XY = cfg.CYLINDERS
+_SPHERES_XYZ = getattr(cfg, 'SPHERES', [])
+SPHERE_RADIUS = getattr(cfg, 'SPHERE_RADIUS', 0.10)
 USE_DEPTH = cfg.USE_DEPTH
 DEPTH_NEAR = cfg.DEPTH_NEAR
 DEPTH_FAR = cfg.DEPTH_FAR
@@ -25,8 +27,9 @@ CEILING_HEIGHT  = WALL_HEIGHT          # = 1.0  (flush with obstacle tops)
 CEILING_Z_CENTER = CEILING_HEIGHT + WALL_THICKNESS / 2.0   # centre of roof slab
 BOXES = [(x, y, 1.0 / 2.0) for (x, y) in _BOXES_XY]
 CYLINDERS = [(x, y, 1.0 / 2.0) for (x, y) in _CYLINDERS_XY]
-RED_MAT = PreviewSurfaceCfg(diffuse_color=(0.85, 0.10, 0.10))
+RED_MAT   = PreviewSurfaceCfg(diffuse_color=(0.85, 0.10, 0.10))
 GREEN_MAT = PreviewSurfaceCfg(diffuse_color=(0.10, 0.85, 0.10))
+BLUE_MAT  = PreviewSurfaceCfg(diffuse_color=(0.10, 0.30, 0.90))
 
 CRAZYFLIE = ArticulationCfg(
         spawn=sim_utils.MultiUsdFileCfg(
@@ -269,4 +272,20 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
             ),
             init_state=RigidObjectCfg.InitialStateCfg(pos=_pos, rot=(1, 0, 0, 0)),
         )
-    del _i, _pos  # prevent loop vars from leaking into the class namespace
+    if CYLINDERS:
+        del _i, _pos
+
+    # ── Floating sphere obstacles (planet mode) ────────────────────────────────
+    for _i, _pos in enumerate(_SPHERES_XYZ):
+        vars()[f"sph_{_i:02d}"] = RigidObjectCfg(
+            prim_path=f"/World/envs/env_.*/Sph{_i:02d}",
+            spawn=sim_utils.SphereCfg(
+                visual_material=RED_MAT,
+                radius=SPHERE_RADIUS,
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=_pos, rot=(1, 0, 0, 0)),
+        )
+    if _SPHERES_XYZ:
+        del _i, _pos

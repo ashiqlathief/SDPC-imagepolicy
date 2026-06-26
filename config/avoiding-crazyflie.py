@@ -1,3 +1,4 @@
+import numpy as np
 from diffuser.utils import watch
 
 USE_DEPTH = False
@@ -23,7 +24,43 @@ CYLINDERS = [
     (1.6, -0.3),
 ]
 
+# Floating sphere obstacles — (x, y, z) rest positions, all in metres.
+# Spread along the corridor at varied heights so the drone must navigate
+# in all three dimensions to avoid them.
+SPHERE_RADIUS = 0.10   # physical radius (m); Minkowski exclusion = SPHERE_RADIUS + drone_radius
+SPHERES = [
+    # # x     y      z     spread along corridor, varied height & lateral position
+    # (0.5,  0.35,  0.70),
+    # (0.9, -0.30,  0.35),
+    # (1.3,  0.10,  0.65),
+    # (1.6, -0.45,  0.50),
+    # (2.0,  0.40,  0.30),
+    # (2.3, -0.10,  0.75),
+    # (2.6,  0.25,  0.45),
+    # (2.9, -0.40,  0.65),
+    # (3.2,  0.00,  0.30),
+    # (3.5, -0.20,  0.70),
+    # (3.8,  0.35,  0.50),
+    # (4.0, -0.05,  0.40),
+    # (2.5, -0.4, 0.4),
+    # (2.3,  0.3, 0.8),
+    # (1.7,  0.4, 0.6),
+    # (3.0,  0.4, 0.5),
+    # (1.5,  0.4, 0.7),
+    # (2.0,  0.3, 0.9),
+    # (3.0,  0.2, 0.8),
+    # (2.0, -0.2, 0.6),
+    # (1.1,  0.2, 0.4),
+    # (3.2, -0.3, 0.5),
+    # (2.3, -0.2, 0.7),
+    # (1.6, -0.3, 0.6),
+]
+
 CORRIDOR_HALFSPACES = [
+    # upper diagonal: y <= -0.1*x + 0.75  (ceiling slopes down toward the goal end)
+    [np.array([0.0, 0.75]), np.array([4.0, -0.15]), 'below'],
+    # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)
+    # [np.array([0.0, -0.75]), np.array([4.0, -0.35]), 'above'],
 ]
 
 #------------------------ base ------------------------#

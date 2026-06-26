@@ -316,6 +316,36 @@ class Projector:
         
         return grad1 + grad2 + grad3 
 
+    def project_inloop(self, x_recon_norm):
+        """
+        In-loop SLSQP projection during denoising.
+        Converts normalized delta-actions → world positions, projects against obstacles,
+        then converts back. Requires self.pos0 (numpy (3,)) and self.action_normalizer
+        to be set before each denoising call.
+
+        x_recon_norm: (K, H, action_dim) normalized delta-actions (torch tensor)
+        Returns:      (K, H, action_dim) normalized delta-actions (torch tensor)
+        """
+        K, H, D = x_recon_norm.shape
+        x_np = x_recon_norm.detach().cpu().numpy()          # (K, H, D)
+        x_real = self.action_normalizer.unnormalize(x_np)   # (K, H, D)
+
+        # integrate deltas → absolute world positions  (K, H+1, D)
+        pos_traj = np.zeros((K, H + 1, D), dtype=np.float32)
+        pos_traj[:, 0] = self.pos0[:D].astype(np.float32)
+        pos_traj[:, 1:] = pos_traj[:, :1] + np.cumsum(x_real, axis=1)
+
+        pos_t = torch.tensor(pos_traj, dtype=torch.float32, device=self.device)
+        pos_proj_t, _ = self.project(pos_t)                 # (K, H+1, D)
+        pos_proj = pos_proj_t.detach().cpu().numpy()
+
+        # positions → real deltas → renormalize
+        x_real_proj = (pos_proj[:, 1:] - pos_proj[:, :-1]).astype(np.float32)
+        x_norm_proj = self.action_normalizer.normalize(x_real_proj)
+        np.clip(x_norm_proj, -1.0, 1.0, out=x_norm_proj)
+
+        return torch.tensor(x_norm_proj, dtype=torch.float32, device=x_recon_norm.device)
+
     def append_linear_constraint(self, constraint):
         # build constraints in separate modules, then concatenate their matrices, solver sees all constraints at once.
         # dim=0 = append rows. Column count matches transition_dim*horizon.
