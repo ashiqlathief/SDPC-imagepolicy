@@ -32,5 +32,5 @@ minari
 # Isaac Lab experiment (crazyflie)
 # Isaac Lab and IsaacSim must be installed separately following:
 # https://isaac-sim.github.io/IsaacLab/main/source/setup/installation
-# Additional packages on top of IsaacLab (see requirements_dpcc_isaac.txt):
-#   pip install -r requirements_dpcc_isaac.txt
+# Additional packages on top of IsaacLab (see requirements_sdpc_isaac.txt):
+#   pip install -r requirements_sdpc_isaac.txt

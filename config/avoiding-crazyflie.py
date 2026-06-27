@@ -57,10 +57,17 @@ SPHERES = [
 ]
 
 CORRIDOR_HALFSPACES = [
+    # # upper diagonal: y <= -0.1*x + 0.75  (ceiling slopes down toward the goal end)
+    # [np.array([0.0, 0.75]), np.array([4.0, -0.15]), 'below'],
+
+    # # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)
+    # [np.array([0.0, -0.75]), np.array([4.0, 0.15]), 'above'],
+
+    # both
     # upper diagonal: y <= -0.1*x + 0.75  (ceiling slopes down toward the goal end)
-    [np.array([0.0, 0.75]), np.array([4.0, -0.15]), 'below'],
+    [np.array([0.0, 0.75]), np.array([4.0, 0.15]), 'below'],
     # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)
-    # [np.array([0.0, -0.75]), np.array([4.0, -0.35]), 'above'],
+    [np.array([0.0, -0.75]), np.array([4.0, -0.15]), 'above'],
 ]
 
 #------------------------ base ------------------------#

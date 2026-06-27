@@ -1,6 +1,5 @@
 
 import os
-import csv
 import json
 import time
 import numpy as np
@@ -298,44 +297,12 @@ class MetricsLogger:
     # ── Save results ─────────────────────────────────────────────────────────
 
     def save(self):
-        """
-        Save all recorded episodes to:
-          results/episodes.csv   — one row per episode
-          results/summary.json   — aggregated stats per variant
-        """
+        """Save all recorded episodes to results/summary.json."""
         if not self.results:
             print("[MetricsLogger] No results to save.")
             return
 
-        self._save_csv()
         self._save_summary()
-
-    # def _save_csv(self):
-    #     csv_path = os.path.join(self.save_dir, "episodes.csv")
-    #     rows = [asdict(r) for r in self.results]
-    #     fieldnames = list(rows[0].keys())
-
-    #     with open(csv_path, "w", newline="") as f:
-    #         writer = csv.DictWriter(f, fieldnames=fieldnames)
-    #         writer.writeheader()
-    #         writer.writerows(rows)
-
-    #     print(f"[MetricsLogger] Episodes saved → {csv_path}  ({len(rows)} rows)")
-    
-    def _save_csv(self):
-        os.makedirs(self.save_dir, exist_ok=True)
-        
-        # timestamp so each run gets its own file
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        csv_path  = os.path.join(self.save_dir, f"episodes_{timestamp}.csv")
-        
-        rows = [asdict(r) for r in self.results]
-        fieldnames = list(rows[0].keys())
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-        print(f"[MetricsLogger] Episodes saved → {csv_path}")
 
     def _save_summary(self):
         """Compute mean ± std for each variant and save to JSON."""

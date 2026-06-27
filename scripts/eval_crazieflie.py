@@ -1,6 +1,7 @@
 import argparse
 import importlib
 import os
+import sys
 import cv2
 from collections import deque
 from pathlib import Path
@@ -35,12 +36,12 @@ z_halfspaces = [
 ]
 
 projection_variants = [
-  'dpcc-r', 
-  'dpcc-r-tightened',
-  'dpcc-c',
-  'dpcc-c-tightened',
-  'dpcc-t',
-  'dpcc-t-tightened',
+  'sdpc-r', 
+  'sdpc-r-tightened',
+  'sdpc-c',
+  'sdpc-c-tightened',
+  'sdpc-t',
+  'sdpc-t-tightened',
   'diffuser',
   'gradient',
   'gradient-tightened',
@@ -48,10 +49,10 @@ projection_variants = [
   'post_processing-tightened',
 #   'model_free',
 #   'model_free-tightened',
-  'dpcc-c-tightened-dt0p25',
-  'dpcc-c-tightened-dt0p5',
-  'dpcc-c-tightened-dt2p0',
-  'dpcc-c-tightened-dt4p0',
+  'sdpc-c-tightened-dt0p25',
+  'sdpc-c-tightened-dt0p5',
+  'sdpc-c-tightened-dt2p0',
+  'sdpc-c-tightened-dt4p0',
 ]
 
 def variant_cfg(name: str):
@@ -86,30 +87,30 @@ def variant_cfg(name: str):
     elif name == "model_free-tightened":
         cfg.update(num_candidates=1, selection="first", use_projection=False, use_dynamics=False)
 
-    elif name == "dpcc-c":
-        cfg.update(num_candidates=8, selection="minimum_projection_cost", use_projection=True, projection_mode="dpcc", tighten=0.0)
+    elif name == "sdpc-c":
+        cfg.update(num_candidates=8, selection="minimum_projection_cost", use_projection=True, projection_mode="sdpc", tighten=0.0)
 
-    elif name == "dpcc-c-tightened":
-        cfg.update(num_candidates=8, selection="minimum_projection_cost", use_projection=True, projection_mode="dpcc", tighten=0.05)
+    elif name == "sdpc-c-tightened":
+        cfg.update(num_candidates=8, selection="minimum_projection_cost", use_projection=True, projection_mode="sdpc", tighten=0.05)
 
-    elif name == "dpcc-t":
-        cfg.update(num_candidates=8, selection="temporal_consistency", use_projection=True, projection_mode="dpcc", tighten=0.0)
+    elif name == "sdpc-t":
+        cfg.update(num_candidates=8, selection="temporal_consistency", use_projection=True, projection_mode="sdpc", tighten=0.0)
 
-    elif name == "dpcc-t-tightened":
-        cfg.update(num_candidates=8, selection="temporal_consistency", use_projection=True, projection_mode="dpcc", tighten=0.05)
+    elif name == "sdpc-t-tightened":
+        cfg.update(num_candidates=8, selection="temporal_consistency", use_projection=True, projection_mode="sdpc", tighten=0.05)
 
-    elif name == "dpcc-r":
-        # dpcc-r often means single sample with projection (repair)
-        cfg.update(num_candidates=1, selection="first", use_projection=True, projection_mode="dpcc", tighten=0.0)
+    elif name == "sdpc-r":
+        # sdpc-r often means single sample with projection (repair)
+        cfg.update(num_candidates=1, selection="first", use_projection=True, projection_mode="sdpc", tighten=0.0)
 
-    elif name == "dpcc-r-tightened":
-        cfg.update(num_candidates=1, selection="first", use_projection=True, projection_mode="dpcc", tighten=0.05)
+    elif name == "sdpc-r-tightened":
+        cfg.update(num_candidates=1, selection="first", use_projection=True, projection_mode="sdpc", tighten=0.05)
 
     # dt sweeps (Table 2)
-    elif name.startswith("dpcc-c-tightened-dt"):
+    elif name.startswith("sdpc-c-tightened-dt"):
         # parse dt from string, e.g. dt0p25 -> 0.25
         dt_str = name.split("dt")[-1].replace("p", ".")
-        cfg.update(num_candidates=8, selection="minimum_projection_cost", use_projection=True, projection_mode="dpcc", tighten=0.05, dt=float(dt_str))
+        cfg.update(num_candidates=8, selection="minimum_projection_cost", use_projection=True, projection_mode="sdpc", tighten=0.05, dt=float(dt_str))
 
     return cfg
 
@@ -440,7 +441,7 @@ def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None
     for (x, y) in cylinders:
         center = [float(x), float(y)]
         constraint_list.append(("sphere_outside", [0, 1], center,
-                                 0.06 + _dr + float(tighten) + float(cyl_extra_radius)))
+                                 0.07 + _dr + float(tighten) + float(cyl_extra_radius)))
 
     # 3D sphere constraints (floating obstacles)
     if spheres:
@@ -481,97 +482,6 @@ def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None
             constraint_list.append(("ineq", (C_row, float(rhs) - float(tighten))))
 
     return constraint_list
-
-def diagnose_projector(projector, device,
-                       x_bounds=(-0.5, 4.5), y_bounds=(-0.95, 0.95), z_bounds=(0.0, 1.0)):
-    """
-    Two-part diagnostic:
-
-    Part 1 — C matrix inspection
-        Scans every row of projector.C_np to find rows that enforce each
-        x/y/z bound.  If a bound is missing from C, it was never wired in.
-
-    Part 2 — live test projection
-        Builds a trajectory where every future position is far outside every
-        bound, then projects it and checks whether the result is inside bounds.
-        This is the ground-truth answer to "does the bound actually work?".
-    """
-    H   = projector.horizon
-    dim = projector.transition_dim
-    C   = projector.C_np   # (n_rows, H*dim)
-    d   = projector.d_np   # (n_rows,)
-
-    print("\n" + "="*60)
-    print(f"[DIAGNOSE] C shape: {C.shape}  →  {C.shape[0]} constraint rows")
-    print(f"           d shape: {d.shape}")
-
-    # ── Part 1: scan C rows for each bound ──────────────────────────────────
-    dim_names = ["x", "y", "z"]
-    bounds = [x_bounds, y_bounds, z_bounds]
-
-    for dim_idx in range(dim):
-        lb, ub = bounds[dim_idx]
-        name   = dim_names[dim_idx]
-
-        # lb row:  C[row, t*dim+dim_idx] = -1,  d[row] = -lb  → -x <= -lb → x >= lb
-        # ub row:  C[row, t*dim+dim_idx] = +1,  d[row] = +ub  → x <= ub
-        lb_rows, ub_rows = [], []
-        for row in range(C.shape[0]):
-            active_cols = np.where(np.abs(C[row]) > 1e-8)[0]
-            if len(active_cols) == 1:
-                col = active_cols[0]
-                if col % dim == dim_idx:          # this row touches our dimension
-                    val = C[row, col]
-                    rhs = d[row]
-                    if val < 0:                   # -1 * x_dim <= -lb  →  x_dim >= lb
-                        lb_rows.append((row, -rhs))
-                    else:                          # +1 * x_dim <= ub
-                        ub_rows.append((row, rhs))
-
-        lb_ok = len(lb_rows) > 0
-        ub_ok = len(ub_rows) > 0
-        print(f"\n  {name}_bounds = ({lb}, {ub})")
-        print(f"    lb rows found: {len(lb_rows)}  {'✓' if lb_ok else '✗ MISSING — lb NOT enforced!'}")
-        print(f"    ub rows found: {len(ub_rows)}  {'✓' if ub_ok else '✗ MISSING — ub NOT enforced!'}")
-        if lb_rows:
-            sample_rhs = [f"{v:.3f}" for _, v in lb_rows[:3]]
-            print(f"    sample lb rhs values (should all be {lb}): {sample_rhs}")
-        if ub_rows:
-            sample_rhs = [f"{v:.3f}" for _, v in ub_rows[:3]]
-            print(f"    sample ub rhs values (should all be {ub}): {sample_rhs}")
-
-    # ── Part 2: live projection test ─────────────────────────────────────────
-    print("\n  [TEST] Projecting a trajectory that violates ALL bounds ...")
-
-    # pos0 = valid position, all future steps far outside every bound
-    test_np = np.zeros((1, H, dim), dtype=np.float32)
-    test_np[0, 0] = [2.0, 0.0, 0.5]    # t=0: inside bounds (skip_initial_state)
-    for t in range(1, H):
-        test_np[0, t] = [9.0, 3.0, 3.0]  # t>0: clearly outside x, y, z
-
-    test_t     = torch.tensor(test_np, device=device)
-    proj_t, _  = projector.project(test_t)
-    proj_np    = proj_t.squeeze(0).detach().cpu().numpy()   # (H, dim)
-
-    all_ok = True
-    for t in range(1, H):
-        x, y, z = proj_np[t]
-        x_ok = x_bounds[0] - 1e-3 <= x <= x_bounds[1] + 1e-3
-        y_ok = y_bounds[0] - 1e-3 <= y <= y_bounds[1] + 1e-3
-        z_ok = z_bounds[0] - 1e-3 <= z <= z_bounds[1] + 1e-3
-        status = "OK" if (x_ok and y_ok and z_ok) else "FAIL"
-        if status == "FAIL":
-            all_ok = False
-            print(f"    t={t}: x={x:.4f} y={y:.4f} z={z:.4f}  ← {status}")
-
-    if all_ok:
-        print(f"    All {H-1} future steps projected inside bounds  ✓")
-    else:
-        print(f"    Some steps still outside bounds after projection  ✗")
-        print(f"    (SLSQP may have hit maxiter=1000 without converging)")
-
-    print("="*60 + "\n")
-
 
 def verify_projection(pos0, a_candidates_proj_real, which,
                       x_bounds=(-0.5, 4.5), y_bounds=(-0.95, 0.95), z_bounds=(0.0, 1.0),
@@ -702,36 +612,17 @@ def project_action_candidates_with_positions(projector, pos0, a_candidates_real,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_dir", type=str, required=True)
-    parser.add_argument("--ckpt", type=str, default="state_best.pt")
-    parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--max_steps", type=int, default=1500)
     parser.add_argument("--action_scale", type=float, default=5.0)
-    parser.add_argument("--projection_yaml", type=str, default=None)
     parser.add_argument("--episodes", type=int, default=1)   # how many episodes to roll
-    parser.add_argument("--num_candidates", type=int, default=4)
-    parser.add_argument("--trajectory_selection",type=str,default="first",choices=["first", "temporal_consistency", "minimum_projection_cost"],)
     parser.add_argument("--dynamic_obstacles", type=str, nargs="*", default=None, metavar="IDX:AXIS",
                         help="Enable sinusoidal cylinder movement. Omit this flag entirely to disable. "
                              "Pass with no values to move ALL cylinders laterally (axis 'y'). "
                              "Or give 'idx:axis' tokens (axis is 'x', 'y', or 'xy'; ':axis' optional, "
                              "defaults to 'y'), e.g. --dynamic_obstacles 0:y 2:x 4:xy")
-    parser.add_argument("--obs_amplitude", type=float, default=0.35,
-                        help="Obstacle oscillation amplitude in metres (shared by all moving cylinders)")
-    parser.add_argument("--obs_frequency", type=float, default=0.25,
-                        help="Obstacle oscillation frequency in Hz (shared by all moving cylinders)")
-    parser.add_argument("--drone_radius", type=float, default=0.08)
     parser.add_argument("--floating_spheres", action="store_true", default=False,
                         help="Enable floating 3D sphere obstacles (planet mode). "
                              "Spheres move with independent x/y/z sinusoidal motion.")
-    parser.add_argument("--sphere_amplitude", type=float, default=0.20,
-                        help="Per-axis oscillation amplitude for floating spheres (m)")
-    parser.add_argument("--sphere_frequency", type=float, default=0.20,
-                        help="Base oscillation frequency for floating spheres (Hz)")
-    parser.add_argument("--no_cylinder_constraints", action="store_true", default=False,
-                        help="Remove cylinder exclusion zones from the projector. "
-                             "Cylinders remain in the physics scene but the SLSQP "
-                             "solver only enforces sphere constraints. Useful for "
-                             "testing sphere-only avoidance.")
     parser.add_argument("--dt", type=float, default=None)
     parser.add_argument("--use_halfspaces", action="store_true", default=False,
                         help="Enforce corridor halfspace constraints (from CORRIDOR_HALFSPACES "
@@ -756,13 +647,19 @@ def main():
                         help="Playback fps of saved videos (independent of sim dt).")
     args, _unknown = parser.parse_known_args()
 
+    device         = torch.device("cuda:0")
+    drone_radius   = 0.08
+    obs_amplitude  = 0.35
+    obs_frequency  = 0.25
+    sphere_amplitude = 0.20
+    sphere_frequency = 0.20
+
     # ── active halfspaces: from config only when --use_halfspaces is set ─────────
     active_halfspaces = corridor_halfspaces if args.use_halfspaces else []
     if args.use_halfspaces:
         print(f"[INFO] Halfspace constraints enabled ({len(active_halfspaces)} halfspaces)")
 
     # ── parse --dynamic_obstacles tokens into (enabled, indices, axes) ──────────
-    # Forms:
     #   --dynamic_obstacles          → all cylinders, y-axis
     #   --dynamic_obstacles xy       → all cylinders, xy diagonal
     #   --dynamic_obstacles x        → all cylinders, x-axis
@@ -791,8 +688,6 @@ def main():
                 axes.append(axis)
             args.dynamic_cyl_indices = indices
             args.obs_axes = axes
-
-    device = torch.device(args.device)
 
     # ------------------ Load trained experiment ------------------
     print(f"[INFO] Loading run dir: {args.run_dir}")
@@ -844,14 +739,15 @@ def main():
         num_envs=1,
         device=str(device),
         dynamic_obstacles=args.dynamic_obstacles_enabled,
-        obs_amplitude=args.obs_amplitude,
-        obs_frequency=args.obs_frequency,
+        obs_amplitude=obs_amplitude,
+        obs_frequency=obs_frequency,
         dynamic_cyl_indices=args.dynamic_cyl_indices,
         obs_axes=args.obs_axes,
         floating_spheres=args.floating_spheres,
-        sphere_amplitude=args.sphere_amplitude,
-        sphere_frequency=args.sphere_frequency,
+        sphere_amplitude=sphere_amplitude,
+        sphere_frequency=sphere_frequency,
         dt=eval_dt,
+        drone_radius=drone_radius,
     )
     env = Crazyflie(env_cfg)
 
@@ -875,7 +771,6 @@ def main():
         latent_dim=latent_dim,
         horizon=horizon,
         n_diffusion_steps=20,
-        num_candidates=args.num_candidates,
         corridor_halfspaces  = corridor_halfspaces,
         boxes                = BOXES,
         cylinders            = CYLINDERS,
@@ -909,11 +804,8 @@ def main():
     print(f"[INFO] plots        → {plot_dir}")
 
     # ------------------ Episodes ------------------
-    # for ep in range(args.episodes):
     for ep, variant_name in enumerate(projection_variants):
         vcfg = variant_cfg(variant_name)
-        args.num_candidates = vcfg["num_candidates"] if vcfg["num_candidates"] > 0 else args.num_candidates
-        # args.trajectory_selection = vcfg["selection"]
         # ------------------ Optional projection ------------------
         projection_mode=vcfg["projection_mode"]
         gradient = (projection_mode == "gradient")
@@ -924,20 +816,17 @@ def main():
             # All cylinders (static and dynamic) use the same base radius.
             # Dynamic ones get their actual positions via --dynamic_obstacles (see below).
             _init_spheres = SPHERES if args.floating_spheres else None
-            _proj_cyls    = [] if args.no_cylinder_constraints else CYLINDERS
+            _proj_cyls    = CYLINDERS
             pos_projector = build_position_projector(
                 horizon_H=horizon, gradient=gradient, device=device,
                 boxes=BOXES, cylinders=_proj_cyls,
                 spheres=_init_spheres,
                 normalizer=None, tighten=vcfg["tighten"], dt=proj_dt,
                 use_dynamics=vcfg.get("use_dynamics", True),
-                drone_radius=args.drone_radius,
+                drone_radius=drone_radius,
                 sphere_radius=SPHERE_RADIUS if args.floating_spheres else 0.0,
                 active_halfspaces=active_halfspaces,
             )
-            # ── run once per variant to confirm bounds are wired correctly ──
-            diagnose_projector(pos_projector, device,
-                               x_bounds=(-0.5, 4.5), y_bounds=(-0.95, 0.95), z_bounds=(0.0, 1.0))
             if vcfg["projection_mode"] == "dpcc":
                 # Enable proper in-loop SLSQP with obstacle constraints.
                 # pos0 is set per control step below (current drone position).
@@ -1039,7 +928,7 @@ def main():
             in_loop_projector = pos_projector if vcfg["projection_mode"] == "dpcc" else None
 
             a_candidates_norm, infos = sample_action_candidates(diffusion=diffusion,cond=cond,horizon=horizon,action_dim=action_dim,
-                                                                num_candidates=args.num_candidates,projector=in_loop_projector)   # (K, H, D)
+                                                                num_candidates=vcfg["num_candidates"],projector=in_loop_projector)   # (K, H, D)
 
             # Unnormalize all candidates to real delta-pos
             a_candidates_real = dataset.action_normalizer.unnormalize(a_candidates_norm)   # (K, H, D)
@@ -1065,7 +954,7 @@ def main():
             if _need_rebuild and vcfg["use_projection"]:
                 # get_cylinder_positions() returns current positions for ALL cylinders
                 # (static ones at rest, dynamic ones at actual current position)
-                cyl_now = [] if args.no_cylinder_constraints else env.get_cylinder_positions()
+                cyl_now = env.get_cylinder_positions()
                 sph_now = env.get_sphere_positions() if args.floating_spheres else None
                 pos_projector = build_position_projector(
                     horizon_H=horizon, gradient=gradient, device=device,
@@ -1074,7 +963,7 @@ def main():
                     normalizer=None, tighten=vcfg["tighten"], dt=proj_dt,
                     use_dynamics=vcfg.get("use_dynamics", True),
                     obs_amplitude=0.0,  # exact positions — no extra radius needed
-                    drone_radius=args.drone_radius,
+                    drone_radius=drone_radius,
                     sphere_radius=SPHERE_RADIUS if args.floating_spheres else 0.0,
                     active_halfspaces=active_halfspaces,
                 )
@@ -1084,7 +973,7 @@ def main():
                     pos_projector.pos0 = pos[:3]
 
             # ── projection + selection  ---------
-            if vcfg["use_projection"] and vcfg["projection_mode"] in ("post", "dpcc"):
+            if vcfg["use_projection"] and vcfg["projection_mode"] in ("post", "sdpc"):
                 a_candidates_proj_real, proj_costs = project_action_candidates_with_positions(
                     projector=pos_projector, pos0=pos[:3],
                     a_candidates_real=a_candidates_real, device=device,
@@ -1216,8 +1105,8 @@ def main():
                 args.dynamic_cyl_indices if args.dynamic_cyl_indices is not None else list(range(len(CYLINDERS))),
                 dtype=np.int32,
             ) if args.dynamic_obstacles_enabled else np.array([], dtype=np.int32),
-            obs_amplitude  = float(args.obs_amplitude),
-            obs_frequency  = float(args.obs_frequency),
+            obs_amplitude  = float(obs_amplitude),
+            obs_frequency  = float(obs_frequency),
             obs_axes = np.array(
                 args.obs_axes if args.obs_axes is not None
                 else (["y"] * len(CYLINDERS) if args.dynamic_obstacles_enabled else []),
@@ -1230,8 +1119,8 @@ def main():
             sphere_positions  = np.array(SPHERES, dtype=np.float32) if SPHERES
                                 else np.zeros((0, 3), dtype=np.float32),
             sphere_radius     = float(SPHERE_RADIUS),
-            sphere_amplitude  = float(args.sphere_amplitude),
-            sphere_frequency  = float(args.sphere_frequency),
+            sphere_amplitude  = float(sphere_amplitude),
+            sphere_frequency  = float(sphere_frequency),
             sph_xyz_traj = np.array(
                 [s["sph_xyz"] for s in cand_snapshots if s.get("sph_xyz") is not None],
                 dtype=np.float32,
@@ -1251,7 +1140,7 @@ def main():
                 plt.axhline(target[2], linestyle="--")
             if args.floating_spheres and SPHERES:
                 _sr  = SPHERE_RADIUS
-                _amp = args.sphere_amplitude
+                _amp = sphere_amplitude
                 for (_, _, _sz) in SPHERES:
                     plt.axhspan(_sz - _sr - _amp, _sz + _sr + _amp,
                                 color="#4a9de0", alpha=0.12)
@@ -1295,8 +1184,8 @@ def main():
                 add_obstacles_xy(ax, [], static_cyls, box_size_xy=0.20, cyl_radius=0.06)
                 add_dynamic_cylinders_xy(
                     ax, dyn_cyls, dyn_axes_resolved, cand_snapshots,
-                    obs_amplitude=args.obs_amplitude, cyl_radius=0.06,
-                    drone_radius=args.drone_radius,
+                    obs_amplitude=obs_amplitude, cyl_radius=0.06,
+                    drone_radius=drone_radius,
                 )
             else:
                 add_obstacles_xy(ax, [], CYLINDERS, box_size_xy=0.20, cyl_radius=0.06)
@@ -1305,7 +1194,7 @@ def main():
             if args.floating_spheres and SPHERES:
                 from matplotlib.patches import Circle as _Circle
                 _sr  = SPHERE_RADIUS
-                _amp = args.sphere_amplitude
+                _amp = sphere_amplitude
                 for (sx, sy, _sz) in SPHERES:
                     ax.add_patch(_Circle(
                         (sx, sy), _sr,
@@ -1334,14 +1223,14 @@ def main():
                     # dynamic cylinders: no blue circle — orange swept band already shows range
                     constraint_handles = plot_constraint_overlay(
                         ax, BOXES, _static_c,
-                        tighten=tighten_val, drone_radius=args.drone_radius,
+                        tighten=tighten_val, drone_radius=drone_radius,
                         x_bounds=(-0.5, 4.5), y_bounds=(-1.0, 1.0),
                     )
                 else:
                     constraint_handles = plot_constraint_overlay(
                         ax, BOXES, CYLINDERS,
                         tighten=tighten_val,
-                        drone_radius=args.drone_radius,
+                        drone_radius=drone_radius,
                         x_bounds=(-0.5, 4.5),
                         y_bounds=(-1.0, 1.0),
                     )
@@ -1396,6 +1285,7 @@ def main():
         env.reset()
     logger.save()
     env.close()
+    os._exit(0)
 
 
 if __name__ == "__main__":

@@ -253,10 +253,8 @@ def make_gif(
     sph_xyz_traj  = np.array(data["sph_xyz_traj"], dtype=np.float32) \
                     if "sph_xyz_traj" in data else np.zeros((0, 0, 3), np.float32)
 
-    # ── halfspaces: config (always current) > npz value ─────────────────────
-    if CONFIG_HALFSPACES:
-        halfspaces = CONFIG_HALFSPACES
-    elif "halfspaces" in data and len(data["halfspaces"]) > 0:
+    # ── halfspaces: only plot what was active during the recorded run ─────────
+    if "halfspaces" in data and len(data["halfspaces"]) > 0:
         hs_pts   = data["halfspaces"].tolist()
         hs_sides = data["hs_sides"].tolist() if "hs_sides" in data \
                    else ["below"] * len(hs_pts)

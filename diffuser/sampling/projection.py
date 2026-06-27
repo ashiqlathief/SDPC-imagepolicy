@@ -48,7 +48,7 @@ def _solve_slsqp_candidate(x0, r_i, Q, C, d, A, b, obstacle_specs, transition_di
 
 class Projector:
     # Projects sampled trajectories onto a feasible set (safety, dynamics, obstacles).
-    # Used inside DPCC during denoising to enforce constraints.
+    # Used inside SDPC during denoising to enforce constraints.
 
     def __init__(self, horizon, transition_dim, action_dim=0, goal_dim=0, constraint_list=[], normalizer=None, variant='states', 
                  dt=0.1, cost_dims=None, skip_initial_state=True, diffusion_timestep_threshold=0.5, gradient=False, gradient_weights=None,

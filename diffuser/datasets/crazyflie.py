@@ -101,7 +101,7 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
 
         self.pos_slice = slice(0, 3)   # CHANGE if needed
         self.action_dim = 3            # velocity from x,y,z diffs
-        # For DPCC compatibility prints
+        # For SDPC compatibility prints
         self.observation_dim = 0
         self.goal_dim = 0
 
