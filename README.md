@@ -52,8 +52,7 @@ dpcc-thesis/
 │   ├── eval_crazieflie.py        # Evaluation across all projection variants
 │   ├── make_traj_gif.py          # Animate a saved .npz trajectory as a GIF
 │   └── metrics_logger.py         # Per-episode metrics and summary saving
-├── requirements.txt
-└── requirements_sdpc_isaac.txt
+└── requirements.txt
 ```
 
 ---
@@ -79,6 +78,79 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 ```
 ---
 
+## Data Collection
+
+`isaac/scripts/quadcopter.py` runs a Crazyflie drone in IsaacLab using a cascaded PID controller, navigating to random targets while recording FPV camera images and state data. Episodes are saved as `.pkl`/`.npz` files and a Zarr store under `isaac/dataset/avoiding_crazyflie/data/`.
+
+### Running
+
+```bash
+# Basic (1 environment, RGB only)
+python isaac/scripts/quadcopter.py
+
+# Multiple parallel environments
+python isaac/scripts/quadcopter.py --num_envs 4
+
+# With depth camera (saves RGB + distance_to_camera)
+python isaac/scripts/quadcopter.py --use_depth
+
+# Combined
+python isaac/scripts/quadcopter.py --num_envs 4 --use_depth
+```
+
+Any standard IsaacLab/AppLauncher flags (e.g. `--device cuda:0`) also work.
+
+### Keyboard controls
+
+| Key | Action |
+|-----|--------|
+| `SPACE` | Reset drone to start pose, clear buffered data |
+| `ENTER` | Manually save all buffered episodes to disk |
+| `R` | Toggle recording on/off |
+| `C` | Clear buffered data (no files deleted) |
+
+### Auto-save behaviour
+
+The script saves and resets automatically whenever the drone holds within **5 cm** of its target for at least 1 simulation step. A new random target is then sampled and the episode restarts — no manual intervention needed for continuous data collection.
+
+### Output files
+
+For each environment `N`, the script writes:
+
+| File | Contents |
+|------|----------|
+| `env_NNN_XXXXX.pkl` | State list metadata |
+| `env_NNN_XXXXX_images.npz` | Stacked RGB (and optionally depth) arrays |
+| `env_NNN.zarr/` | Appendable Zarr store used for diffusion policy training |
+
+### Dataset utilities
+
+Helper scripts in `isaac/dataset/avoiding_crazyflie/` for inspecting and visualising collected data:
+
+| Script | What it does |
+|--------|-------------|
+| `checkepisode.py` | Scans all `.pkl` files in the data directory and prints episode count and length statistics (total episodes, mean/std/min/max timesteps per episode) |
+| `zarr_quadcopter_dataset.py` | Opens a Zarr store, prints array shapes and episode stats, and generates XY, XZ, and 3D scatter plots of all recorded trajectories |
+| `make_dataset_video.py` | Renders a side-by-side MP4 video: FPV camera feed on the left, top-down XY map with live drone position and trajectory tail on the right |
+| `vid.py` | Renders a compact MP4 video of the FPV feed with a pose readout (x/y/z) and a progress bar footer |
+| `test_pkl.py` | One-liner debug script — loads a single `.pkl` file and prints its raw contents |
+
+```bash
+# Check episode stats across all .pkl files
+python isaac/dataset/avoiding_crazyflie/checkepisode.py
+
+# Plot trajectories from a Zarr store
+python isaac/dataset/avoiding_crazyflie/zarr_quadcopter_dataset.py
+
+# Render a side-by-side FPV + map video
+python isaac/dataset/avoiding_crazyflie/make_dataset_video.py --zarr <path/to/env_000.zarr> --out out.mp4
+
+# Render a compact FPV-only video
+python isaac/dataset/avoiding_crazyflie/vid.py --zarr <path/to/env_000.zarr> --out out.mp4
+```
+
+---
+
 ## Training
 
 ```bash
@@ -89,7 +161,7 @@ python scripts/train.py
 Config: `config/avoiding-crazyflie.py`  
 Checkpoints saved to: `isaac/logs/avoiding-crazyflie/`
 
-### Configuration — `config/avoiding-crazyflie.py`
+### Configuration
 
 Everything about the environment layout and training hyperparameters lives here.
 
@@ -139,7 +211,7 @@ Everything about the environment layout and training hyperparameters lives here.
 > **`stride` and `dt` together define the effective control rate:**
 > `control_dt = stride × dt`.
 > With the defaults (`stride=2`, `dt=0.005`), the model acts every **10 ms**.
-> The experiment folder name encodes these as `DT<stride>` and `DT<dt>` — e.g. `DT2` and `DT0.005`.
+> The experiment folder name encodes these as `DT<stride>` and `DT<dt>` e.g. `DT2` and `DT0.005`.
 > If you change `stride` or `dt`, re-collect data at the matching rate or the actions will be scaled incorrectly.
 
 ---
