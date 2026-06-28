@@ -60,18 +60,23 @@ dpcc-thesis/
 
 ## Installation
 
-Isaac Lab and IsaacSim must be installed first:
+### Steps
+
+**1. Install Isaac Sim and Isaac Lab** following NVIDIA's official guide (this creates the base conda environment):
 ```
 https://isaac-sim.github.io/IsaacLab/main/source/setup/installation
 ```
 
-Then, inside the Isaac Lab conda environment:
+**2. Activate the Isaac Lab conda environment and install extra packages:**
 ```bash
 conda activate env_isaaclab
-pip install -r requirements_sdpc_isaac.txt
-pip install -e .
-```
 
+# Install project dependencies (includes warp 1.11.1, numpy 1.26.0, etc.)
+pip install -r requirement.txt
+
+# Make the project importable
+export PYTHONPATH=$PWD:$PYTHONPATH
+```
 ---
 
 ## Training
@@ -84,6 +89,59 @@ python scripts/train.py
 Config: `config/avoiding-crazyflie.py`  
 Checkpoints saved to: `isaac/logs/avoiding-crazyflie/`
 
+### Configuration — `config/avoiding-crazyflie.py`
+
+Everything about the environment layout and training hyperparameters lives here.
+
+#### Obstacle layout
+
+| Variable | Description |
+|---|---|
+| `CYLINDERS` | List of `(x, y)` positions for vertical cylinder obstacles in the corridor |
+| `BOXES` | List of `(x, y)` positions for box obstacles (currently empty) |
+| `SPHERES` | List of `(x, y, z)` rest positions for floating sphere obstacles (commented out by default) |
+| `SPHERE_RADIUS` | Physical radius of each sphere in metres; effective exclusion zone = `SPHERE_RADIUS + drone_radius` |
+
+#### Corridor halfspaces
+
+`CORRIDOR_HALFSPACES` defines diagonal boundary constraints in the XY plane as line segments with a side (`'above'` or `'below'`). These are only enforced at eval time when `--use_halfspaces` is passed.
+
+```python
+# format: [p1, p2, side]  where p1/p2 are [x, y] endpoints of the boundary line
+[np.array([0.0, 0.75]), np.array([4.0, 0.15]), 'below'],   # upper diagonal
+[np.array([0.0, -0.75]), np.array([4.0, -0.15]), 'above'],  # lower diagonal
+```
+
+#### Depth sensing
+
+| Variable | Default | Description |
+|---|---|---|
+| `USE_DEPTH` | `False` | Switch to RGBD input; must match how the dataset was collected |
+| `DEPTH_NEAR` | `0.1` m | Near clip for depth normalisation |
+| `DEPTH_FAR` | `10.0` m | Far clip for depth normalisation |
+
+#### Training hyperparameters (`base['diffusion']`)
+
+| Key | Default | Description |
+|---|---|---|
+| `model` | `ImageCondUNet1DTemporalCondModel` | Denoiser architecture — also supports `ImageCondTransformer1DModel` |
+| `encoder_type` | `vitp` | Image encoder: `vit`, `vitp`, `cnn`, or `raw_pixels` |
+| `horizon` | `16` | Number of action steps predicted per diffusion sample |
+| `n_obs_steps` | `2` | Number of past observations fed as conditioning |
+| `n_diffusion_steps` | `20` | Denoising steps at inference |
+| `image_cond_dim` | `512` | Latent dim of image encoder output (`27648` for raw pixels at 96×96×3, `512` for ViT-P) |
+| `stride` | `2` | Frame subsampling factor — how many raw sim frames between consecutive action steps |
+| `dt` | `0.005` s | Raw sim physics timestep at which data was collected |
+| `batch_size` | `8` | Training batch size |
+| `learning_rate` | `1e-4` | Adam learning rate |
+| `n_train_steps` | `1e5` | Total gradient steps |
+
+> **`stride` and `dt` together define the effective control rate:**
+> `control_dt = stride × dt`.
+> With the defaults (`stride=2`, `dt=0.005`), the model acts every **10 ms**.
+> The experiment folder name encodes these as `DT<stride>` and `DT<dt>` — e.g. `DT2` and `DT0.005`.
+> If you change `stride` or `dt`, re-collect data at the matching rate or the actions will be scaled incorrectly.
+
 ---
 
 ## Evaluation
@@ -92,8 +150,7 @@ Checkpoints saved to: `isaac/logs/avoiding-crazyflie/`
 
 ```bash
 conda activate env_isaaclab
-python scripts/eval_crazieflie.py \
-  --run_dir isaac/logs/avoiding-crazyflie/diffusion/<exp_name>/<seed>
+python scripts/eval_crazieflie.py --run_dir isaac/logs/avoiding-crazyflie/diffusion/<exp_name>/<seed>
 ```
 
 Saves per-episode `.npz` trajectories, XY plots, and a summary table under the `--run_dir`.
@@ -115,17 +172,6 @@ Saves per-episode `.npz` trajectories, XY plots, and a summary table under the `
 | `--record_variants` | all | Subset of variant names to record when `--record_video` is set |
 | `--video_fps` | `20` | Playback fps for saved videos |
 
-> **Note on `--dt` and stride.**
-> Data is collected at a fixed physics timestep (`dt` in config, e.g. `0.005 s` = 5 ms).
-> The `stride` setting in the dataset config controls how many raw frames are skipped between consecutive model action steps:
->
-> ```
-> control_dt = stride × collection_dt
-> ```
->
-> For example, `stride=2` with `collection_dt=0.005 s` gives `control_dt=0.010 s` (10 ms per action).
-> The experiment folder name encodes both: `DT0.005` is the collection dt, `DT2` is the stride.
-> At eval time the env sim dt is set automatically to `control_dt` from the saved dataset metadata — you only need `--dt` if you want to deliberately run at a mismatched timestep (e.g. the `sdpc-c-tightened-dt*` sweep variants).
 
 #### Hardcoded constants (edit in `scripts/eval_crazieflie.py` → `main()`)
 
