@@ -60,14 +60,14 @@ CORRIDOR_HALFSPACES = [
     # # upper diagonal: y <= -0.1*x + 0.75  (ceiling slopes down toward the goal end)
     # [np.array([0.0, 0.75]), np.array([4.0, -0.15]), 'below'],
 
-    # # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)
-    # [np.array([0.0, -0.75]), np.array([4.0, 0.15]), 'above'],
-
-    # both
-    # upper diagonal: y <= -0.1*x + 0.75  (ceiling slopes down toward the goal end)
-    [np.array([0.0, 0.75]), np.array([4.0, 0.15]), 'below'],
     # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)
-    [np.array([0.0, -0.75]), np.array([4.0, -0.15]), 'above'],
+    [np.array([0.0, -0.75]), np.array([4.0, 0.15]), 'above'],
+
+    # # both
+    # # upper diagonal: y <= -0.1*x + 0.75  (ceiling slopes down toward the goal end)
+    # [np.array([0.0, 0.75]), np.array([4.0, 0.15]), 'below'],
+    # # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)
+    # [np.array([0.0, -0.75]), np.array([4.0, -0.15]), 'above'],
 ]
 
 #------------------------ base ------------------------#
@@ -91,13 +91,13 @@ logbase = 'isaac/logs'
 base = {
     'diffusion': {
         ## model
-        'model': 'models.ImageCondTransformer1DModel', #ImageCondTransformer1DModel, ImageCondUNet1DTemporalCondModel
+        'model': 'models.ImageCondUNet1DTemporalCondModel', #ImageCondTransformer1DModel, ImageCondUNet1DTemporalCondModel
         'diffusion': 'models.GaussianDiffusion',
-        'encoder_type': 'raw_pixels',   # "vit", "vitp", or "cnn" or "raw_pixels"
+        'encoder_type': 'vitp',   # "vit", "vitp", or "cnn" or "raw_pixels"
         'use_depth': USE_DEPTH,   # RGBD switch: set True only if the zarr dataset was collected with quadcopter.py --use_depth
         'horizon': 16,
         'n_obs_steps': 2,
-        'image_cond_dim': 27648,   # 96*96*3 for raw pixels (96*96*4 if use_depth=True) 27648 for vit, 512 for vitp
+        'image_cond_dim': 512,   # 96*96*3 for raw pixels (96*96*4 if use_depth=True) 27648 for vit, 512 for vitp
         'n_diffusion_steps': 20,
         'loss_type': 'l2',
         'loss_discount': 1.0,

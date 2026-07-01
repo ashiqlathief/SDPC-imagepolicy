@@ -430,9 +430,7 @@ def plot_experiment(
     # ── axes ──────────────────────────────────────────────────────────────────
     ax.set_xlabel(h_label, fontsize=11)
     ax.set_ylabel(v_label, fontsize=11)
-    plane_tag = "Top-down (XY)" if plane == "xy" else "Side view (XZ — altitude)"
-    ax.set_title(f"Safety Variant Trajectories — {exp_label}  [{plane_tag}]",
-                 fontsize=13, fontweight="bold", pad=10)
+    ax.set_title("")
     ax.set_aspect("equal", adjustable="box")  # shrinks axes box, preserves data limits
     ax.set_xlim(*h_lim)
     ax.set_ylim(*v_lim)
