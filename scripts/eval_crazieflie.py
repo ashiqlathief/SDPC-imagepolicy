@@ -8,6 +8,8 @@ from pathlib import Path
 import time
 import numpy as np
 import torch
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import re 
@@ -47,8 +49,6 @@ projection_variants = [
   'gradient-tightened',
   'post_processing',
   'post_processing-tightened',
-#   'model_free',
-#   'model_free-tightened',
   'sdpc-c-tightened-dt0p25',
   'sdpc-c-tightened-dt0p5',
   'sdpc-c-tightened-dt2p0',
@@ -79,13 +79,6 @@ def variant_cfg(name: str):
 
     elif name == "gradient-tightened":
         cfg.update(num_candidates=1, selection="first", use_projection=True, projection_mode="gradient", tighten=0.05)
-
-    elif name == "model_free":
-        # baseline: no diffusion, just go straight to target (simple P controller)
-        cfg.update(num_candidates=1, selection="first", use_projection=False, use_dynamics=False)
-
-    elif name == "model_free-tightened":
-        cfg.update(num_candidates=1, selection="first", use_projection=False, use_dynamics=False)
 
     elif name == "sdpc-c":
         cfg.update(num_candidates=8, selection="minimum_projection_cost", use_projection=True, projection_mode="sdpc", tighten=0.0)
@@ -396,17 +389,20 @@ def choose_trajectory(actions_real, infos, strategy="first", prev_actions_real=N
 
     return 0
 
-def integrate_candidates_xy(pos0_xyz, a_candidates_real):
+def integrate_candidates_xyz(pos0_xyz, a_candidates_real):
     """
+    Integrates delta-position candidates into absolute (x,y,z) positions.
+    Kept as xyz (not xy-only) so candidate/planned horizons carry altitude
+    too, not just the top-down (x,y) path.
     pos0_xyz: (3,)
     a_candidates_real: (K,H,3)
-    Returns: traj_xy (K, H+1, 2)
+    Returns: traj_xyz (K, H+1, 3)
     """
     K, H, D = a_candidates_real.shape
-    traj_xy = np.zeros((K, H + 1, 2), dtype=np.float32)
-    traj_xy[:, 0, :] = pos0_xyz[:2][None, :]
-    traj_xy[:, 1:, :] = pos0_xyz[:2][None, None, :] + np.cumsum(a_candidates_real[:, :, :2], axis=1)
-    return traj_xy
+    traj_xyz = np.zeros((K, H + 1, 3), dtype=np.float32)
+    traj_xyz[:, 0, :] = pos0_xyz[:3][None, :]
+    traj_xyz[:, 1:, :] = pos0_xyz[:3][None, None, :] + np.cumsum(a_candidates_real[:, :, :3], axis=1)
+    return traj_xyz
 
 def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None,
                                     y_bounds=None, z_bounds=None,
@@ -612,7 +608,8 @@ def project_action_candidates_with_positions(projector, pos0, a_candidates_real,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_dir", type=str, required=True)
-    parser.add_argument("--max_steps", type=int, default=1500)
+    parser.add_argument("--seeds", type=int, nargs="+", default=[7,8,9,10])
+    parser.add_argument("--max_steps", type=int, default=700)
     parser.add_argument("--action_scale", type=float, default=5.0)
     parser.add_argument("--episodes", type=int, default=1)   # how many episodes to roll
     parser.add_argument("--dynamic_obstacles", type=str, nargs="*", default=None, metavar="IDX:AXIS",
@@ -624,6 +621,8 @@ def main():
                         help="Enable floating 3D sphere obstacles (planet mode). "
                              "Spheres move with independent x/y/z sinusoidal motion.")
     parser.add_argument("--dt", type=float, default=None)
+    parser.add_argument("--num_candidates", type=int, default=4,
+                        help="Override K (number of sampled candidates) for variants that select among multiple candidates")
     parser.add_argument("--use_halfspaces", action="store_true", default=False,
                         help="Enforce corridor halfspace constraints (from CORRIDOR_HALFSPACES "
                              "in config) in the projector and show them in XY plots.")
@@ -650,7 +649,7 @@ def main():
     device         = torch.device("cuda:0")
     drone_radius   = 0.08
     obs_amplitude  = 0.35
-    obs_frequency  = 0.25
+    obs_frequency  = 0.45
     sphere_amplitude = 0.20
     sphere_frequency = 0.20
 
@@ -689,601 +688,664 @@ def main():
             args.dynamic_cyl_indices = indices
             args.obs_axes = axes
 
-    # ------------------ Load trained experiment ------------------
-    print(f"[INFO] Loading run dir: {args.run_dir}")
-
-    seedmodel = int(Path(args.run_dir).name)   # gives 9
-    diff_exp = utils.load_diffusion(args.run_dir,epoch="best",device=str(device),)
-    dataset = diff_exp.dataset
-    diffusion = diff_exp.diffusion.to(device)
-    diffusion.eval()
-
-    # RGB vs RGBD is determined by the trained checkpoint, not a CLI flag here —
-    # the dataset and model agree at train time (see traintransformer.py's
-    # consistency assert), so trust the model's own in_chans/use_depth.
-    use_depth = bool(getattr(diffusion.model, "use_depth", False))
-    assert bool(getattr(dataset, "use_depth", False)) == use_depth, (
-        f"Loaded checkpoint's model.use_depth={use_depth} but dataset.use_depth="
-        f"{getattr(dataset, 'use_depth', False)} -- mismatched run dir?"
-    )
-    print(f"[INFO] Running evaluation in {'RGB-D' if use_depth else 'RGB'} mode "
-          f"(use_depth={use_depth}, in_chans={getattr(diffusion.model, 'in_chans', 3)})")
-
-    # Propagate the detected mode to the FPV camera config before crazyflie_env_cfg
-    # (which builds CrazyflieSceneCfg.FPV_CAMERA_CFG's data_types from cfg.USE_DEPTH
-    # at import time) is imported, so the simulated camera actually has a depth
-    # channel whenever the loaded checkpoint needs one.
-    cfg.USE_DEPTH = use_depth
-    from isaac.scripts.crazyflie_env import Crazyflie, CrazyflieEnvCfg
-
-    # ── derive eval dt from the trained dataset ───────────────────────────
-    # a0_real is a displacement over `dataset.control_dt` seconds of sim time
-    # (control_dt = stride * collection_dt). The eval env's sim dt must match
-    # this or every action gets applied over the wrong amount of physical
-    # time, making the drone fly too fast/slow relative to what the model
-    # intends. Auto-derive it here instead of hardcoding it in env config.
-    expected_dt = getattr(dataset, "control_dt", getattr(dataset, "dt", None))
-    if args.dt is not None:
-        if expected_dt is not None and not np.isclose(args.dt, expected_dt, rtol=1e-3):
-            print(f"[WARN] --dt={args.dt} explicitly overrides dataset control_dt={expected_dt} "
-                  "— running at a deliberately mismatched dt.")
-        eval_dt = args.dt
-    elif expected_dt is not None:
-        eval_dt = expected_dt
+    # ── resolve which seed run_dir(s) to evaluate ─────────────────────────
+    # Default (no --seeds): behave exactly as before, args.run_dir IS the
+    # seed directory. With --seeds, args.run_dir is the experiment directory
+    # one level up, and we evaluate <run_dir>/<seed> for each seed in turn,
+    # reusing a single Isaac Sim instance across all of them.
+    if args.seeds:
+        run_dirs = [os.path.join(args.run_dir, str(s)) for s in args.seeds]
     else:
-        eval_dt = CrazyflieEnvCfg.dt  # old run without stored stride/dt metadata
-    print(f"[INFO] Using eval dt={eval_dt} (dataset control_dt={expected_dt})")
+        run_dirs = [args.run_dir]
 
-    # ------------------ Create env ------------------
-    env_cfg = CrazyflieEnvCfg(
-        num_envs=1,
-        device=str(device),
-        dynamic_obstacles=args.dynamic_obstacles_enabled,
-        obs_amplitude=obs_amplitude,
-        obs_frequency=obs_frequency,
-        dynamic_cyl_indices=args.dynamic_cyl_indices,
-        obs_axes=args.obs_axes,
-        floating_spheres=args.floating_spheres,
-        sphere_amplitude=sphere_amplitude,
-        sphere_frequency=sphere_frequency,
-        dt=eval_dt,
-        drone_radius=drone_radius,
-    )
-    env = Crazyflie(env_cfg)
+    env = None
+    shared_use_depth = None
+    shared_eval_dt = None
 
-    run_name = Path(args.run_dir).parent.name  # e.g. "H16_K20_ENCvit_LAT256"
-    enc_match = re.search(r'E([^_]+)', run_name)
-    lat_match = re.search(r'L(\d+)', run_name)
-    encoder_type = enc_match.group(1) if enc_match else "unknown"
-    latent_dim   = int(lat_match.group(1)) if lat_match else 256
-    print(f"[INFO] Inferred encoder type: {encoder_type}, latent dim: {latent_dim}")
-    # Infer dims
-    horizon = int(getattr(diffusion, "horizon", 16))
-    action_dim = int(getattr(diffusion, "action_dim", 3))
-    To = int(getattr(dataset, "n_obs_steps", 2)) if hasattr(dataset, "n_obs_steps") else 2
-    print(f"[INFO] Online eval started. To={To}, H={horizon}, action_dim={action_dim}")
-    # path = os.path.join(args.run_dir, "results")
-    # os.makedirs(path, exist_ok=True)
-    # os.makedirs("plots", exist_ok=True)
-    logger = MetricsLogger(                                             
-        save_dir=os.path.join(args.run_dir, "results"),                               
-        encoder_type=encoder_type,
-        latent_dim=latent_dim,
-        horizon=horizon,
-        n_diffusion_steps=20,
-        corridor_halfspaces  = corridor_halfspaces,
-        boxes                = BOXES,
-        cylinders            = CYLINDERS,
-    )
+    for run_dir in run_dirs:
+        # ------------------ Load trained experiment ------------------
+        print(f"\n[INFO] Loading run dir: {run_dir}")
 
-    # ------------------ Video recording setup ------------------
-    camera_fns = {
-        "spectator": env.get_spectator_rgb,
-        "chase": env.get_chase_rgb,
-        "fpv": env.get_rgb,
-    }
-    video_dir = os.path.join(args.run_dir, "videos")
-    if args.record_video:
-        os.makedirs(video_dir, exist_ok=True)
+        seedmodel = int(Path(run_dir).name)   # gives 9
+        diff_exp = utils.load_diffusion(run_dir,epoch="best",device=str(device),)
+        dataset = diff_exp.dataset
+        diffusion = diff_exp.diffusion.to(device)
+        diffusion.eval()
 
-    # ── auto-increment output dirs so each run gets its own folder ────────────
-    def _next_free(base, name):
-        path = os.path.join(base, name)
-        if not os.path.exists(path):
-            return path
-        i = 1
-        while os.path.exists(os.path.join(base, f"{name}{i}")):
-            i += 1
-        return os.path.join(base, f"{name}{i}")
-
-    traj_dir = _next_free(args.run_dir, "trajectories")
-    plot_dir = _next_free(args.run_dir, "plots")
-    os.makedirs(traj_dir, exist_ok=True)
-    os.makedirs(plot_dir, exist_ok=True)
-    print(f"[INFO] trajectories → {traj_dir}")
-    print(f"[INFO] plots        → {plot_dir}")
-
-    # ------------------ Episodes ------------------
-    for ep, variant_name in enumerate(projection_variants):
-        vcfg = variant_cfg(variant_name)
-        # ------------------ Optional projection ------------------
-        projection_mode=vcfg["projection_mode"]
-        gradient = (projection_mode == "gradient")
-        pos_projector = None   # obstacle-aware SLSQP projector (post-hoc + dpcc in-loop)
-
-        if vcfg["use_projection"]:
-            proj_dt = vcfg["dt"] if vcfg["dt"] is not None else 0.1
-            # All cylinders (static and dynamic) use the same base radius.
-            # Dynamic ones get their actual positions via --dynamic_obstacles (see below).
-            _init_spheres = SPHERES if args.floating_spheres else None
-            _proj_cyls    = CYLINDERS
-            pos_projector = build_position_projector(
-                horizon_H=horizon, gradient=gradient, device=device,
-                boxes=BOXES, cylinders=_proj_cyls,
-                spheres=_init_spheres,
-                normalizer=None, tighten=vcfg["tighten"], dt=proj_dt,
-                use_dynamics=vcfg.get("use_dynamics", True),
-                drone_radius=drone_radius,
-                sphere_radius=SPHERE_RADIUS if args.floating_spheres else 0.0,
-                active_halfspaces=active_halfspaces,
-            )
-            if vcfg["projection_mode"] == "dpcc":
-                # Enable proper in-loop SLSQP with obstacle constraints.
-                # pos0 is set per control step below (current drone position).
-                pos_projector.inloop_slsqp = True
-                pos_projector.action_normalizer = dataset.action_normalizer
-                pos_projector.pos0 = None  # filled in per step
-
-        print(f"\n[INFO] ===== Episode {ep+1}/{args.episodes}_{variant_name} =====")
-        _ = env.reset(seed=ep)
-        logger.begin_episode(variant_name, episode=ep, seed=ep)
-
-        # Camera warm-up (important for Isaac/Replicator)
-        for _ in range(3):
-            pos = env._pos_world().detach().cpu().numpy()[0]
-            cmd_xyz = pos.copy()   # hold position
-            try:
-                env.step(cmd_xyz)
-            except Exception:
-                pass
-
-        # ── per-episode video writers, one per requested --camera, recorded
-        # simultaneously from the same rollout (only for variants the caller asked for) ──
-        record_this_episode = args.record_video and (
-            args.record_variants is None or variant_name in args.record_variants
+        # RGB vs RGBD is determined by the trained checkpoint, not a CLI flag here —
+        # the dataset and model agree at train time (see traintransformer.py's
+        # consistency assert), so trust the model's own in_chans/use_depth.
+        use_depth = bool(getattr(diffusion.model, "use_depth", False))
+        assert bool(getattr(dataset, "use_depth", False)) == use_depth, (
+            f"Loaded checkpoint's model.use_depth={use_depth} but dataset.use_depth="
+            f"{getattr(dataset, 'use_depth', False)} -- mismatched run dir?"
         )
-        video_writers = {}
-        video_paths = {}
-        if record_this_episode:
-            for cam_name in args.camera:
-                get_video_frame = camera_fns[cam_name]
-                frame0 = get_video_frame()
-                vh, vw = frame0.shape[:2]
-                video_path = os.path.join(video_dir, f"eval_{variant_name}_{cam_name}.mp4")
-                video_writers[cam_name] = cv2.VideoWriter(
-                    video_path, cv2.VideoWriter_fourcc(*"mp4v"), args.video_fps, (vw, vh)
+        print(f"[INFO] Running evaluation in {'RGB-D' if use_depth else 'RGB'} mode "
+              f"(use_depth={use_depth}, in_chans={getattr(diffusion.model, 'in_chans', 3)})")
+
+        # ── derive eval dt from the trained dataset ───────────────────────────
+        # a0_real is a displacement over `dataset.control_dt` seconds of sim time
+        # (control_dt = stride * collection_dt). The eval env's sim dt must match
+        # this or every action gets applied over the wrong amount of physical
+        # time, making the drone fly too fast/slow relative to what the model
+        # intends. Auto-derive it here instead of hardcoding it in env config.
+        expected_dt = getattr(dataset, "control_dt", getattr(dataset, "dt", None))
+        if args.dt is not None:
+            if expected_dt is not None and not np.isclose(args.dt, expected_dt, rtol=1e-3):
+                print(f"[WARN] --dt={args.dt} explicitly overrides dataset control_dt={expected_dt} "
+                      "— running at a deliberately mismatched dt.")
+            eval_dt = args.dt
+        elif expected_dt is not None:
+            eval_dt = expected_dt
+        else:
+            eval_dt = 0.005  # old run without stored stride/dt metadata (default sim dt)
+        print(f"[INFO] Using eval dt={eval_dt} (dataset control_dt={expected_dt})")
+
+        # ------------------ Create env (once — reused across seeds) ------------------
+        # The sim instance is expensive to start, so with --seeds we build it once
+        # for the first seed and reuse it for the rest. This assumes every seed in
+        # the batch shares the same architecture/use_depth/dt, which holds as long
+        # as they're all seeds of the same experiment folder.
+        if env is None:
+            # Propagate the detected mode to the FPV camera config before crazyflie_env_cfg
+            # (which builds CrazyflieSceneCfg.FPV_CAMERA_CFG's data_types from cfg.USE_DEPTH
+            # at import time) is imported, so the simulated camera actually has a depth
+            # channel whenever the loaded checkpoint needs one.
+            cfg.USE_DEPTH = use_depth
+            from isaac.scripts.crazyflie_env import Crazyflie, CrazyflieEnvCfg
+
+            env_cfg = CrazyflieEnvCfg(
+                num_envs=1,
+                device=str(device),
+                dynamic_obstacles=args.dynamic_obstacles_enabled,
+                obs_amplitude=obs_amplitude,
+                obs_frequency=obs_frequency,
+                dynamic_cyl_indices=args.dynamic_cyl_indices,
+                obs_axes=args.obs_axes,
+                floating_spheres=args.floating_spheres,
+                sphere_amplitude=sphere_amplitude,
+                sphere_frequency=sphere_frequency,
+                dt=eval_dt,
+                drone_radius=drone_radius,
+            )
+            env = Crazyflie(env_cfg)
+            shared_use_depth = use_depth
+            shared_eval_dt = eval_dt
+        else:
+            if use_depth != shared_use_depth:
+                raise RuntimeError(
+                    f"Seed {seedmodel}'s checkpoint use_depth={use_depth} doesn't match the "
+                    f"already-running sim (use_depth={shared_use_depth}, set from an earlier seed "
+                    "in this --seeds batch). Mixed RGB/RGB-D seeds can't share one sim instance -- "
+                    "run this seed separately."
                 )
-                video_paths[cam_name] = video_path
-                print(f"[INFO] Recording '{cam_name}' camera video ({vw}x{vh} @ {args.video_fps}fps) -> {video_path}")
+            if not np.isclose(eval_dt, shared_eval_dt, rtol=1e-3):
+                print(f"[WARN] Seed {seedmodel}'s derived eval_dt={eval_dt} differs from the "
+                      f"running sim's dt={shared_eval_dt} (fixed when the sim was created for an "
+                      "earlier seed) -- continuing at the sim's dt, not this seed's.")
 
-        def write_video_frame():
-            for cam_name, writer in video_writers.items():
-                writer.write(cv2.cvtColor(camera_fns[cam_name](), cv2.COLOR_RGB2BGR))
+        run_name = Path(run_dir).parent.name  # e.g. "H16_K20_ENCvit_LAT256"
+        enc_match = re.search(r'E([^_]+)', run_name)
+        lat_match = re.search(r'L(\d+)', run_name)
+        encoder_type = enc_match.group(1) if enc_match else "unknown"
+        latent_dim   = int(lat_match.group(1)) if lat_match else 256
+        print(f"[INFO] Inferred encoder type: {encoder_type}, latent dim: {latent_dim}")
+        # Infer dims
+        horizon = int(getattr(diffusion, "horizon", 16))
+        action_dim = int(getattr(diffusion, "action_dim", 3))
+        To = int(getattr(dataset, "n_obs_steps", 2)) if hasattr(dataset, "n_obs_steps") else 2
+        print(f"[INFO] Online eval started. To={To}, H={horizon}, action_dim={action_dim}")
+        # path = os.path.join(run_dir, "results")
+        # os.makedirs(path, exist_ok=True)
+        # os.makedirs("plots", exist_ok=True)
+        logger = MetricsLogger(                                             
+            save_dir=os.path.join(run_dir, "results"),                               
+            encoder_type=encoder_type,
+            latent_dim=latent_dim,
+            horizon=horizon,
+            n_diffusion_steps=20,
+            corridor_halfspaces  = corridor_halfspaces,
+            boxes                = BOXES,
+            cylinders            = CYLINDERS,
+        )
 
-        write_video_frame()
+        # ------------------ Video recording setup ------------------
+        camera_fns = {
+            "spectator": env.get_spectator_rgb,
+            "chase": env.get_chase_rgb,
+            "fpv": env.get_rgb,
+        }
+        video_dir = os.path.join(run_dir, "videos")
+        if args.record_video:
+            os.makedirs(video_dir, exist_ok=True)
 
+        # ── auto-increment output dirs so each run gets its own folder ────────────
+        def _next_free(base, name):
+            path = os.path.join(base, name)
+            if not os.path.exists(path):
+                return path
+            i = 1
+            while os.path.exists(os.path.join(base, f"{name}{i}")):
+                i += 1
+            return os.path.join(base, f"{name}{i}")
 
-        # init rgb(d) history
-        rgb0 = get_obs_frame_from_env(env, use_depth)
-        rgb_hist = deque(maxlen=To)
-        for _ in range(To):
-            rgb_hist.append((rgb0[0].copy(), rgb0[1].copy()) if use_depth else rgb0.copy())
+        traj_dir = _next_free(run_dir, "trajectories")
+        plot_dir = _next_free(run_dir, "plots")
+        os.makedirs(traj_dir, exist_ok=True)
+        os.makedirs(plot_dir, exist_ok=True)
+        print(f"[INFO] trajectories → {traj_dir}")
+        print(f"[INFO] plots        → {plot_dir}")
 
-        traj_xyz = []
-        actions_taken = []
-        prev_actions_real = None
-        cand_snapshots = []
+        # ------------------ Episodes ------------------
+        for ep, variant_name in enumerate(projection_variants):
+            vcfg = variant_cfg(variant_name)
+            if args.num_candidates is not None and vcfg["selection"] != "first":
+                vcfg["num_candidates"] = args.num_candidates
+            # ------------------ Optional projection ------------------
+            projection_mode=vcfg["projection_mode"]
+            gradient = (projection_mode == "gradient")
+            pos_projector = None   # obstacle-aware SLSQP projector (post-hoc + sdpc in-loop)
 
-        pos_init = env._pos_world().detach().cpu().numpy()[0]
-        traj_xyz.append(pos_init.copy())
-        # pos = env._pos_world().detach().cpu().numpy()[0]  # [x,y,z]
-        # target = env.target_pos[0].detach().cpu().numpy() if hasattr(env, "target_pos") else np.array([np.nan, np.nan, np.nan])
-        # cmd_xyz = pos.copy()
-        for step in range(args.max_steps):
-            # current position (for logging/command conversion)
-            pos = env._pos_world().detach().cpu().numpy()[0]  # [x,y,z]
-            target = env.target_pos[0].detach().cpu().numpy() if hasattr(env, "target_pos") else np.array([np.nan, np.nan, np.nan])
-            
-            # ── model_free: bypass diffusion entirely ─────────────────────
-            if variant_name.startswith("model_free"):
-                gain = 0.3
-                cmd_xyz = pos.copy()
-                cmd_xyz[:3] = pos[:3] + gain * (target[:3] - pos[:3])
-                obs_next, rew, done_vec, info = env.step(cmd_xyz)
-                rgb = get_obs_frame_from_env(env, use_depth)
-                rgb_hist.append(rgb)
-                write_video_frame()
-                pos2 = obs_next[0]
-                traj_xyz.append(pos2.copy())
-                actions_taken.append(cmd_xyz[:3] - pos[:3])
-                logger.step(pos=pos, action=cmd_xyz[:3] - pos[:3])
-                done = bool(done_vec[0]) if isinstance(done_vec, (list, tuple, np.ndarray, torch.Tensor)) else bool(done_vec)
-                if done:
-                    break
-                continue   # skip the diffusion path below
-
-            # ── diffusion path ────────────────────────────────────────────
-            # build condition
-            obs_rgb_t = preprocess_obs_stack(rgb_hist, use_depth).to(device)  # (1,To,3or4,H,W)
-            cond = {"obs_rgb": obs_rgb_t}
-            # a_chunk = sample_action_chunk(diffusion=diffusion,cond=cond,horizon=horizon,action_dim=action_dim,device=device,)
-            # a_chunk_real = dataset.action_normalizer.unnormalize(a_chunk)
-            # a0_real = a_chunk_real[0]* float(args.action_scale)
-
-            # -------------------------------------------------
-            # Sample K candidate chunks (normalized action space)
-            # -------------------------------------------------
-            if vcfg["projection_mode"] == "dpcc" and pos_projector is not None:
-                pos_projector.pos0 = pos[:3]  # current drone position for in-loop coord conversion
-            in_loop_projector = pos_projector if vcfg["projection_mode"] == "dpcc" else None
-
-            a_candidates_norm, infos = sample_action_candidates(diffusion=diffusion,cond=cond,horizon=horizon,action_dim=action_dim,
-                                                                num_candidates=vcfg["num_candidates"],projector=in_loop_projector)   # (K, H, D)
-
-            # Unnormalize all candidates to real delta-pos
-            a_candidates_real = dataset.action_normalizer.unnormalize(a_candidates_norm)   # (K, H, D)
-            # y_finals = a_candidates_real[:, :, 1].cumsum(axis=1)[:, -1]
-            # print(f"Candidate final y positions: {y_finals}")
-            # a0_real = a_candidates_real[0,0]* float(args.action_scale)
-
-            # # apply projection and get costs
-            # a_candidates_proj_real, proj_costs = project_action_candidates_with_positions(
-            #     projector=pos_projector,
-            #     pos0=pos[:3],
-            #     a_candidates_real=a_candidates_real,
-            #     device=device,
-            # )
-            # which = int(np.argmin(proj_costs))
-
-            # ── per-step projector update ──────────
-            # Gated on --dynamic_obstacles: with no dynamic obstacles,
-            # get_cylinder_positions() returns the same rest positions every step, so
-            # rebuilding the projector (full constraint-matrix reconstruction) would be
-            # a no-op — skip it and keep reusing the projector built once above.
-            _need_rebuild = (args.dynamic_obstacles_enabled or args.floating_spheres)
-            if _need_rebuild and vcfg["use_projection"]:
-                # get_cylinder_positions() returns current positions for ALL cylinders
-                # (static ones at rest, dynamic ones at actual current position)
-                cyl_now = env.get_cylinder_positions()
-                sph_now = env.get_sphere_positions() if args.floating_spheres else None
+            if vcfg["use_projection"]:
+                proj_dt = vcfg["dt"] if vcfg["dt"] is not None else 0.1
+                # All cylinders (static and dynamic) use the same base radius.
+                # Dynamic ones get their actual positions via --dynamic_obstacles (see below).
+                _init_spheres = SPHERES if args.floating_spheres else None
+                _proj_cyls    = CYLINDERS
                 pos_projector = build_position_projector(
                     horizon_H=horizon, gradient=gradient, device=device,
-                    boxes=BOXES, cylinders=cyl_now,
-                    spheres=sph_now,
+                    boxes=BOXES, cylinders=_proj_cyls,
+                    spheres=_init_spheres,
                     normalizer=None, tighten=vcfg["tighten"], dt=proj_dt,
                     use_dynamics=vcfg.get("use_dynamics", True),
-                    obs_amplitude=0.0,  # exact positions — no extra radius needed
                     drone_radius=drone_radius,
                     sphere_radius=SPHERE_RADIUS if args.floating_spheres else 0.0,
                     active_halfspaces=active_halfspaces,
                 )
-                if vcfg["projection_mode"] == "dpcc":
+                if vcfg["projection_mode"] == "sdpc":
+                    # Enable proper in-loop SLSQP with obstacle constraints.
+                    # pos0 is set per control step below (current drone position).
                     pos_projector.inloop_slsqp = True
                     pos_projector.action_normalizer = dataset.action_normalizer
-                    pos_projector.pos0 = pos[:3]
+                    pos_projector.pos0 = None  # filled in per step
 
-            # ── projection + selection  ---------
-            if vcfg["use_projection"] and vcfg["projection_mode"] in ("post", "sdpc"):
-                a_candidates_proj_real, proj_costs = project_action_candidates_with_positions(
-                    projector=pos_projector, pos0=pos[:3],
-                    a_candidates_real=a_candidates_real, device=device,
-                )
-            else:
-                a_candidates_proj_real = a_candidates_real
-                proj_costs = None
+            print(f"\n[INFO] ===== Episode {ep+1}/{args.episodes}_{variant_name} =====")
+            episode_start_time = time.time()
+            _ = env.reset(seed=ep)
+            logger.begin_episode(variant_name, episode=ep, seed=ep)
 
-            if vcfg["selection"] == "minimum_projection_cost" and proj_costs is not None:
-                which = int(np.argmin(proj_costs))
-            else:
-                which = choose_trajectory(
-                    a_candidates_proj_real, infos=infos,
-                    strategy=vcfg["selection"],
-                    prev_actions_real=prev_actions_real,
-                )
+            # Camera warm-up (important for Isaac/Replicator)
+            for _ in range(3):
+                pos = env._pos_world().detach().cpu().numpy()[0]
+                cmd_xyz = pos.copy()   # hold position
+                try:
+                    env.step(cmd_xyz)
+                except Exception:
+                    pass
 
-            # ── bound verification (set to True to enable, False to silence) ──
-            _VERIFY = False
-            if _VERIFY and vcfg["use_projection"]:
-                verify_projection(
-                    pos0=pos[:3],
-                    a_candidates_proj_real=a_candidates_proj_real,
-                    which=which,
-                    x_bounds=(-0.5, 4.5), y_bounds=(-0.95, 0.95), z_bounds=(0.0, 1.0),
-                    boxes=BOXES, cylinders=CYLINDERS,
-                    tighten=vcfg["tighten"],
-                    step=step,
-                )
+            # ── per-episode video writers, one per requested --camera, recorded
+            # simultaneously from the same rollout (only for variants the caller asked for) ──
+            record_this_episode = args.record_video and (
+                args.record_variants is None or variant_name in args.record_variants
+            )
+            video_writers = {}
+            video_paths = {}
+            if record_this_episode:
+                for cam_name in args.camera:
+                    get_video_frame = camera_fns[cam_name]
+                    frame0 = get_video_frame()
+                    vh, vw = frame0.shape[:2]
+                    video_path = os.path.join(video_dir, f"eval_{variant_name}_{cam_name}.mp4")
+                    video_writers[cam_name] = cv2.VideoWriter(
+                        video_path, cv2.VideoWriter_fourcc(*"mp4v"), args.video_fps, (vw, vh)
+                    )
+                    video_paths[cam_name] = video_path
+                    print(f"[INFO] Recording '{cam_name}' camera video ({vw}x{vh} @ {args.video_fps}fps) -> {video_path}")
 
-            a0_real = a_candidates_proj_real[which, 0] * float(args.action_scale)
-            prev_actions_real = a_candidates_proj_real[which:which+1]
+            def write_video_frame():
+                for cam_name, writer in video_writers.items():
+                    writer.write(cv2.cvtColor(camera_fns[cam_name](), cv2.COLOR_RGB2BGR))
 
-            
-
-            # print("[PROJ] costs:", proj_costs)
-            # delta_change = np.linalg.norm(a_candidates_proj_real - a_candidates_real, axis=(1,2))  # (K,)
-            # print("[PROJ] mean|proj-change|:", float(delta_change.mean()), "min:", float(delta_change.min()), "max:", float(delta_change.max()))
-
-            # Convert delta-pos -> absolute command (your env seems to accept xyz setpoints)
-            cmd_xyz = pos.copy()
-            cmd_xyz[:action_dim] = cmd_xyz[:action_dim] + a0_real[:action_dim]
-            # cmd_xyz[2] = 0.3 # If you want fixed altitude, uncomment:
-            print(f"[MODEL OUTPUT] which={which} a0_real={a0_real}" f" cmd_xyz={cmd_xyz[:3]}")
-            obs_next, rew, done_vec, info = env.step(cmd_xyz)
-
-            # update rgb(d) history after step
-            rgb = get_obs_frame_from_env(env, use_depth)
-            rgb_hist.append(rgb)
             write_video_frame()
-            # if step % 500 == 0:
-            #     plt.imshow(rgb)
-            #     plt.title("FPV Camera Frame")
-            #     plt.axis("off")
-            #     plt.show()
 
-            # log
-            # pos2 = env._pos_world().detach().cpu().numpy()[0]
-            pos2 = obs_next[0] 
-            # pos2 =cmd_xyz[:action_dim]
-            traj_xyz.append(pos2.copy())
-            actions_taken.append(a0_real.copy())
 
-            logger.step(pos=pos, action=a0_real)
+            # init rgb(d) history
+            rgb0 = get_obs_frame_from_env(env, use_depth)
+            rgb_hist = deque(maxlen=To)
+            for _ in range(To):
+                rgb_hist.append((rgb0[0].copy(), rgb0[1].copy()) if use_depth else rgb0.copy())
 
-            done = bool(done_vec[0]) if isinstance(done_vec, (list, tuple, np.ndarray, torch.Tensor)) else bool(done_vec)
-            print(f"step {step:04d} pos={pos2} done={done}")
+            traj_xyz = []
+            actions_taken = []
+            prev_actions_real = None
+            cand_snapshots = []
 
-            traj_xy = integrate_candidates_xy(pos2, a_candidates_real)  # (K,H+1,2)
-            cand_snapshots.append({
-                "step": step,
-                "pos": pos2.copy(),
-                "traj_xy": traj_xy,
-                "chosen": int(which),
-                "cyl_xy":  env.get_cylinder_positions() if args.dynamic_obstacles_enabled else None,
-                "sph_xyz": env.get_sphere_positions()   if args.floating_spheres          else None,
-            })
+            pos_init = env._pos_world().detach().cpu().numpy()[0]
+            traj_xyz.append(pos_init.copy())
 
-            if done:
-                print("[INFO] Done=True. Breaking episode loop.")
-                break
+            for step in range(args.max_steps):
+                # current position (for logging/command conversion)
+                pos = env._pos_world().detach().cpu().numpy()[0]  # [x,y,z]
 
-        for cam_name, writer in video_writers.items():
-            writer.release()
-            print(f"[INFO] Video saved -> {video_paths[cam_name]}")
+                # ── diffusion path ────────────────────────────────────────────
+                # build condition
+                obs_rgb_t = preprocess_obs_stack(rgb_hist, use_depth).to(device)  # (1,To,3or4,H,W)
+                cond = {"obs_rgb": obs_rgb_t}
+                # a_chunk = sample_action_chunk(diffusion=diffusion,cond=cond,horizon=horizon,action_dim=action_dim,device=device,)
+                # a_chunk_real = dataset.action_normalizer.unnormalize(a_chunk)
+                # a0_real = a_chunk_real[0]* float(args.action_scale)
 
-        success = bool(info["success"][0])
-        fell    = bool(info["fell"][0])
-        logger.end_episode(success=success, fell=fell)
-        if (ep + 1) % 5 == 0:
-            logger.print_live_summary()
-        
-        # save raw trajectory and metadata for this episode
-        traj_path = os.path.join(
-            traj_dir,
-            f"traj_{encoder_type}_L{latent_dim}_{variant_name}.npz"
-        )
-        np.savez(
-            traj_path,
-            xyz        = np.array(traj_xyz),        # (T, 3) full trajectory
-            actions    = np.array(actions_taken),    # (T, 3) actions taken
-            variant    = variant_name,
-            encoder    = encoder_type,
-            latent_dim = latent_dim,
-            success    = success,
-            fell       = fell,
-            episode    = ep,
-            boxes       = np.array(BOXES),           # (N, 2) box centers
-            cylinders   = np.array(CYLINDERS),       # (N, 2) cylinder centers
-            halfspaces  = np.array([[hs[0], hs[1]] for hs in active_halfspaces], dtype=object),
-            hs_sides    = np.array([hs[2] for hs in active_halfspaces]),
-            tighten     = vcfg.get("tighten", 0.0),
-            use_projection = vcfg["use_projection"],
-            projection_mode = vcfg["projection_mode"],
-            num_candidates = vcfg["num_candidates"] if vcfg["num_candidates"] > 0 else 1,
-            selection   = vcfg["selection"],
+                # -------------------------------------------------
+                # Sample K candidate chunks (normalized action space)
+                # -------------------------------------------------
+                if vcfg["projection_mode"] == "sdpc" and pos_projector is not None:
+                    pos_projector.pos0 = pos[:3]  # current drone position for in-loop coord conversion
+                in_loop_projector = pos_projector if vcfg["projection_mode"] == "sdpc" else None
 
-            # ── candidate snapshots (for replaying plan viz) ──
-            # save first N snapshots to keep file size reasonable
-            snap_pos    = np.array([s["pos"]    for s in cand_snapshots[:50]]),
-            snap_chosen = np.array([s["chosen"] for s in cand_snapshots[:50]]),
+                # capture RNG state before sampling so the plain (unguided) resample
+                # below (sdpc mode only) can reuse the exact same noise draw
+                _rng_cpu = torch.get_rng_state()
+                _rng_cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
 
-            # ── dynamic cylinder positions per step (T, N_cyl, 2) ──
-            cyl_xy_traj = np.array(
-                [s["cyl_xy"] for s in cand_snapshots if s.get("cyl_xy") is not None],
-                dtype=np.float32,
-            ) if any(s.get("cyl_xy") is not None for s in cand_snapshots) else np.zeros((0, len(CYLINDERS), 2), dtype=np.float32),
-            dynamic_cyl_indices = np.array(
-                args.dynamic_cyl_indices if args.dynamic_cyl_indices is not None else list(range(len(CYLINDERS))),
-                dtype=np.int32,
-            ) if args.dynamic_obstacles_enabled else np.array([], dtype=np.int32),
-            obs_amplitude  = float(obs_amplitude),
-            obs_frequency  = float(obs_frequency),
-            obs_axes = np.array(
-                args.obs_axes if args.obs_axes is not None
-                else (["y"] * len(CYLINDERS) if args.dynamic_obstacles_enabled else []),
-                dtype="U2",
-            ),
-            dynamic_obstacles = bool(args.dynamic_obstacles_enabled),
+                a_candidates_norm, infos = sample_action_candidates(diffusion=diffusion,cond=cond,horizon=horizon,action_dim=action_dim,
+                                                                    num_candidates=vcfg["num_candidates"],projector=in_loop_projector)   # (K, H, D)
 
-            # ── floating sphere metadata + per-step positions ──
-            floating_spheres  = bool(args.floating_spheres),
-            sphere_positions  = np.array(SPHERES, dtype=np.float32) if SPHERES
-                                else np.zeros((0, 3), dtype=np.float32),
-            sphere_radius     = float(SPHERE_RADIUS),
-            sphere_amplitude  = float(sphere_amplitude),
-            sphere_frequency  = float(sphere_frequency),
-            sph_xyz_traj = np.array(
-                [s["sph_xyz"] for s in cand_snapshots if s.get("sph_xyz") is not None],
-                dtype=np.float32,
-            ) if any(s.get("sph_xyz") is not None for s in cand_snapshots)
-              else np.zeros((0, max(len(SPHERES), 1), 3), dtype=np.float32),
-        )
-        print(f"[TRAJ] saved: {traj_path}")
+                # Unnormalize all candidates to real delta-pos, then apply action_scale
+                # here -- before projection/selection -- so the projector validates
+                # (and the selection scores) the trajectory that will actually be
+                # executed, not an unscaled stand-in for it.
+                a_candidates_real = dataset.action_normalizer.unnormalize(a_candidates_norm) * float(args.action_scale)   # (K, H, D)
 
-        # ------------------ Plot episode ------------------
-        if len(traj_xyz) > 0:
-            traj_xyz_np = np.stack(traj_xyz, axis=0).astype(np.float32)
+                # ── plain (unguided) model output ──────────────────────────────
+                # For "sdpc" mode, in_loop_projector steers the reverse-diffusion
+                # sampling itself, so a_candidates_real above is NOT the plain
+                # model output. Resample with the identical RNG state but
+                # projector=None to get the true "before guidance" candidates for
+                # the same underlying noise draw (doubles diffusion sampling cost
+                # for sdpc variants). Every other mode already sampled unguided.
+                if vcfg["projection_mode"] == "sdpc":
+                    torch.set_rng_state(_rng_cpu)
+                    if _rng_cuda is not None:
+                        torch.cuda.set_rng_state_all(_rng_cuda)
+                    a_plain_norm, _ = sample_action_candidates(diffusion=diffusion, cond=cond, horizon=horizon, action_dim=action_dim,
+                                                               num_candidates=vcfg["num_candidates"], projector=None)
+                    a_plain_real = dataset.action_normalizer.unnormalize(a_plain_norm) * float(args.action_scale)
+                else:
+                    a_plain_real = a_candidates_real
+                # y_finals = a_candidates_real[:, :, 1].cumsum(axis=1)[:, -1]
+                # print(f"Candidate final y positions: {y_finals}")
+                # a0_real = a_candidates_real[0,0]* float(args.action_scale)
 
-            # Z vs t
-            plt.figure(figsize=(7, 4))
-            plt.plot(traj_xyz_np[:, 2])
-            if np.isfinite(target).all():
-                plt.axhline(target[2], linestyle="--")
-            if args.floating_spheres and SPHERES:
-                _sr  = SPHERE_RADIUS
-                _amp = sphere_amplitude
-                for (_, _, _sz) in SPHERES:
-                    plt.axhspan(_sz - _sr - _amp, _sz + _sr + _amp,
-                                color="#4a9de0", alpha=0.12)
-                    plt.axhspan(_sz - _sr, _sz + _sr,
-                                color="#4a9de0", alpha=0.22)
-            plt.ylim(-0.05, 1.15)   # fix to flight envelope [0, 1] with small padding
-            plt.axhline(0.0, color="#888888", linewidth=0.8, linestyle=":")   # floor
-            plt.axhline(1.0, color="#888888", linewidth=0.8, linestyle=":")   # ceiling
-            plt.xlabel("timestep")
-            plt.ylabel("z  (m)")
-            plt.title(f"Z over time with {encoder_type}, {latent_dim} and {variant_name}")
-            plt.tight_layout()
+                # # apply projection and get costs
+                # a_candidates_proj_real, proj_costs = project_action_candidates_with_positions(
+                #     projector=pos_projector,
+                #     pos0=pos[:3],
+                #     a_candidates_real=a_candidates_real,
+                #     device=device,
+                # )
+                # which = int(np.argmin(proj_costs))
 
-            z_path =os.path.join(plot_dir, f"z_{variant_name}.pdf")
-            plt.savefig(z_path)
-            plt.close()
-            print(f"[PLOT] saved: {z_path}")
+                # ── per-step projector update ──────────
+                # Gated on --dynamic_obstacles: with no dynamic obstacles,
+                # get_cylinder_positions() returns the same rest positions every step, so
+                # rebuilding the projector (full constraint-matrix reconstruction) would be
+                # a no-op — skip it and keep reusing the projector built once above.
+                _need_rebuild = (args.dynamic_obstacles_enabled or args.floating_spheres)
+                if _need_rebuild and vcfg["use_projection"]:
+                    # get_cylinder_positions() returns current positions for ALL cylinders
+                    # (static ones at rest, dynamic ones at actual current position)
+                    cyl_now = env.get_cylinder_positions()
+                    sph_now = env.get_sphere_positions() if args.floating_spheres else None
+                    pos_projector = build_position_projector(
+                        horizon_H=horizon, gradient=gradient, device=device,
+                        boxes=BOXES, cylinders=cyl_now,
+                        spheres=sph_now,
+                        normalizer=None, tighten=vcfg["tighten"], dt=proj_dt,
+                        use_dynamics=vcfg.get("use_dynamics", True),
+                        obs_amplitude=0.0,  # exact positions — no extra radius needed
+                        drone_radius=drone_radius,
+                        sphere_radius=SPHERE_RADIUS if args.floating_spheres else 0.0,
+                        active_halfspaces=active_halfspaces,
+                    )
+                    if vcfg["projection_mode"] == "sdpc":
+                        pos_projector.inloop_slsqp = True
+                        pos_projector.action_normalizer = dataset.action_normalizer
+                        pos_projector.pos0 = pos[:3]
 
-            # XY plot (one figure, one axes)
-            xy_exec = traj_xyz_np[:, :2]
-            fig, ax = plt.subplots(figsize=(8, 7))
-
-            # Executed trajectory
-            ax.plot(xy_exec[:, 0], xy_exec[:, 1], linewidth=2.5, label="executed")
-            ax.scatter(pos_init[0], pos_init[1], marker="o", s=70, color="green", zorder=5, label="start")
-            ax.scatter(xy_exec[-1, 0], xy_exec[-1, 1], marker="x", s=60, label="end")
-
-            # Target
-            ax.scatter(target[0], target[1], marker="*", s=180, label="target")
-
-            # Obstacles overlay
-            add_obstacles_xy(ax, BOXES, [], box_size_xy=0.20, cyl_radius=0.06)  # boxes only
-            if args.dynamic_obstacles_enabled:
-                dyn_idx = args.dynamic_cyl_indices if args.dynamic_cyl_indices is not None \
-                          else list(range(len(CYLINDERS)))
-                _raw_axes = args.obs_axes if args.obs_axes is not None else ["y"]
-                dyn_axes_resolved = (_raw_axes * len(dyn_idx))[:len(dyn_idx)] if len(_raw_axes) == 1 else _raw_axes
-                dyn_set = set(dyn_idx)
-                static_cyls = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i not in dyn_set]
-                dyn_cyls    = [CYLINDERS[i] for i in dyn_idx]
-                add_obstacles_xy(ax, [], static_cyls, box_size_xy=0.20, cyl_radius=0.06)
-                add_dynamic_cylinders_xy(
-                    ax, dyn_cyls, dyn_axes_resolved, cand_snapshots,
-                    obs_amplitude=obs_amplitude, cyl_radius=0.06,
-                    drone_radius=drone_radius,
-                )
-            else:
-                add_obstacles_xy(ax, [], CYLINDERS, box_size_xy=0.20, cyl_radius=0.06)
-
-            # Sphere obstacles overlay
-            if args.floating_spheres and SPHERES:
-                from matplotlib.patches import Circle as _Circle
-                _sr  = SPHERE_RADIUS
-                _amp = sphere_amplitude
-                for (sx, sy, _sz) in SPHERES:
-                    ax.add_patch(_Circle(
-                        (sx, sy), _sr,
-                        linewidth=0.8, edgecolor="#1f6fbf", facecolor="#4a9de0",
-                        alpha=0.40, zorder=2,
-                    ))
-                    ax.add_patch(_Circle(
-                        (sx, sy), _sr + _amp,
-                        linewidth=0.8, edgecolor="#4a9de0", facecolor="none",
-                        linestyle=":", alpha=0.30, zorder=1,
-                    ))
-            ax.set_xlim(-0.5, 4.5)
-            ax.set_ylim(-1.0, 1.0)
-            if active_halfspaces:
-                plot_halfspace_constraints_xy(ax, active_halfspaces, (-0.5, 4.5), (-1.0, 1.0))
-
-            # ---- blue constraint margin overlay ----
-            tighten_val = vcfg.get("tighten", 0.0)
-            constraint_handles = []
-            if vcfg["use_projection"]:
-                if args.dynamic_obstacles_enabled:
-                    _dyn_set_plot = set(args.dynamic_cyl_indices) if args.dynamic_cyl_indices is not None \
-                                    else set(range(len(CYLINDERS)))
-                    _static_c = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i not in _dyn_set_plot]
-                    _dyn_c    = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i in     _dyn_set_plot]
-                    # dynamic cylinders: no blue circle — orange swept band already shows range
-                    constraint_handles = plot_constraint_overlay(
-                        ax, BOXES, _static_c,
-                        tighten=tighten_val, drone_radius=drone_radius,
-                        x_bounds=(-0.5, 4.5), y_bounds=(-1.0, 1.0),
+                # ── projection + selection  ---------
+                if vcfg["use_projection"] and vcfg["projection_mode"] in ("post", "sdpc"):
+                    a_candidates_proj_real, proj_costs = project_action_candidates_with_positions(
+                        projector=pos_projector, pos0=pos[:3],
+                        a_candidates_real=a_candidates_real, device=device,
                     )
                 else:
-                    constraint_handles = plot_constraint_overlay(
-                        ax, BOXES, CYLINDERS,
-                        tighten=tighten_val,
-                        drone_radius=drone_radius,
-                        x_bounds=(-0.5, 4.5),
-                        y_bounds=(-1.0, 1.0),
+                    a_candidates_proj_real = a_candidates_real
+                    proj_costs = None
+
+                if vcfg["selection"] == "minimum_projection_cost" and proj_costs is not None:
+                    which = int(np.argmin(proj_costs))
+                else:
+                    which = choose_trajectory(
+                        a_candidates_proj_real, infos=infos,
+                        strategy=vcfg["selection"],
+                        prev_actions_real=prev_actions_real,
                     )
-            # --------------------------------------------
 
-            # Overlay candidate rollouts snapshots
-            for snap in cand_snapshots:
-                traj_xy = snap["traj_xy"]      # (K,H+1,2)
-                chosen = snap["chosen"]
+                # ── bound verification (set to True to enable, False to silence) ──
+                _VERIFY = False
+                if _VERIFY and vcfg["use_projection"]:
+                    verify_projection(
+                        pos0=pos[:3],
+                        a_candidates_proj_real=a_candidates_proj_real,
+                        which=which,
+                        x_bounds=(-0.5, 4.5), y_bounds=(-0.95, 0.95), z_bounds=(0.0, 1.0),
+                        boxes=BOXES, cylinders=CYLINDERS,
+                        tighten=vcfg["tighten"],
+                        step=step,
+                    )
 
-                K = traj_xy.shape[0]
-                for k in range(K):
-                    xy = traj_xy[k]
+                a0_real = a_candidates_proj_real[which, 0]  # action_scale already applied pre-projection
+                prev_actions_real = a_candidates_proj_real[which:which+1]
 
-                    if k == chosen:
-                        # ax.plot(xy[:, 0], xy[:, 1], linewidth=3.5, alpha=0.9) #for chosen trajectory
-                        pass
-                    else:
-                        # ax.plot(xy[:, 0], xy[:, 1], linewidth=1.5, alpha=0.25) #for unchosen trajectories
-                        pass
-
-                # Mark snapshot start position
-                ax.scatter(snap["pos"][0], snap["pos"][1], s=12, alpha=0.4)
-
-            print("[DEBUG] cand_snapshots count:", len(cand_snapshots))
-            if len(cand_snapshots) > 0:
-                print("[DEBUG] first snapshot traj_xy shape:", cand_snapshots[0]["traj_xy"].shape)
-
-            ax.set_xlabel("x")
-            ax.set_ylabel("y")
-            ax.set_title(f"XY trajectory with{encoder_type}, {latent_dim} and {variant_name}")  #and {variant_name}
-            ax.set_aspect("equal", adjustable="box")  # equal scale without expanding y beyond corridor
-            ax.set_xlim(-0.5, 4.5)
-            ax.set_ylim(-1.25, 1.25)
-            ax.grid(True, alpha=0.3)
-            ax.legend()
-
-            # merge legend handles
-            handles, labels = ax.get_legend_handles_labels()
-            hs_legend = [mpatches.Patch(facecolor="royalblue", alpha=0.3,
-                                        label="halfspace constraint")] if active_halfspaces else []
-            ax.legend(handles=handles + constraint_handles + hs_legend,
-                      loc="upper left", fontsize=8)
             
-            out_path = os.path.join(plot_dir, f"xy_{variant_name}.pdf")
-            fig.tight_layout()
-            fig.savefig(out_path)
-            # plt.show()
-            plt.close(fig)
-            print("[PLOT] saved:", out_path)
 
-        env.reset()
-    logger.save()
+                # print("[PROJ] costs:", proj_costs)
+                # delta_change = np.linalg.norm(a_candidates_proj_real - a_candidates_real, axis=(1,2))  # (K,)
+                # print("[PROJ] mean|proj-change|:", float(delta_change.mean()), "min:", float(delta_change.min()), "max:", float(delta_change.max()))
+
+                # Convert delta-pos -> absolute command (your env seems to accept xyz setpoints)
+                cmd_xyz = pos.copy()
+                cmd_xyz[:action_dim] = cmd_xyz[:action_dim] + a0_real[:action_dim]
+                # cmd_xyz[2] = 0.3 # If you want fixed altitude, uncomment:
+                print(f"[MODEL OUTPUT] which={which} a0_real={a0_real}" f" cmd_xyz={cmd_xyz[:3]}")
+                obs_next, rew, done_vec, info = env.step(cmd_xyz)
+
+                # update rgb(d) history after step
+                rgb = get_obs_frame_from_env(env, use_depth)
+                rgb_hist.append(rgb)
+                write_video_frame()
+                # if step % 500 == 0:
+                #     plt.imshow(rgb)
+                #     plt.title("FPV Camera Frame")
+                #     plt.axis("off")
+                #     plt.show()
+
+                # log
+                # pos2 = env._pos_world().detach().cpu().numpy()[0]
+                pos2 = obs_next[0] 
+                # pos2 =cmd_xyz[:action_dim]
+                traj_xyz.append(pos2.copy())
+                actions_taken.append(a0_real.copy())
+
+                logger.step(pos=pos, action=a0_real)
+
+                done = bool(done_vec[0]) if isinstance(done_vec, (list, tuple, np.ndarray, torch.Tensor)) else bool(done_vec)
+                print(f"step {step:04d} pos={pos2} done={done}")
+
+                # xyz is a strict superset of xy (xyz[..., :2] == xy) -- integrate
+                # once and slice for any xy-only consumer instead of integrating twice.
+                cand_xyz = integrate_candidates_xyz(pos2, a_candidates_real)  # (K,H+1,3)
+                # projected/safe version of the chosen candidate's horizon —
+                # same data project_action_candidates_with_positions() already
+                # computed above (a_candidates_proj_real), just also integrated
+                # and kept instead of being discarded after action selection
+                cand_xyz_proj = integrate_candidates_xyz(
+                    pos2, a_candidates_proj_real[which:which + 1]
+                )[0]  # (H+1,3)
+                # plain/unguided model output for the same candidate index and
+                # noise draw — see a_plain_real above (only differs from
+                # a_candidates_real for "sdpc" mode's in-loop-guided sampling)
+                cand_xyz_plain = integrate_candidates_xyz(
+                    pos2, a_plain_real[which:which + 1]
+                )[0]  # (H+1,3)
+                cand_snapshots.append({
+                    "step": step,
+                    "pos": pos2.copy(),
+                    # keys keep their original "traj_xy*" names for compatibility
+                    # with old npz readers, but now carry (x,y,z) -- consumers
+                    # slice [..., :2] for xy and check shape[-1] >= 3 for z.
+                    "traj_xy": cand_xyz,
+                    "traj_xy_proj": cand_xyz_proj,
+                    "traj_xy_plain": cand_xyz_plain,
+                    "chosen": int(which),
+                    "cyl_xy":  env.get_cylinder_positions() if args.dynamic_obstacles_enabled else None,
+                    "sph_xyz": env.get_sphere_positions()   if args.floating_spheres          else None,
+                })
+
+                if done:
+                    print("[INFO] Done=True. Breaking episode loop.")
+                    break
+
+            for cam_name, writer in video_writers.items():
+                writer.release()
+                print(f"[INFO] Video saved -> {video_paths[cam_name]}")
+
+            episode_wall_time_sec = time.time() - episode_start_time
+
+            success = bool(info["success"][0])
+            fell    = bool(info["fell"][0])
+            logger.end_episode(success=success, fell=fell)
+            if (ep + 1) % 5 == 0:
+                logger.print_live_summary()
+        
+            # save raw trajectory and metadata for this episode
+            traj_path = os.path.join(
+                traj_dir,
+                f"traj_{encoder_type}_L{latent_dim}_{variant_name}.npz"
+            )
+            np.savez(
+                traj_path,
+                xyz        = np.array(traj_xyz),        # (T, 3) full trajectory
+                actions    = np.array(actions_taken),    # (T, 3) actions taken
+                variant    = variant_name,
+                encoder    = encoder_type,
+                latent_dim = latent_dim,
+                success    = success,
+                fell       = fell,
+                episode    = ep,
+                episode_wall_time_sec = float(episode_wall_time_sec),
+                boxes       = np.array(BOXES),           # (N, 2) box centers
+                cylinders   = np.array(CYLINDERS),       # (N, 2) cylinder centers
+                halfspaces  = np.array([[hs[0], hs[1]] for hs in active_halfspaces], dtype=object),
+                hs_sides    = np.array([hs[2] for hs in active_halfspaces]),
+                tighten     = vcfg.get("tighten", 0.0),
+                use_projection = vcfg["use_projection"],
+                projection_mode = vcfg["projection_mode"],
+                num_candidates = vcfg["num_candidates"] if vcfg["num_candidates"] > 0 else 1,
+                selection   = vcfg["selection"],
+
+                # ── candidate snapshots (for replaying plan viz) ──
+                # save full episode length (all steps), not just a truncated prefix
+                snap_pos     = np.array([s["pos"]     for s in cand_snapshots]),
+                snap_chosen  = np.array([s["chosen"]  for s in cand_snapshots]),
+                cand_traj_xy = np.array([s["traj_xy"] for s in cand_snapshots]),  # (N_snap, K, H+1, 3) all candidate rollouts, now with z
+                cand_traj_xy_proj = np.array([s["traj_xy_proj"] for s in cand_snapshots]),  # (N_snap, H+1, 3) projected/safe horizon of the chosen candidate
+                cand_traj_xy_plain = np.array([s["traj_xy_plain"] for s in cand_snapshots]),  # (N_snap, H+1, 3) plain/unguided model output, same noise draw as chosen candidate
+
+                # ── dynamic cylinder positions per step (T, N_cyl, 2) ──
+                cyl_xy_traj = np.array(
+                    [s["cyl_xy"] for s in cand_snapshots if s.get("cyl_xy") is not None],
+                    dtype=np.float32,
+                ) if any(s.get("cyl_xy") is not None for s in cand_snapshots) else np.zeros((0, len(CYLINDERS), 2), dtype=np.float32),
+                dynamic_cyl_indices = np.array(
+                    args.dynamic_cyl_indices if args.dynamic_cyl_indices is not None else list(range(len(CYLINDERS))),
+                    dtype=np.int32,
+                ) if args.dynamic_obstacles_enabled else np.array([], dtype=np.int32),
+                obs_amplitude  = float(obs_amplitude),
+                obs_frequency  = float(obs_frequency),
+                obs_axes = np.array(
+                    args.obs_axes if args.obs_axes is not None
+                    else (["y"] * len(CYLINDERS) if args.dynamic_obstacles_enabled else []),
+                    dtype="U2",
+                ),
+                dynamic_obstacles = bool(args.dynamic_obstacles_enabled),
+
+                # ── floating sphere metadata + per-step positions ──
+                floating_spheres  = bool(args.floating_spheres),
+                sphere_positions  = np.array(SPHERES, dtype=np.float32) if SPHERES
+                                    else np.zeros((0, 3), dtype=np.float32),
+                sphere_radius     = float(SPHERE_RADIUS),
+                sphere_amplitude  = float(sphere_amplitude),
+                sphere_frequency  = float(sphere_frequency),
+                sph_xyz_traj = np.array(
+                    [s["sph_xyz"] for s in cand_snapshots if s.get("sph_xyz") is not None],
+                    dtype=np.float32,
+                ) if any(s.get("sph_xyz") is not None for s in cand_snapshots)
+                  else np.zeros((0, max(len(SPHERES), 1), 3), dtype=np.float32),
+            )
+            print(f"[TRAJ] saved: {traj_path}")
+
+            # ------------------ Plot episode ------------------
+            if len(traj_xyz) > 0:
+                traj_xyz_np = np.stack(traj_xyz, axis=0).astype(np.float32)
+
+                # Z vs t
+                plt.figure(figsize=(7, 4))
+                plt.plot(traj_xyz_np[:, 2])
+                if args.floating_spheres and SPHERES:
+                    _sr  = SPHERE_RADIUS
+                    _amp = sphere_amplitude
+                    for (_, _, _sz) in SPHERES:
+                        plt.axhspan(_sz - _sr - _amp, _sz + _sr + _amp,
+                                    color="#4a9de0", alpha=0.12)
+                        plt.axhspan(_sz - _sr, _sz + _sr,
+                                    color="#4a9de0", alpha=0.22)
+                plt.ylim(-0.05, 1.15)   # fix to flight envelope [0, 1] with small padding
+                plt.axhline(0.0, color="#888888", linewidth=0.8, linestyle=":")   # floor
+                plt.axhline(1.0, color="#888888", linewidth=0.8, linestyle=":")   # ceiling
+                plt.xlabel("timestep")
+                plt.ylabel("z  (m)")
+                plt.title(f"Z over time with {encoder_type}, {latent_dim} and {variant_name}")
+                plt.tight_layout()
+
+                z_path =os.path.join(plot_dir, f"z_{variant_name}.pdf")
+                plt.savefig(z_path)
+                plt.close()
+                print(f"[PLOT] saved: {z_path}")
+
+                # XY plot (one figure, one axes)
+                xy_exec = traj_xyz_np[:, :2]
+                fig, ax = plt.subplots(figsize=(8, 7))
+
+                # Executed trajectory
+                ax.plot(xy_exec[:, 0], xy_exec[:, 1], linewidth=2.5, label="executed")
+                ax.scatter(pos_init[0], pos_init[1], marker="o", s=70, color="green", zorder=5, label="start")
+                ax.scatter(xy_exec[-1, 0], xy_exec[-1, 1], marker="x", s=60, label="end")
+
+                # Obstacles overlay
+                add_obstacles_xy(ax, BOXES, [], box_size_xy=0.20, cyl_radius=0.06)  # boxes only
+                if args.dynamic_obstacles_enabled:
+                    dyn_idx = args.dynamic_cyl_indices if args.dynamic_cyl_indices is not None \
+                              else list(range(len(CYLINDERS)))
+                    _raw_axes = args.obs_axes if args.obs_axes is not None else ["y"]
+                    dyn_axes_resolved = (_raw_axes * len(dyn_idx))[:len(dyn_idx)] if len(_raw_axes) == 1 else _raw_axes
+                    dyn_set = set(dyn_idx)
+                    static_cyls = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i not in dyn_set]
+                    dyn_cyls    = [CYLINDERS[i] for i in dyn_idx]
+                    add_obstacles_xy(ax, [], static_cyls, box_size_xy=0.20, cyl_radius=0.06)
+                    add_dynamic_cylinders_xy(
+                        ax, dyn_cyls, dyn_axes_resolved, cand_snapshots,
+                        obs_amplitude=obs_amplitude, cyl_radius=0.06,
+                        drone_radius=drone_radius,
+                    )
+                else:
+                    add_obstacles_xy(ax, [], CYLINDERS, box_size_xy=0.20, cyl_radius=0.06)
+
+                # Sphere obstacles overlay
+                if args.floating_spheres and SPHERES:
+                    from matplotlib.patches import Circle as _Circle
+                    _sr  = SPHERE_RADIUS
+                    _amp = sphere_amplitude
+                    for (sx, sy, _sz) in SPHERES:
+                        ax.add_patch(_Circle(
+                            (sx, sy), _sr,
+                            linewidth=0.8, edgecolor="#1f6fbf", facecolor="#4a9de0",
+                            alpha=0.40, zorder=2,
+                        ))
+                        ax.add_patch(_Circle(
+                            (sx, sy), _sr + _amp,
+                            linewidth=0.8, edgecolor="#4a9de0", facecolor="none",
+                            linestyle=":", alpha=0.30, zorder=1,
+                        ))
+                ax.set_xlim(-0.5, 4.5)
+                ax.set_ylim(-1.0, 1.0)
+                if active_halfspaces:
+                    plot_halfspace_constraints_xy(ax, active_halfspaces, (-0.5, 4.5), (-1.0, 1.0))
+
+                # ---- blue constraint margin overlay ----
+                tighten_val = vcfg.get("tighten", 0.0)
+                constraint_handles = []
+                if vcfg["use_projection"]:
+                    if args.dynamic_obstacles_enabled:
+                        _dyn_set_plot = set(args.dynamic_cyl_indices) if args.dynamic_cyl_indices is not None \
+                                        else set(range(len(CYLINDERS)))
+                        _static_c = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i not in _dyn_set_plot]
+                        _dyn_c    = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i in     _dyn_set_plot]
+                        # dynamic cylinders: no blue circle — orange swept band already shows range
+                        constraint_handles = plot_constraint_overlay(
+                            ax, BOXES, _static_c,
+                            tighten=tighten_val, drone_radius=drone_radius,
+                            x_bounds=(-0.5, 4.5), y_bounds=(-1.0, 1.0),
+                        )
+                    else:
+                        constraint_handles = plot_constraint_overlay(
+                            ax, BOXES, CYLINDERS,
+                            tighten=tighten_val,
+                            drone_radius=drone_radius,
+                            x_bounds=(-0.5, 4.5),
+                            y_bounds=(-1.0, 1.0),
+                        )
+                # --------------------------------------------
+
+                # Overlay candidate rollouts snapshots
+                for snap in cand_snapshots:
+                    traj_xy = snap["traj_xy"]      # (K,H+1,2)
+                    chosen = snap["chosen"]
+
+                    K = traj_xy.shape[0]
+                    for k in range(K):
+                        xy = traj_xy[k]
+
+                        if k == chosen:
+                            # ax.plot(xy[:, 0], xy[:, 1], linewidth=3.5, alpha=0.9) #for chosen trajectory
+                            pass
+                        else:
+                            # ax.plot(xy[:, 0], xy[:, 1], linewidth=1.5, alpha=0.25) #for unchosen trajectories
+                            pass
+
+                    # Mark snapshot start position
+                    ax.scatter(snap["pos"][0], snap["pos"][1], s=12, alpha=0.4)
+
+                print("[DEBUG] cand_snapshots count:", len(cand_snapshots))
+                if len(cand_snapshots) > 0:
+                    print("[DEBUG] first snapshot traj_xy shape:", cand_snapshots[0]["traj_xy"].shape)
+
+                ax.set_xlabel("x")
+                ax.set_ylabel("y")
+                ax.set_title(f"XY trajectory with{encoder_type}, {latent_dim} and {variant_name}")  #and {variant_name}
+                ax.set_aspect("equal", adjustable="box")  # equal scale without expanding y beyond corridor
+                ax.set_xlim(-0.5, 4.5)
+                ax.set_ylim(-1.25, 1.25)
+                ax.grid(True, alpha=0.3)
+                ax.legend()
+
+                # merge legend handles
+                handles, labels = ax.get_legend_handles_labels()
+                hs_legend = [mpatches.Patch(facecolor="royalblue", alpha=0.3,
+                                            label="halfspace constraint")] if active_halfspaces else []
+                ax.legend(handles=handles + constraint_handles + hs_legend,
+                          loc="upper left", fontsize=8)
+            
+                out_path = os.path.join(plot_dir, f"xy_{variant_name}.pdf")
+                fig.tight_layout()
+                fig.savefig(out_path)
+                # plt.show()
+                plt.close(fig)
+                print("[PLOT] saved:", out_path)
+
+            env.reset()
+        logger.save()
+
     env.close()
     os._exit(0)
 

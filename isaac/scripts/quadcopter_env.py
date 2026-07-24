@@ -9,24 +9,61 @@ args_cli.enable_cameras = True
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+import carb
+import omni.appwindow
+from omni.kit.viewport.utility import capture_viewport_to_file, get_active_viewport
+
 import isaaclab.sim as sim_utils
 from isaaclab.sim import SimulationContext
 from isaaclab.scene import InteractiveScene
 
 from crazyflie_env_cfg import CrazyflieSceneCfg
 
+_capture_count = 0
+
+
+def _capture_screenshot():
+    """Fire-and-forget capture of whatever the viewport shows right now."""
+    global _capture_count
+    viewport = get_active_viewport()
+    out_path = f"corridor_topdown_{_capture_count:02d}.png"
+    capture_viewport_to_file(viewport, file_path=out_path)
+    print(f"[INFO]: capturing -> {out_path}")
+    _capture_count += 1
+
+
+def _on_keyboard_event(event, *args, **kwargs):
+    if event.type == carb.input.KeyboardEventType.KEY_PRESS and event.input.name == "SPACE":
+        _capture_screenshot()
+    return True
+
+
 def main():
     """Main function."""
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
     sim = SimulationContext(sim_cfg)
-    # Set main camera
-    sim.set_camera_view([-2.5, 2.0, 2.0],  [0.0, 0.0, 0.0] )
+
+    # Top-down view: camera just under the ceiling (WALL_HEIGHT=2.0), looking
+    # straight down at the corridor centre. Staying inside the room avoids
+    # the Ceiling cuboid (crazyflie_env_cfg.py) blocking the shot.
+    sim.set_camera_view([2.25, 0.0, 1.9], [2.25, 0.0, 0.0])
 
     scene_cfg = CrazyflieSceneCfg(num_envs=args_cli.num_envs, env_spacing= 2.0)
     scene = InteractiveScene(scene_cfg)
 
     sim.reset()
-    print("[INFO]: Setup complete...")
+
+    appwindow = omni.appwindow.get_default_app_window()
+    input_iface = carb.input.acquire_input_interface()
+    keyboard = appwindow.get_keyboard()
+    keyboard_sub = input_iface.subscribe_to_keyboard_events(keyboard, _on_keyboard_event)
+
+    print("[INFO]: Setup complete. Press SPACE in the viewport to save a screenshot, close the window to quit.")
+
+    while simulation_app.is_running():
+        sim.render()
+
+    input_iface.unsubscribe_to_keyboard_events(keyboard, keyboard_sub)
 
 
 if __name__ == "__main__":

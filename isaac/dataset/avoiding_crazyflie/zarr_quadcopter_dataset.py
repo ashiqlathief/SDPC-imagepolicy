@@ -11,23 +11,28 @@ plt.rcParams['font.size'] = 12
 # ── corridor / scene constants (kept in sync with plotall.py) ─────────────
 CORRIDOR_END  = 4.1      # x position of the end wall / gate
 WALL_HEIGHT   = 1.0      # floor=0, ceiling=1 m
-X_LIM_XY     = (-0.2, 4.7)
-Y_LIM_XY     = (-1.2,  1.2)
-X_LIM_XZ     = (-0.2, 4.7)
-Z_LIM_XZ     = (-0.05, 1.35)
+X_LIM_XY     = (-0.2, 4.15)
+Y_LIM_XY     = (-1.05,  1.05)
+X_LIM_XZ     = (-0.2, 4.15)
+Z_LIM_XZ     = (-0.05, 1.1)
+
+# subsamples every plot's timesteps (dt_collect=0.005s -> effective
+# STRIDE*0.005s spacing) so ~1734-step episodes don't turn into illegible
+# ink-blots once ~188 of them are overlaid on one axes.
+STRIDE = 10
 
 WALL_KW = dict(linewidth=1.5, edgecolor="#555555", facecolor="#cccccc",
                alpha=0.50, zorder=1)
 
 BOXES = [
     # (x, y)  — 2-D centre, activate when obstacles are present at collection time
-    # (3.5,  0.2), (2.2, -0.2), (1.6,  0.2),
-    # (3.7, -0.3), (0.6,  0.1), (1.0, -0.3),
+    # (5.5,  0.2), (2.2, -0.2), (1.6,  0.2),
+    # (5.7, -0.5), (0.6,  0.1), (1.0, -0.5),
 ]
 CYLINDERS = [
     # (x, y)
-    # (1.4, -0.2), (2.8,  0.3), (1.2,  0.4),
-    # (3.5,  0.4), (2.0,  0.4), (2.5,  0.3),
+    # (1.4, -0.2), (2.8,  0.5), (1.2,  0.4),
+    # (5.5,  0.4), (2.0,  0.4), (2.5,  0.5),
 ]
 
 
@@ -94,9 +99,9 @@ print("arrays:", list(g.array_keys()))
 for k in g.array_keys():
     print(k, g[k].shape, g[k].dtype)
 
-rgb    = g["rgb"]                      # zarr array (T, H, W, 3)
+rgb    = g["rgb"]                      # zarr array (T, H, W, 5)
 states = g["states"][:]                # (T, 13)
-pos    = states[:, :3]                 # (T, 3)  x y z
+pos    = states[:, :5]                 # (T, 5)  x y z
 
 term   = g["terminals"][:].astype(np.uint8)
 ends   = np.where(term == 1)[0]
@@ -107,6 +112,18 @@ print("episode lengths (first 10):", lengths[:10])
 print("min/mean/max:", lengths.min(), lengths.mean(), lengths.max())
 print("num episodes:", int((term == 1).sum()))
 print("first terminal indices:", np.where(term == 1)[0][:10])
+
+# ── exclude known data-collection artifacts ───────────────────────────────
+# episode 66 reaches the goal on schedule (~1735 steps, same as every other
+# episode) but its terminal flag doesn't fire until step 2452 -- it drifts
+# near the far corridor wall for ~700 extra steps instead of ending cleanly.
+# That's a collection artifact, not a genuine maneuver variant, so it's
+# excluded from every plot below.
+EXCLUDED_EPISODES = [66]
+keep = np.ones(len(starts), dtype=bool)
+keep[EXCLUDED_EPISODES] = False
+starts, ends, lengths = starts[keep], ends[keep], lengths[keep]
+print(f"[INFO] excluded episodes {EXCLUDED_EPISODES} -> {len(starts)} episodes remain")
 
 
 
@@ -129,7 +146,7 @@ def plot_episode_frames(zarr_path, episode_idx=0, num_frames=12):
     axes = axes.flatten()
     
     for i, idx in enumerate(indices):
-        frame = g["rgb"][idx]   # (H, W, 3) uint8
+        frame = g["rgb"][idx]   # (H, W, 5) uint8
         axes[i].imshow(frame)
         axes[i].set_title(f"t={idx - ep_start}", fontsize=9)
         axes[i].axis("off")
@@ -145,39 +162,36 @@ def plot_episode_frames(zarr_path, episode_idx=0, num_frames=12):
         print(f"  t={i:03d}: mean={frame.mean():.4f}  min={frame.min():.4f}  max={frame.max():.4f}")
 
 # run it
-plot_episode_frames(sim_framework_path("isaac", "dataset", "avoiding_crazyflie", "data", "zarr", "env_000.zarr"), episode_idx=0, num_frames=30)
+# plot_episode_frames(sim_framework_path("isaac", "dataset", "avoiding_crazyflie", "data", "zarr", "env_000.zarr"), episode_idx=0, num_frames=30)
 
 
 fig_xz, ax_xz_solo = plt.subplots(figsize=(10, 4))
-cmap = plt.cm.Blues
+cmap = plt.cm.viridis
 n_ep = len(starts)
 for i, (s, e) in enumerate(zip(starts, ends)):
-    xz = pos[s:e+1, ::2]   # columns 0 (x) and 2 (z)
-    color = cmap(0.35 + 0.55 * i / max(n_ep - 1, 1))
-    ax_xz_solo.plot(xz[:, 0], xz[:, 1], color=color, linewidth=0.7, alpha=0.65)
+    xz = pos[s:e+1:STRIDE, ::2]   # columns 0 (x) and 2 (z)
+    color = cmap(i / max(n_ep - 1, 1))
+    ax_xz_solo.scatter(xz[:, 0], xz[:, 1], color=color, s=10, alpha=0.65, linewidths=0)
 add_corridor_xz(ax_xz_solo)
-add_goal_line(ax_xz_solo, plane="xz")
-ax_xz_solo.set_xlabel("x (m)")
-ax_xz_solo.set_ylabel("z (m)")
+# add_goal_line(ax_xz_solo, plane="xz")
+ax_xz_solo.set_xlabel("X Position (m)", fontsize=14, fontweight="bold")
+ax_xz_solo.set_ylabel("Z Position (m)", fontsize=14, fontweight="bold")
 ax_xz_solo.set_xlim(*X_LIM_XZ)
 ax_xz_solo.set_ylim(*Z_LIM_XZ)
 ax_xz_solo.grid(True, alpha=0.25)
 fig_xz.tight_layout()
 z_path = "plots/datasetxz.pdf"
-fig_xz.savefig(z_path, dpi=150, bbox_inches="tight")
+fig_xz.savefig(z_path, dpi=300, bbox_inches="tight")
+fig_xz.savefig("plots/datasetxz.png", dpi=300, bbox_inches="tight")
 plt.show()
 
-fig, (ax_xy, ax_xz) = plt.subplots(1, 2, figsize=(14, 5))
-cmap = plt.cm.Blues
+fig, ax_xy = plt.subplots(figsize=(7, 5))
+cmap = plt.cm.viridis
 n_ep = len(starts)
-
 for i, (s, e) in enumerate(zip(starts, ends)):
-    xy = pos[s:e+1, :2]
-    xz = pos[s:e+1, ::2]   # columns 0 (x) and 2 (z)
-    color = cmap(0.35 + 0.55 * i / max(n_ep - 1, 1))
-
-    ax_xy.plot(xy[:, 0], xy[:, 1], color=color, linewidth=0.7, alpha=0.65)
-    ax_xz.plot(xz[:, 0], xz[:, 1], color=color, linewidth=0.7, alpha=0.65)
+    xy = pos[s:e+1:STRIDE, :2]
+    color = cmap(i / max(n_ep - 1, 1))
+    ax_xy.scatter(xy[:, 0], xy[:, 1], color=color, s=10, alpha=0.65, linewidths=0)
 
 # start / goal scatter (one per episode)
 ax_xy.scatter([pos[s, 0] for s in starts], [pos[s, 1] for s in starts],
@@ -187,39 +201,35 @@ ax_xy.scatter([pos[e, 0] for e in ends],   [pos[e, 1] for e in ends],
 
 # --- corridor geometry ---
 add_corridor_xy(ax_xy)
-add_corridor_xz(ax_xz)
-add_goal_line(ax_xy, plane="xy")
-add_goal_line(ax_xz, plane="xz")
+# add_goal_line(ax_xy, plane="xy")
 
 # --- obstacles (uncomment when obstacles are active at collection time) ---
-add_obstacles(ax_xy, BOXES, CYLINDERS)
+# add_obstacles(ax_xy, BOXES, CYLINDERS)
 
 # --- labels & limits ---
-ax_xy.set_xlabel("x (m)"); ax_xy.set_ylabel("y (m)")
+ax_xy.set_xlabel("X Position (m)", fontsize=14, fontweight="bold")
+ax_xy.set_ylabel("Y Position (m)", fontsize=14, fontweight="bold")
 ax_xy.set_xlim(*X_LIM_XY);  ax_xy.set_ylim(*Y_LIM_XY)
 ax_xy.set_aspect("equal", adjustable="box")
 ax_xy.legend(fontsize=8, loc="upper left")
 ax_xy.grid(True, alpha=0.25)
-
-ax_xz.set_xlabel("x (m)"); ax_xz.set_ylabel("z (m)")
-ax_xz.set_xlim(*X_LIM_XZ);  ax_xz.set_ylim(*Z_LIM_XZ)
-ax_xz.set_aspect("equal", adjustable="box")
-ax_xz.grid(True, alpha=0.25)
-
 fig.tight_layout()
-fig.savefig("plots/dataset.pdf", dpi=150, bbox_inches="tight")
+fig.savefig("plots/dataset.pdf", dpi=300, bbox_inches="tight")
+fig.savefig("plots/dataset.png", dpi=300, bbox_inches="tight")
 plt.show()
+
+
 # 3D trajectory view (x, y, z)
-fig3d = plt.figure(figsize=(12, 8))
+fig3d = plt.figure(figsize=(13, 8))
 ax3d  = fig3d.add_subplot(111, projection="3d")
-cmap  = plt.cm.Blues
+cmap  = plt.cm.viridis
 n_ep  = len(starts)
 
 for i, (s, e) in enumerate(zip(starts, ends)):
-    xyz   = pos[s:e+1, :3]
-    color = cmap(0.35 + 0.55 * i / max(n_ep - 1, 1))
-    ax3d.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2],
-              color=color, linewidth=0.8, alpha=0.75)
+    xyz   = pos[s:e+1:STRIDE, :3]
+    color = cmap(i / max(n_ep - 1, 1))
+    ax3d.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2],
+                 color=color, s=10, alpha=0.75, linewidths=0)
 
 # corridor floor outline (z=0 rectangle)
 cx = [0, CORRIDOR_END, CORRIDOR_END, 0, 0]
@@ -244,12 +254,76 @@ if CYLINDERS:
     ax3d.scatter(cx_[:, 0], cx_[:, 1], cx_[:, 2],
                  c="tab:orange", marker="o", s=40, label="Cylinder obstacles")
 
-ax3d.set_xlabel("x (m)"); ax3d.set_ylabel("y (m)"); ax3d.set_zlabel("z (m)")
+ax3d.set_xlabel("X Position (m)", fontsize=14, fontweight="bold")
+ax3d.set_ylabel("Y Position (m)", fontsize=14, fontweight="bold")
+ax3d.set_zlabel("Z Position (m)", labelpad=12, fontsize=14, fontweight="bold")
+ax3d.tick_params(axis='z', pad=6)
 ax3d.set_xlim(0, CORRIDOR_END)
 ax3d.set_ylim(-1.1, 1.1)
 ax3d.set_zlim(0, WALL_HEIGHT)
 if BOXES or CYLINDERS:
     ax3d.legend(loc="best")
-fig3d.tight_layout()
-fig3d.savefig("plots/dataset3d.pdf", dpi=150, bbox_inches="tight")
+# Neither tight_layout() nor bbox_inches="tight" can be trusted here --
+# mplot3d's rotated z-axis label reports a wrong (too-small) bounding box,
+# so "tight" auto-cropping cuts the label off instead of trimming around
+# it. Reserve the margin manually via subplots_adjust and save the full,
+# un-cropped canvas instead.
+fig3d.subplots_adjust(left=0.02, right=0.88, top=0.98, bottom=0.05)
+fig3d.savefig("plots/dataset3d.pdf", dpi=300)
+fig3d.savefig("plots/dataset3d.png", dpi=300)
+plt.show()
+
+# ── per-axis action (delta-position) profile, all episodes overlaid ──────
+# Uses viridis (full hue range) rather than the single-hue Blues used in
+# the spatial plots above -- with ~188 overlapping lines, Blues shades
+# become too similar to tell individual episodes apart; viridis's wider
+# perceptual range keeps them distinguishable. STRIDE is set at the top.
+fig_vel, axes_vel = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+cmap = plt.cm.viridis
+n_ep = len(starts)
+axis_labels = [r"$\Delta x$ (m)", r"$\Delta y$ (m)", r"$\Delta z$ (m)"]
+
+for i, (s, e) in enumerate(zip(starts, ends)):
+    delta = np.diff(pos[s:e + 1], axis=0)   # (ep_len-1, 3) -- pos only has x,y,z
+    delta = delta[::STRIDE]
+    t = np.arange(len(delta)) * STRIDE
+    color = cmap(i / max(n_ep - 1, 1))
+    for ax_i, ax in enumerate(axes_vel):
+        ax.scatter(t, delta[:, ax_i], color=color, s=10, alpha=0.5, linewidths=0)
+
+for ax, label in zip(axes_vel, axis_labels):
+    ax.set_ylabel(label, fontsize=14, fontweight="bold")
+    ax.grid(True, alpha=0.25)
+axes_vel[-1].set_xlabel("Timestep", fontsize=14, fontweight="bold")
+# fig_vel.suptitle("Per-step action across all episodes")
+fig_vel.tight_layout()
+fig_vel.savefig("plots/dataset_velocity.pdf", dpi=300, bbox_inches="tight")
+fig_vel.savefig("plots/dataset_velocity.png", dpi=300, bbox_inches="tight")
+plt.show()
+
+# ── altitude (z) over time, all episodes overlaid ─────────────────────────
+fig_z, ax_z = plt.subplots(figsize=(10, 5))
+for i, (s, e) in enumerate(zip(starts, ends)):
+    z = pos[s:e + 1, 2][::STRIDE]
+    t = np.arange(len(z)) * STRIDE
+    color = cmap(i / max(n_ep - 1, 1))
+    ax_z.scatter(t, z, color=color, s=10, alpha=0.5, linewidths=0)
+
+ax_z.scatter([0] * n_ep, [pos[s, 2] for s in starts],
+             s=8, color="#2ecc71", zorder=5, label="Start")
+ax_z.scatter([ends[i] - starts[i] for i in range(n_ep)],
+             [pos[e, 2] for e in ends],
+             s=8, color="#e74c3c", zorder=5, label="End")
+ax_z.axhline(0.0, color="#555555", linewidth=1.2, linestyle="--", alpha=0.55,
+             label="Floor / ceiling")
+ax_z.axhline(WALL_HEIGHT, color="#555555", linewidth=1.2, linestyle="--", alpha=0.55)
+ax_z.set_xlabel("Timestep", fontsize=14, fontweight="bold")
+ax_z.set_ylabel("Z Position (m)", fontsize=14, fontweight="bold")
+ax_z.set_ylim(-0.05, 1.05)
+ax_z.grid(True, alpha=0.25)
+# ax_z.legend(fontsize=8, loc="upper left")
+# ax_z.set_title("Altitude over time across all episodes")
+fig_z.tight_layout()
+fig_z.savefig("plots/dataset_z_time.pdf", dpi=300, bbox_inches="tight")
+fig_z.savefig("plots/dataset_z_time.png", dpi=300, bbox_inches="tight")
 plt.show()

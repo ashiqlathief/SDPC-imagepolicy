@@ -1,4 +1,4 @@
-# SDPC Safe Diffusion Policy with Constraint
+# SDPC (Safe Diffusion Policy with Constraint)
 
 Trajectory-level diffusion policy for robot control with hard constraint enforcement via projection. Tested on:
 
@@ -231,7 +231,8 @@ Saves per-episode `.npz` trajectories, XY plots, and a summary table under the `
 
 | Argument | Default | Description |
 |---|---|---|
-| `--run_dir` | *(required)* | Path to a trained experiment directory |
+| `--run_dir` | *(required)* | Path to a trained experiment's seed directory (e.g. `.../DT2_DEPTHFalse/9`). If `--seeds` is also passed, this is instead the experiment directory one level up (e.g. `.../DT2_DEPTHFalse`) |
+| `--seeds` | off | Evaluate multiple seeds from the same experiment in one process, reusing a single Isaac Sim instance instead of relaunching per seed, e.g. `--seeds 7 8 10` looks up `<run_dir>/7`, `<run_dir>/8`, `<run_dir>/10` |
 | `--max_steps` | `1500` | Maximum environment steps per episode |
 | `--action_scale` | `5.0` | Scalar multiplier applied to unnormalised actions |
 | `--episodes` | `1` | Number of episodes to roll per variant |

@@ -51,22 +51,6 @@ def quat_to_euler_xyzw(q_xyzw: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor
 
     return roll, pitch, yaw
 
-def sample_targets(num_envs: int, device, env_origins,
-                   x_min=4.0, x_max=4.0,
-                   y_max=0.9, y_min=0.6, #y_min=-0.94, y_max=-0.6, y_min=0.94, y_max=0.6,
-                   z_min=0.75, z_max=0.75):
-    """
-    Sample one random target position per environment.
-    Returns a tensor of shape (num_envs, 3).
-    """
-    target_pos = torch.empty((num_envs, 3), device=device)
-
-    target_pos[:, 0] = torch.rand(num_envs, device=device) * (x_max - x_min) + x_min  # x
-    target_pos[:, 1] = torch.rand(num_envs, device=device) * (y_max - y_min) + y_min  # y
-    target_pos[:, 2] = torch.rand(num_envs, device=device) * (z_max - z_min) + z_min  # z
-
-    return target_pos
-
 def controller_motor_forces(
     root_state,
     target_pos,
@@ -156,29 +140,7 @@ def controller_motor_forces(
         )
 
         # after the last step, just use final target
-        target_cmd = torch.where(alpha >= 1.0, target_pos, target_cmd)
-
-    
-    # # compute current alpha and waypoint
-    # alpha = controller_motor_forces.step_idx / float(SEG_STEPS)     # (N,1)
-    # alpha = torch.clamp(alpha, 0.0, 1.0)
-
-    # target_cmd = (1.0 - alpha) * controller_motor_forces.start_pos + alpha * target_pos  # (N,3)
-
-    # # advance only when drone is close to current waypoint
-    # wp_dist = torch.linalg.norm(target_cmd - pos, dim=-1, keepdim=True)  # (N,1)
-    # advance = (wp_dist < REACH_TOL).float()
-
-    # controller_motor_forces.step_idx = torch.clamp(
-    #     controller_motor_forces.step_idx + advance,
-    #     0.0,
-    #     float(SEG_STEPS),
-    # )
-
-    # # after the last step, just use final target
-    # target_cmd = torch.where(alpha >= 1.0, target_pos, target_cmd)
-
-    
+        target_cmd = torch.where(alpha >= 1.0, target_pos, target_cmd)  
     controller_motor_forces.last_target_cmd = target_cmd
 
     # ---------------------------------------------------
@@ -343,9 +305,6 @@ class Crazyflie(gym.Env):
         self.done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.success_acc = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.fell_acc    = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-
-        # target
-        self.target_pos = sample_targets(self.num_envs, self.device, self.env_origins)
 
         # dynamic obstacle state (disabled unless cfg.dynamic_obstacles=True)
         self._dynamic_obs = cfg.dynamic_obstacles
@@ -659,7 +618,6 @@ class Crazyflie(gym.Env):
             "success": success.detach().cpu().numpy(),
             "fell": fell.detach().cpu().numpy(),
             "pos": self._pos_world().detach().cpu().numpy(),
-            "target": self._target_world().detach().cpu().numpy(),
         }
         
         return obs, reward, done.detach().cpu().numpy(), info
@@ -709,14 +667,6 @@ class Crazyflie(gym.Env):
     def get_observation(self) -> np.ndarray:
         root = self.robot.data.root_state_w  # (N,13)
         pos = root[:, 0:3]
-        pos1 = root[:, 0:3]
-        
-        pos_err = self.target_pos - pos1
-
-        # print("x:", pos[0,0].item(), "y:", pos[0,1].item(), "z:", pos[0,2].item())
-        # print("pos_err x :", pos_err[0,0].item(),"pos_err y:", pos_err[0,1].item(),"pos_err z:", pos_err[0, 2].item())
-
-        # obs = torch.cat([pos,pos], dim=-1)
         obs = torch.cat([pos], dim=-1)
         return obs.detach().cpu().numpy()
 
@@ -752,7 +702,4 @@ class Crazyflie(gym.Env):
     def _pos_world(self) -> torch.Tensor:
         root = self.robot.data.root_state_w
         return root[:, 0:3]
-
-    def _target_world(self) -> torch.Tensor:
-        return self.target_pos
 

@@ -17,9 +17,11 @@ import types
 from typing import Optional
 
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.patches import Circle, Rectangle
+from matplotlib.patches import Circle, Rectangle, FancyArrowPatch
 from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
@@ -253,6 +255,23 @@ def make_gif(
     sph_xyz_traj  = np.array(data["sph_xyz_traj"], dtype=np.float32) \
                     if "sph_xyz_traj" in data else np.zeros((0, 0, 3), np.float32)
 
+    # candidate rollouts (chosen + unchosen), one snapshot per env step.
+    # snap i corresponds to xyz[i+1] (xyz[0] is the pre-loop start position).
+    cand_traj_xy = data.get("cand_traj_xy", None)   # (N_snap, K, H+1, 2), absolute xy
+    snap_chosen  = data.get("snap_chosen",  None)   # (N_snap,)
+    has_candidates = (
+        plane == "xy"
+        and cand_traj_xy is not None
+        and np.asarray(cand_traj_xy).size > 0
+    )
+    if has_candidates:
+        cand_traj_xy = np.asarray(cand_traj_xy)
+        snap_chosen  = np.asarray(snap_chosen)
+        # persist each candidate fan on screen for its own horizon length (H frames)
+        # instead of just the 1 frame it was sampled on, so you can see whether the
+        # drone's actual path over the next H steps tracked the chosen candidate.
+        persist_gens = max(cand_traj_xy.shape[2] - 1, 1)   # H = (H+1 waypoints) - 1
+
     # ── halfspaces: only plot what was active during the recorded run ─────────
     if "halfspaces" in data and len(data["halfspaces"]) > 0:
         hs_pts   = data["halfspaces"].tolist()
@@ -370,6 +389,42 @@ def make_gif(
         ax.add_patch(p)
         dyn_cyl_patches.append((i, p))
 
+    # ── dynamic cylinder direction arrows (instantaneous velocity) ───────────
+    dyn_cyl_arrows = []
+    if plane == "xy":
+        for i in sorted(dyn_set):
+            cx, cy = float(cylinders[i][0]), float(cylinders[i][1])
+            arrow = FancyArrowPatch(
+                (cx, cy), (cx, cy), arrowstyle="-|>", mutation_scale=10,
+                color="darkorange", linewidth=1.5, alpha=0.9, zorder=6,
+            )
+            ax.add_patch(arrow)
+            dyn_cyl_arrows.append((i, arrow))
+
+    # ── candidate rollouts: unchosen (faint) + chosen (bold), fading with age ────
+    # gen_cand_lines[g] / gen_chosen_lines[g] hold the fan sampled `g` steps ago;
+    # g=0 is the freshest snapshot, g=persist_gens-1 is about to expire.
+    if has_candidates:
+        K = cand_traj_xy.shape[1]
+        gen_cand_lines, gen_chosen_lines = [], []
+        for g in range(persist_gens):
+            age_frac = g / max(persist_gens - 1, 1)          # 0 (fresh) .. 1 (oldest)
+            alpha_unchosen = 0.30 * (1.0 - age_frac) + 0.02
+            alpha_chosen   = 0.90 * (1.0 - age_frac) + 0.05
+            lines_k = [
+                ax.plot([], [], linewidth=1.0, color="#999999", alpha=alpha_unchosen, zorder=3)[0]
+                for _ in range(K)
+            ]
+            chosen_l, = ax.plot([], [], linewidth=2.0, color="#d62728",
+                                alpha=alpha_chosen, zorder=5,
+                                label="chosen candidate" if g == 0 else None)
+            gen_cand_lines.append(lines_k)
+            gen_chosen_lines.append(chosen_l)
+        cand_lines = [line for gen in gen_cand_lines for line in gen] + gen_chosen_lines
+    else:
+        gen_cand_lines, gen_chosen_lines = [], []
+        cand_lines = []
+
     # ── static sphere footprints ──────────────────────────────────────────────
     for k, spos in enumerate(sph_pos_rest):
         sx, sy, sz = float(spos[0]), float(spos[1]), float(spos[2])
@@ -421,7 +476,8 @@ def make_gif(
             return None
         return min(t, sph_xyz_traj.shape[0] - 1)
 
-    all_patches = [p for _, p in dyn_cyl_patches] + [p for _, p in sph_patches]
+    all_patches = ([p for _, p in dyn_cyl_patches] + [p for _, p in sph_patches]
+                   + [a for _, a in dyn_cyl_arrows] + cand_lines)
 
     def init():
         trail_line.set_data([], [])
@@ -444,6 +500,18 @@ def make_gif(
                 else:
                     patch.set_x(float(cx) - 0.06)
 
+            # direction arrow: finite-difference velocity vs. previous snapshot
+            if plane == "xy" and ci > 0:
+                for orig_i, arrow in dyn_cyl_arrows:
+                    cx, cy = (float(v) for v in cyl_xy_traj[ci, orig_i])
+                    px, py = (float(v) for v in cyl_xy_traj[ci - 1, orig_i])
+                    vx, vy = cx - px, cy - py
+                    speed = (vx ** 2 + vy ** 2) ** 0.5
+                    if speed > 1e-6:
+                        ux, uy = vx / speed, vy / speed
+                        arrow_len = 0.15
+                        arrow.set_positions((cx, cy), (cx + ux * arrow_len, cy + uy * arrow_len))
+
         # move floating spheres
         si = _sph_snap_idx(t)
         if si is not None:
@@ -452,6 +520,27 @@ def make_gif(
                 sy = float(sph_xyz_traj[si, k, 1])
                 sz = float(sph_xyz_traj[si, k, 2])
                 patch.center = (sx, sy) if plane == "xy" else (sx, sz)
+
+        # candidate rollouts: snap i -> xyz[i+1], so frame t's freshest snap is t-1.
+        # each generation g back in time (t-1-g) stays visible until it ages out
+        # of the persist_gens window, fading as it does (see artist alpha setup).
+        if has_candidates:
+            si_latest = t - 1
+            for g in range(persist_gens):
+                si_cand = si_latest - g
+                if 0 <= si_cand < cand_traj_xy.shape[0]:
+                    rollouts = cand_traj_xy[si_cand]          # (K, H+1, 2)
+                    chosen_k = int(snap_chosen[si_cand])
+                    for k, line in enumerate(gen_cand_lines[g]):
+                        if k == chosen_k:
+                            line.set_data([], [])             # drawn separately, bold
+                        else:
+                            line.set_data(rollouts[k, :, 0], rollouts[k, :, 1])
+                    gen_chosen_lines[g].set_data(rollouts[chosen_k, :, 0], rollouts[chosen_k, :, 1])
+                else:
+                    for line in gen_cand_lines[g]:
+                        line.set_data([], [])
+                    gen_chosen_lines[g].set_data([], [])
 
         return [trail_line, drone_dot, step_text] + all_patches
 
