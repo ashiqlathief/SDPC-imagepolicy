@@ -103,5 +103,7 @@
         "/home/ashiqali/anaconda3/envs/env_isaaclab/lib/python3.11/site-packages/isaacsim/kit/extscore/omni.client.lib",
         "/home/ashiqali/anaconda3/envs/env_isaaclab/lib/python3.11/site-packages/isaacsim/kit/extscore/omni.kit.async_engine",
         "/home/ashiqali/anaconda3/envs/env_isaaclab/lib/python3.11/site-packages/isaacsim/kit/extscore/omni.kit.registry.nucleus"
-    ]
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }

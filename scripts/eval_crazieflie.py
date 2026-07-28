@@ -49,10 +49,10 @@ projection_variants = [
   'gradient-tightened',
   'post_processing',
   'post_processing-tightened',
-  'sdpc-c-tightened-dt0p25',
-  'sdpc-c-tightened-dt0p5',
-  'sdpc-c-tightened-dt2p0',
-  'sdpc-c-tightened-dt4p0',
+#   'sdpc-c-tightened-dt0p25',
+#   'sdpc-c-tightened-dt0p5',
+#   'sdpc-c-tightened-dt2p0',
+#   'sdpc-c-tightened-dt4p0',
 ]
 
 def variant_cfg(name: str):
@@ -1131,7 +1131,7 @@ def main():
             # save raw trajectory and metadata for this episode
             traj_path = os.path.join(
                 traj_dir,
-                f"traj_{encoder_type}_L{latent_dim}_{variant_name}.npz"
+                f"traj_{encoder_type}_L{latent_dim}_{variant_name}_seed{seedmodel}.npz"
             )
             np.savez(
                 traj_path,

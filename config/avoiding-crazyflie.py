@@ -109,7 +109,7 @@ base = {
         'use_depth': USE_DEPTH,   # RGBD switch: set True only if the zarr dataset was collected with quadcopter.py --use_depth
         'horizon': 16,
         'n_obs_steps': 2,
-        'image_cond_dim': 512,   # 96*96*3 for raw pixels (96*96*4 if use_depth=True) 27648 for vit, 512 for vitp
+        'image_cond_dim': 384,   # 96*96*3 for raw pixels (96*96*4 if use_depth=True) 27648 for vit, 512 for vitp
         'n_diffusion_steps': 20,
         'loss_type': 'l2',
         'loss_discount': 1.0,

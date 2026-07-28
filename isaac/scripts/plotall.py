@@ -66,7 +66,7 @@ VARIANT_LABELS = {
 }
 
 ENCODER_DISPLAY = {
-    "raw":  "Raw-Pixel Transformer",
+    "raw":  "Transformer",
     "vitp": "ViT+U-Net",
 }
 
