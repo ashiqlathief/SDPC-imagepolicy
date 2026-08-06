@@ -38,22 +38,28 @@ z_halfspaces = [
 ]
 
 projection_variants = [
-  'sdpc-r', 
-  'sdpc-r-tightened',
-  'sdpc-c',
-  'sdpc-c-tightened',
-  'sdpc-t',
-  'sdpc-t-tightened',
-  'diffuser',
-  'gradient',
-  'gradient-tightened',
-  'post_processing',
-  'post_processing-tightened',
-#   'sdpc-c-tightened-dt0p25',
-#   'sdpc-c-tightened-dt0p5',
-#   'sdpc-c-tightened-dt2p0',
-#   'sdpc-c-tightened-dt4p0',
+#   'sdpc-r', 
+#   'sdpc-r-tightened',
+#   'sdpc-c',
+#   'sdpc-c-tightened',
+#   'sdpc-t',
+#   'sdpc-t-tightened',
+#   'diffuser',
+#   'gradient',
+#   'gradient-tightened',
+#   'post_processing',
+#   'post_processing-tightened',
+  'sdpc-c-tightened-dt0p25',
+  'sdpc-c-tightened-dt0p5',
+  'sdpc-c-tightened-dt2p0',
+  'sdpc-c-tightened-dt4p0',
 ]
+
+# Per-axis speed bound used by the dt-sweep variants' dynamics constraint —
+# taken from the sim's real position->velocity PID outer loop, which clamps
+# commanded velocity to this exact range regardless of what the projector allows
+# (see isaac/scripts/crazyflie_env.py: `vel_des = torch.clamp(vel_des, -0.5, 0.5)`).
+RATE_LIMIT_V_MAX = 0.5
 
 def variant_cfg(name: str):
     cfg = dict(
@@ -62,7 +68,8 @@ def variant_cfg(name: str):
         use_projection=False,
         projection_mode="none",    # "none" | "post" | "gradient"
         tighten=0.0,
-        dt=None,
+        dt_ratio=None,   # t_hat_s / t_s (see dt-sweep branch below) — None = use default proj_dt
+        rate_limit=False,
     )
 
     if name == "diffuser":
@@ -99,11 +106,20 @@ def variant_cfg(name: str):
     elif name == "sdpc-r-tightened":
         cfg.update(num_candidates=1, selection="first", use_projection=True, projection_mode="sdpc", tighten=0.05)
 
-    # dt sweeps (Table 2)
+    # dt sweeps (Table 2 in Römer et al., "Diffusion Predictive Control with
+    # Constraints" — model-mismatch ablation between the sampling time t_hat_s
+    # assumed by the projection's Euler dynamics and the true system t_s).
     elif name.startswith("sdpc-c-tightened-dt"):
-        # parse dt from string, e.g. dt0p25 -> 0.25
+        # parse ratio from string, e.g. dt0p25 -> 0.25 == t_hat_s / t_s (NOT an
+        # absolute dt in seconds — the real proj_dt = ratio * eval_dt, computed
+        # in main() where eval_dt is known).
         dt_str = name.split("dt")[-1].replace("p", ".")
-        cfg.update(num_candidates=8, selection="minimum_projection_cost", use_projection=True, projection_mode="sdpc", tighten=0.05, dt=float(dt_str))
+        # rate_limit=True is what makes dt actually matter here: it adds a
+        # per-axis velocity dim + 'deriv' dynamics constraint (x[t+1]=x[t]+dt*v[t])
+        # bounded by RATE_LIMIT_V_MAX, so dt directly scales the max per-step
+        # displacement the projector allows. Without it, dt only affected the
+        # (unused-here) dynamic-obstacle lookahead and was otherwise dead.
+        cfg.update(num_candidates=8, selection="minimum_projection_cost", use_projection=True, projection_mode="sdpc", tighten=0.05, dt_ratio=float(dt_str), rate_limit=True)
 
     return cfg
 
@@ -408,12 +424,27 @@ def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None
                                     y_bounds=None, z_bounds=None,
                                     corridor_halfspaces=None, z_halfspaces=None, tighten=0.0,
                                     cyl_extra_radius=0.0, drone_radius=0.0,
-                                    sphere_radius=0.0):
+                                    sphere_radius=0.0, dynamic_cylinder_predictions=None,
+                                    rate_limit=False, rate_v_max=RATE_LIMIT_V_MAX):
+    """
+    dynamic_cylinder_predictions: optional {cylinder_index: [(x,y), ...]} — one
+    predicted (x,y) per horizon step (in order), from env.predict_cylinder_positions().
+    Cylinders with an entry here get a per-timestep obstacle constraint (the
+    projector avoids where the obstacle WILL be at each planned step); all others
+    keep the usual single current-position constraint applied across the horizon.
+
+    rate_limit: appends velocity dims [vx, vy, vz] (indices 3,4,5) to the state,
+    tied to positions via 'deriv' dynamics constraints (x[t+1] = x[t] + dt*v[t],
+    dt supplied separately via the Projector's own dt) and bounded by rate_v_max.
+    This is what makes the projector's dt setting actually change the feasible
+    set — caller must also build the Projector with transition_dim=6 to match.
+    """
     constraint_list = []
+    state_dim = 6 if rate_limit else 3
 
     # ---------------- bounds ----------------
-    lb = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float32)
-    ub = np.array([ np.inf,  np.inf,  np.inf], dtype=np.float32)
+    lb = np.full(state_dim, -np.inf, dtype=np.float32)
+    ub = np.full(state_dim,  np.inf, dtype=np.float32)
 
     if x_bounds is not None:
         lb[0], ub[0] = float(x_bounds[0]), float(x_bounds[1])
@@ -421,6 +452,11 @@ def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None
         lb[1], ub[1] = float(y_bounds[0]), float(y_bounds[1])
     if z_bounds is not None:
         lb[2], ub[2] = float(z_bounds[0]), float(z_bounds[1])
+
+    if rate_limit:
+        # per-axis speed bound on [vx, vy, vz] — see RATE_LIMIT_V_MAX
+        lb[3:6] = -float(rate_v_max)
+        ub[3:6] =  float(rate_v_max)
 
     constraint_list.append(("lb", lb))
     constraint_list.append(("ub", ub))
@@ -434,10 +470,14 @@ def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None
         center = [float(x), float(y)]
         constraint_list.append(("sphere_outside", [0, 1], center, 0.15 + _dr + float(tighten)))
 
-    for (x, y) in cylinders:
-        center = [float(x), float(y)]
-        constraint_list.append(("sphere_outside", [0, 1], center,
-                                 0.07 + _dr + float(tighten) + float(cyl_extra_radius)))
+    for i, (x, y) in enumerate(cylinders):
+        radius = 0.07 + _dr + float(tighten) + float(cyl_extra_radius)
+        if dynamic_cylinder_predictions is not None and i in dynamic_cylinder_predictions:
+            centers_per_t = [[float(cx), float(cy)] for cx, cy in dynamic_cylinder_predictions[i]]
+            constraint_list.append(("sphere_outside_dynamic", [0, 1], centers_per_t, radius))
+        else:
+            center = [float(x), float(y)]
+            constraint_list.append(("sphere_outside", [0, 1], center, radius))
 
     # 3D sphere constraints (floating obstacles)
     if spheres:
@@ -457,7 +497,7 @@ def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None
 
     # ---------------- halfspaces in XY ----------------
     if corridor_halfspaces:
-        _trajectory_dim    = 3
+        _trajectory_dim    = state_dim
         _act_obs_indices   = {"x": 0, "y": 1, "z": 2}
         for hs in corridor_halfspaces:
             C_row, d = utils.formulate_halfspace_constraints(
@@ -474,8 +514,20 @@ def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None
     # Floor:   [0,0,-1]·p <= 0.0 - tighten        (shrinks floor up — use tighten=0 here)
     if z_halfspaces is not None:
         for (normal, rhs) in z_halfspaces:
-            C_row = np.array(normal, dtype=np.float32)
+            C_row = np.zeros(state_dim, dtype=np.float32)
+            C_row[:3] = normal
             constraint_list.append(("ineq", (C_row, float(rhs) - float(tighten))))
+
+    # ---------------- dynamics (rate limit) ----------------
+    # Ties x[t+1] = x[t] + dt*v[t] per axis (DynamicConstraints' existing 'deriv'
+    # mechanism, same one used for pointmaze/antmaze/avoiding-d3il — see
+    # diffuser/utils/constraints_helpers.py:formulate_dynamics_constraints).
+    # Combined with the [vx,vy,vz] bounds above, this makes dt scale the maximum
+    # per-step displacement the projector will allow.
+    if rate_limit:
+        constraint_list.append(("deriv", [0, 3]))  # x <-> vx
+        constraint_list.append(("deriv", [1, 4]))  # y <-> vy
+        constraint_list.append(("deriv", [2, 5]))  # z <-> vz
 
     return constraint_list
 
@@ -535,12 +587,14 @@ def verify_projection(pos0, a_candidates_proj_real, which,
 def build_position_projector(horizon_H, gradient, device, boxes, cylinders, spheres=None,
                              normalizer=None, tighten=0.0, dt=0.1, use_dynamics=True,
                              obs_amplitude=0.0, drone_radius=0.0, sphere_radius=0.0,
-                             active_halfspaces=None):
+                             active_halfspaces=None, dynamic_cylinder_predictions=None,
+                             rate_limit=False, rate_v_max=RATE_LIMIT_V_MAX):
     # We project POSITIONS, so we need horizon = H+1
     Hp1 = horizon_H + 1
     x_bounds = (-0.5, 4.5)
     y_bounds = (-0.95, 0.95)
     z_bounds = (0.0, 1.0)
+    transition_dim = 6 if rate_limit else 3   # rate_limit appends [vx,vy,vz]
 
     constraint_list = build_obstacle_constraint_list(
         boxes=boxes,
@@ -555,17 +609,23 @@ def build_position_projector(horizon_H, gradient, device, boxes, cylinders, sphe
         cyl_extra_radius=obs_amplitude,
         drone_radius=drone_radius,
         sphere_radius=sphere_radius,
+        dynamic_cylinder_predictions=dynamic_cylinder_predictions,
+        rate_limit=rate_limit,
+        rate_v_max=rate_v_max,
     )
 
     projector = Projector(
         horizon=Hp1,
-        transition_dim=3,         # x,y,z positions
+        transition_dim=transition_dim,   # x,y,z positions (+ vx,vy,vz if rate_limit)
         action_dim=0,
         goal_dim=0,
         constraint_list=constraint_list,
         normalizer=normalizer,          # start without normalizer for debugging
         gradient=gradient,
-        gradient_weights=[1, 0.5, 2], dt=dt if use_dynamics else 0.0,   # 0.0 = no Euler dynamics enforced
+        gradient_weights=[1, 0.5, 2],
+        # dt drives the rate_limit 'deriv' constraint below — only zero it out
+        # for the (non-rate-limit) generic "no Euler dynamics enforced" case.
+        dt=dt if (use_dynamics or rate_limit) else 0.0,
         variant="states",
         skip_initial_state=True,
         diffusion_timestep_threshold=0.8,
@@ -573,12 +633,44 @@ def build_position_projector(horizon_H, gradient, device, boxes, cylinders, sphe
         solver="scipy",           # your file uses scipy SLSQP path
         parallelize=True,         # candidates solve independently — run them concurrently
     )
+
+    if rate_limit:
+        # Close the first-step gap: skip_initial_state makes SafetyConstraints
+        # strip block 0's row from every lb/ub constraint (block 0 is normally
+        # just the pinned current state, so its own bounds don't matter) — but
+        # here block 0's [vx,vy,vz] is the velocity that drives the very first
+        # transition (pos0 -> first planned step) via the 'deriv' equality above,
+        # and that first transition is exactly the action actually applied to the
+        # drone each control step. Without this, block 0's velocity is bounded
+        # only by the solver's generic +/-5 box instead of rate_v_max. Append the
+        # missing rows directly (bypassing SafetyConstraints' skip-slicing) since
+        # this only needs to touch block 0's velocity dims, not the position dims
+        # every other variant relies on skip_initial_state to leave unconstrained.
+        n_cols = transition_dim * projector.horizon
+        extra_rows, extra_rhs = [], []
+        for dim in (3, 4, 5):
+            row = torch.zeros(n_cols, device=device)
+            row[dim] = 1.0
+            extra_rows.append(row.clone())
+            extra_rhs.append(rate_v_max)
+            row = torch.zeros(n_cols, device=device)
+            row[dim] = -1.0
+            extra_rows.append(row)
+            extra_rhs.append(rate_v_max)
+        projector.C = torch.cat([projector.C, torch.stack(extra_rows, dim=0)], dim=0)
+        projector.d = torch.cat([projector.d, torch.tensor(extra_rhs, device=device)], dim=0)
+        projector.add_numpy_constraints()   # refresh C_np/d_np used by project()
+
     return projector
 
-def project_action_candidates_with_positions(projector, pos0, a_candidates_real, device):
+def project_action_candidates_with_positions(projector, pos0, a_candidates_real, device, dt=None):
     """
     pos0: (3,) current position
     a_candidates_real: (K,H,3) delta-pos
+    dt: pass the projector's dt when it was built with rate_limit=True (transition_dim=6,
+        i.e. [x,y,z,vx,vy,vz]) — appends velocity dims derived from the deltas so the
+        state matches what the 'deriv' dynamics constraint expects. None for the
+        ordinary position-only (transition_dim=3) projector.
     Returns:
       a_proj_real: (K,H,3)
       proj_costs: (K,)
@@ -590,13 +682,22 @@ def project_action_candidates_with_positions(projector, pos0, a_candidates_real,
     pos_traj[:, 0] = pos0.astype(np.float32)
     pos_traj[:, 1:] = pos_traj[:, :1] + np.cumsum(a_candidates_real, axis=1)
 
-    pos_t = torch.tensor(pos_traj, dtype=torch.float32, device=device)  # (K,H+1,3)
+    if dt is not None:
+        vel_traj = np.zeros((K, H + 1, 3), dtype=np.float32)
+        vel_traj[:, :H] = a_candidates_real / dt
+        vel_traj[:, H] = vel_traj[:, H - 1]
+        state_traj = np.concatenate([pos_traj, vel_traj], axis=-1)  # (K,H+1,6)
+    else:
+        state_traj = pos_traj
+
+    state_t = torch.tensor(state_traj, dtype=torch.float32, device=device)  # (K,H+1,transition_dim)
 
     # one batched call instead of K single-candidate calls — projector.project()
     # already accepts a batched input, and building it once avoids rebuilding the
     # (identical) constraint set K times.
-    pos_proj_t, proj_costs = projector.project(pos_t)  # (K,H+1,3), cost shape (K,)
-    pos_proj = pos_proj_t.detach().cpu().numpy()  # (K,H+1,3)
+    state_proj_t, proj_costs = projector.project(state_t)  # (K,H+1,transition_dim), cost shape (K,)
+    state_proj = state_proj_t.detach().cpu().numpy()
+    pos_proj = state_proj[..., :3]  # (K,H+1,3)
 
     # convert back to deltas (K,H,3)
     a_proj_real = (pos_proj[:, 1:] - pos_proj[:, :-1]).astype(np.float32)
@@ -608,7 +709,7 @@ def project_action_candidates_with_positions(projector, pos0, a_candidates_real,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_dir", type=str, required=True)
-    parser.add_argument("--seeds", type=int, nargs="+", default=[7,8,9,10])
+    parser.add_argument("--seeds", type=int, nargs="+", default=[7,8])
     parser.add_argument("--max_steps", type=int, default=700)
     parser.add_argument("--action_scale", type=float, default=5.0)
     parser.add_argument("--episodes", type=int, default=1)   # how many episodes to roll
@@ -847,7 +948,13 @@ def main():
             pos_projector = None   # obstacle-aware SLSQP projector (post-hoc + sdpc in-loop)
 
             if vcfg["use_projection"]:
-                proj_dt = vcfg["dt"] if vcfg["dt"] is not None else 0.1
+                # dt_ratio (dt-sweep variants only) is t_hat_s/t_s from the paper's
+                # Table 2 — scale by the run's real control dt, don't use it as an
+                # absolute seconds value.
+                if vcfg.get("dt_ratio") is not None:
+                    proj_dt = vcfg["dt_ratio"] * eval_dt
+                else:
+                    proj_dt = 0.1
                 # All cylinders (static and dynamic) use the same base radius.
                 # Dynamic ones get their actual positions via --dynamic_obstacles (see below).
                 _init_spheres = SPHERES if args.floating_spheres else None
@@ -861,6 +968,7 @@ def main():
                     drone_radius=drone_radius,
                     sphere_radius=SPHERE_RADIUS if args.floating_spheres else 0.0,
                     active_halfspaces=active_halfspaces,
+                    rate_limit=vcfg.get("rate_limit", False),
                 )
                 if vcfg["projection_mode"] == "sdpc":
                     # Enable proper in-loop SLSQP with obstacle constraints.
@@ -996,6 +1104,14 @@ def main():
                     # (static ones at rest, dynamic ones at actual current position)
                     cyl_now = env.get_cylinder_positions()
                     sph_now = env.get_sphere_positions() if args.floating_spheres else None
+                    # Predict each dynamic cylinder's exact future (x,y) at every planned
+                    # horizon step (t = now + k*proj_dt), using the sim's own closed-form
+                    # sinusoid — so the projector avoids where the obstacle WILL be, not
+                    # just where it is right now. This is what makes `proj_dt` matter.
+                    dyn_cyl_preds = (
+                        env.predict_cylinder_positions([k * proj_dt for k in range(1, horizon + 1)])
+                        if args.dynamic_obstacles_enabled else None
+                    )
                     pos_projector = build_position_projector(
                         horizon_H=horizon, gradient=gradient, device=device,
                         boxes=BOXES, cylinders=cyl_now,
@@ -1006,6 +1122,8 @@ def main():
                         drone_radius=drone_radius,
                         sphere_radius=SPHERE_RADIUS if args.floating_spheres else 0.0,
                         active_halfspaces=active_halfspaces,
+                        dynamic_cylinder_predictions=dyn_cyl_preds,
+                        rate_limit=vcfg.get("rate_limit", False),
                     )
                     if vcfg["projection_mode"] == "sdpc":
                         pos_projector.inloop_slsqp = True
@@ -1017,6 +1135,7 @@ def main():
                     a_candidates_proj_real, proj_costs = project_action_candidates_with_positions(
                         projector=pos_projector, pos0=pos[:3],
                         a_candidates_real=a_candidates_real, device=device,
+                        dt=proj_dt if vcfg.get("rate_limit", False) else None,
                     )
                 else:
                     a_candidates_proj_real = a_candidates_real

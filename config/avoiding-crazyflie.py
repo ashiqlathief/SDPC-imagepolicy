@@ -75,7 +75,7 @@ CORRIDOR_HALFSPACES = [
     # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)
     # [np.array([0.0, -0.75]), np.array([4.0, 0.15]), 'above'],
 
-    # both
+    # # both
     # upper diagonal: y <= -0.1*x + 0.75  (ceiling slopes down toward the goal end)
     [np.array([0.0, 0.75]), np.array([4.0, 0.15]), 'below'],
     # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)

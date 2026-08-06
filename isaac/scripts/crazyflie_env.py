@@ -482,6 +482,32 @@ class Crazyflie(gym.Env):
             positions.append((x0, y0))
         return positions
 
+    def predict_cylinder_positions(self, offsets: list) -> dict:
+        """Exact future (x, y) for every dynamic cylinder at t = self._obs_t + offset,
+        for each offset in `offsets`. Uses the same closed-form sinusoid as
+        get_cylinder_positions()/_step_dynamic_obstacles(), just evaluated ahead of
+        time — the motion law is deterministic, so this is exact, not an estimate.
+
+        Returns {cylinder_index: [(x, y), ...]} (one entry per offset, same order),
+        keyed by the index into CYLINDERS. Static cylinders are omitted (callers
+        should keep using their fixed rest position for those).
+        """
+        if not self._dynamic_obs:
+            return {}
+        preds = {}
+        for k, idx in enumerate(self._dyn_indices):
+            x0 = self._cyl_x0[k]
+            y0 = self._cyl_y0[k]
+            traj = []
+            for off in offsets:
+                t = self._obs_t + off
+                delta = self._obs_amplitude * math.sin(
+                    2.0 * math.pi * self._obs_frequency * t + self._obs_phases[k]
+                )
+                traj.append(self._oscillate(self._obs_axes[k], x0, y0, delta))
+            preds[idx] = traj
+        return preds
+
     def reset(self, *, seed: int | None = None):
         
         if seed is not None:

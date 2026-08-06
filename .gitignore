@@ -34,5 +34,5 @@ scripts/load_results.py
 scripts/latent_viz.py
 scripts/eval.py
 scripts/attention_viz.py
-
+interview.md
 erdi_thesis

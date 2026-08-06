@@ -12,10 +12,15 @@ from scipy.optimize import minimize, Bounds
 def _build_slsqp_constraints(C, d, A, b, obstacle_specs, transition_dim, horizon):
     """Build the SLSQP constraint tuple for one solve. Shared by the serial path
     (built once, reused across the batch) and each parallel worker (rebuilt locally
-    since the lambdas can't cross a process boundary)."""
+    since the lambdas can't cross a process boundary).
+
+    obstacle_specs: list of (P_seq, q_seq, v_seq), one triple-of-sequences per
+    obstacle, each sequence of length (horizon-1) — the (P,q,v) to use at each
+    planned timestep t=1..horizon-1 (static obstacles just repeat the same one)."""
     constraints = ()
-    for (P, q, v) in obstacle_specs:
+    for (P_seq, q_seq, v_seq) in obstacle_specs:
         for t in range(1, horizon):
+            P, q, v = P_seq[t - 1], q_seq[t - 1], v_seq[t - 1]
             start_idx = t * transition_dim
             end_idx = (t + 1) * transition_dim
             constraints += ({'type': 'ineq',
@@ -66,6 +71,9 @@ class Projector:
         self.solver = solver
         self.parallelize = parallelize
         self._pool = None  # lazily created ProcessPoolExecutor, see _get_pool()
+        self.last_nit = []  # per-candidate SLSQP iteration counts from the most
+                             # recent project() call with collect_nit=True (serial
+                             # path only -- see project()'s docstring)
 
         # Determine whether to include actions in the projection
         if normalizer is None:
@@ -126,10 +134,17 @@ class Projector:
         self.append_linear_constraint(self.dynamic_constraints)
         self.add_numpy_constraints()     
 
-    def project(self, trajectory, constraints=None):
+    def project(self, trajectory, constraints=None, collect_nit=False):
         """
             model-based projection into the feasible set
             trajectory: np.ndarray of shape (batch_size, horizon, transition_dim)
+
+            collect_nit: if True, populates self.last_nit with each candidate's
+            SLSQP iteration count (res.nit) from this call, for offline solver-cost
+            analysis. Only populated on the serial path -- if self.parallelize and
+            batch_size > 1 both hold, the parallel worker path runs instead and
+            self.last_nit is left empty; pass parallelize=False at construction
+            time (or batch_size=1) to guarantee the serial path when this matters.
             Solve an optimization problem of the form 
                 \hat z =   argmin_z 1/2 z^T Q z + r^T z
                         subject to  Az  = b
@@ -213,6 +228,8 @@ class Projector:
                 print(f"[Projection] parallel SLSQP solve failed ({e}); falling back to serial.")
 
         if not ran_parallel:
+            if collect_nit:
+                self.last_nit = []
             # Built once and reused across the batch — identical constraints for every i.
             constraints = _build_slsqp_constraints(C, d, A, b, obstacle_specs, self.transition_dim, self.horizon)
             for i in range(batch_size):
@@ -228,6 +245,8 @@ class Projector:
                                 tol=1e-6,
                                 options={'maxiter': 1000, 'disp': False})
                 sol_np[i] = res.x # Save the optimized trajectory vector.
+                if collect_nit:
+                    self.last_nit.append(int(res.nit))
 
         #Compute a “projection cost” (a measure of how much the trajectory changed) for every candidate.
         for i in range(batch_size):
@@ -291,21 +310,23 @@ class Projector:
         grad1 = grad1.reshape(trajectory.shape)
         grad2 = grad2.reshape(trajectory.shape)
 
-        # Obstacle constraints — vectorized across batch and timestep (was a triple-nested
-        # Python loop over obstacle x timestep x batch item; same math, same per-obstacle
-        # accumulation, just computed as batched array ops instead of scalar Python iterations).
+        # Obstacle constraints — vectorized across batch and timestep. Each obstacle now
+        # carries one (P,q,v) per planned timestep (P_seq/q_seq/v_seq, length horizon-1)
+        # instead of a single matrix shared across the whole horizon — static obstacles
+        # just repeat the same triple at every t, dynamic ones vary per t (predicted
+        # future position), so this still handles both with one code path.
         batch_size = trajectory_np.shape[0]
         S_all = trajectory_np.reshape(batch_size, self.horizon, self.transition_dim)
         S = S_all[:, 1:, :]  # (B, horizon-1, transition_dim), t = 1..horizon-1
         grad3 = np.zeros_like(S_all)
         for constraint_idx in range(len(self.obstacle_constraints.P_list)):
-            P = self.obstacle_constraints.P_list[constraint_idx]
-            q = self.obstacle_constraints.q_list[constraint_idx]
-            v = self.obstacle_constraints.v_list[constraint_idx]
-            s_dot_q = S @ q                                          # (B, T)
-            s_P_s = np.einsum('bti,ij,btj->bt', S, P, S)             # (B, T), s^T P s
-            violated = (s_P_s + s_dot_q) > v                         # (B, T)
-            grad_dir = 2.0 * (S @ P.T) + q                           # (B, T, transition_dim), == 2*P@s + q per (b,t)
+            P_seq = np.stack(self.obstacle_constraints.P_list[constraint_idx], axis=0)  # (T, dim, dim)
+            q_seq = np.stack(self.obstacle_constraints.q_list[constraint_idx], axis=0)  # (T, dim)
+            v_seq = np.asarray(self.obstacle_constraints.v_list[constraint_idx])        # (T,)
+            s_dot_q = np.einsum('bti,ti->bt', S, q_seq)                                 # (B, T)
+            s_P_s = np.einsum('bti,tij,btj->bt', S, P_seq, S)                           # (B, T), s^T P s
+            violated = (s_P_s + s_dot_q) > v_seq[None, :]                               # (B, T)
+            grad_dir = 2.0 * np.einsum('bti,tij->btj', S, P_seq) + q_seq[None, :, :]    # (B, T, dim); P symmetric so P==P.T
             grad3[:, 1:, :] -= grad_dir * violated[..., None]
         grad3 = torch.tensor(grad3.reshape(trajectory_np.shape), device=self.device).reshape(trajectory.shape)
         
@@ -335,9 +356,24 @@ class Projector:
         pos_traj[:, 0] = self.pos0[:D].astype(np.float32)
         pos_traj[:, 1:] = pos_traj[:, :1] + np.cumsum(x_real, axis=1)
 
-        pos_t = torch.tensor(pos_traj, dtype=torch.float32, device=self.device)
-        pos_proj_t, _ = self.project(pos_t)                 # (K, H+1, D)
-        pos_proj = pos_proj_t.detach().cpu().numpy()
+        if self.transition_dim == 2 * D:
+            # Velocity dims appended (see build_obstacle_constraint_list's
+            # rate_limit path): v[t] is the velocity driving x[t] -> x[t+1], tied
+            # together by the 'deriv' dynamics constraint x[t+1] = x[t] + dt*v[t]
+            # already built into DynamicConstraints. Derive it from the raw deltas
+            # so the state we hand to the solver starts feasible w.r.t. that equality.
+            dt_val = float(self.dt.item())
+            vel_traj = np.zeros((K, H + 1, D), dtype=np.float32)
+            vel_traj[:, :H] = x_real / dt_val
+            vel_traj[:, H] = vel_traj[:, H - 1]
+            state_traj = np.concatenate([pos_traj, vel_traj], axis=-1)  # (K, H+1, 2D)
+        else:
+            state_traj = pos_traj
+
+        state_t = torch.tensor(state_traj, dtype=torch.float32, device=self.device)
+        state_proj_t, _ = self.project(state_t)              # (K, H+1, transition_dim)
+        state_proj = state_proj_t.detach().cpu().numpy()
+        pos_proj = state_proj[..., :D]
 
         # positions → real deltas → renormalize
         x_real_proj = (pos_proj[:, 1:] - pos_proj[:, :-1]).astype(np.float32)
@@ -565,11 +601,20 @@ class ObstacleConstraints(Constraints):
                     e.g. [('sphere_inside', [0, 2] [-1, 5], 1), ('sphere_outside', [1, 3], [0, 1], 4)] -->
                     (x_0 + 1)^2 + (x_2 - 5)^2 <= 1, x_1^2 + (x_3 - 1)^2 >= 4
                     where x_i is the i-th dimension of the state or state-action vectors at time t
+
+                    A '_dynamic' suffix on the type (e.g. 'sphere_outside_dynamic') means
+                    `center` is instead a list of (horizon-1) centers, one per planned
+                    timestep t=1..horizon-1 — used for obstacles predicted to move during
+                    the horizon. Everything else about the constraint is unchanged.
             Generate the matrix P and the vector q for:
                 s_i^T P s_i + q^T s_i <= v
             The matrices have the following shapes:
                 C: (horizon * n_bounds, transition_dim * horizon)
                 d: (horizon * n_bounds)
+
+            self.P_list / q_list / v_list: one entry per obstacle, each itself a list
+            of length (horizon-1) — the (P,q,v) triple to use at each planned timestep.
+            Static obstacles just repeat the same triple at every timestep.
         """
 
         if constraint_list is None:
@@ -577,41 +622,57 @@ class ObstacleConstraints(Constraints):
         else:
             self.constraint_list.extend(constraint_list)
 
+        n_steps = self.horizon - 1
+
         self.P_list = []
         self.q_list = []
         self.v_list = []
         for constraint in constraint_list:
             type = constraint[0]
             dims = constraint[1]
-            center = constraint[2]
             radius = constraint[3]
 
-            P = np.zeros((self.transition_dim, self.transition_dim))
-            q = np.zeros(self.transition_dim)
-            v = radius ** 2
+            is_dynamic = type.endswith("_dynamic")
+            base_type = type[: -len("_dynamic")] if is_dynamic else type
+            centers_per_t = constraint[2] if is_dynamic else [constraint[2]] * n_steps
+            if len(centers_per_t) != n_steps:
+                raise ValueError(
+                    f"'{type}' constraint has {len(centers_per_t)} centers, expected "
+                    f"horizon-1={n_steps} (one per planned timestep)"
+                )
 
-            dim_counter = 0
-            for dim in dims:
-                if self.normalizer is not None:
-                    delta_s = self.normalizer.maxs[dim] - self.normalizer.mins[dim]
-                    s_min = self.normalizer.mins[dim]
-                    P[dim, dim] = delta_s ** 2 / 4
-                    q[dim] = delta_s**2 / 2 + delta_s * (s_min - center[dim_counter])
-                    v -= delta_s**2 / 4 + delta_s * (s_min - center[dim_counter]) + (s_min - center[dim_counter]) ** 2
-                else:
-                    P[dim, dim] = 1
-                    q[dim] = -2 * center[dim_counter]
-                    v -= center[dim_counter] ** 2
-                dim_counter += 1
+            P_seq, q_seq, v_seq = [], [], []
+            for center in centers_per_t:
+                P = np.zeros((self.transition_dim, self.transition_dim))
+                q = np.zeros(self.transition_dim)
+                v = radius ** 2
 
-            if type == 'sphere_outside':
-                P = -P
-                q = -q
-                v = -v
+                dim_counter = 0
+                for dim in dims:
+                    if self.normalizer is not None:
+                        delta_s = self.normalizer.maxs[dim] - self.normalizer.mins[dim]
+                        s_min = self.normalizer.mins[dim]
+                        P[dim, dim] = delta_s ** 2 / 4
+                        q[dim] = delta_s**2 / 2 + delta_s * (s_min - center[dim_counter])
+                        v -= delta_s**2 / 4 + delta_s * (s_min - center[dim_counter]) + (s_min - center[dim_counter]) ** 2
+                    else:
+                        P[dim, dim] = 1
+                        q[dim] = -2 * center[dim_counter]
+                        v -= center[dim_counter] ** 2
+                    dim_counter += 1
 
-            self.P_list.append(P)
-            self.q_list.append(q)
-            self.v_list.append(v)    
+                if base_type == 'sphere_outside':
+                    P = -P
+                    q = -q
+                    v = -v
+
+                P_seq.append(P)
+                q_seq.append(q)
+                v_seq.append(v)
+
+            self.P_list.append(P_seq)
+            self.q_list.append(q_seq)
+            self.v_list.append(v_seq)
 
 class ProjectionNormalizer():
     def __init__(self, observation_normalizer=None, action_normalizer=None, goal_dim=0):
