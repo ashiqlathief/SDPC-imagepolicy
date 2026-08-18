@@ -75,9 +75,16 @@ def process_frame(depth, fx, fy, cx, cy, args, tracker, dt):
         pts_raw, NO_CROP_BOUNDS, NO_CROP_BOUNDS, NO_CROP_BOUNDS,
         voxel_size=args.voxel_size, outlier_radius=args.outlier_radius,
         outlier_min_neighbors=args.outlier_min_neighbors, wall_pad=0.0, z_margin=0.0,
+        # output_2d intentionally NOT used here: pts_filtered stays full 3D so
+        # the point-cloud display (both plot modes) is unaffected regardless
+        # of --xy_only. Only the clustering input below is flattened when
+        # requested -- see build_position_projector_from_points in
+        # eval_crazieflie1.py, which already only reads (x, y) from track
+        # points/centroids either way, so nothing downstream needs to care.
     )
     n_filtered = len(pts_filtered)
-    clusters = cluster_points(pts_filtered, eps=args.eps, min_samples=args.min_samples)
+    cluster_input = pts_filtered[:, :2] if args.xy_only else pts_filtered
+    clusters = cluster_points(cluster_input, eps=args.eps, min_samples=args.min_samples)
     tracks = tracker.update(clusters, dt)
     return tracks, n_raw, n_filtered, pts_raw, pts_filtered
 
@@ -109,23 +116,34 @@ def print_tracks(tracks, n_raw, n_filtered, frame_idx, true_xyz=None,
         return float(np.linalg.norm(item[1]["centroid"]))
 
     for tid, tr in sorted(tracks, key=_dist):
-        x, y, z = tr["centroid"]
+        centroid = tr["centroid"]
         dist = _dist((tid, tr))
         kind = "dynamic" if tr["is_dynamic"] else "static"
         npts = len(tr["points"])
         noisy = npts < min_reliable_npts or tr["seen"] < min_reliable_age
         flag = "  <- noisy?" if noisy else ""
-        print(f"  track {tid:>3} [{kind:7}]  dist={dist:5.2f}m"
-              f"  (x,y,z)=({x:+.3f},{y:+.3f},{z:+.3f})m"
+        if len(centroid) == 3:
+            x, y, z = centroid
+            pos_str = f"(x,y,z)=({x:+.3f},{y:+.3f},{z:+.3f})m"
+        else:  # --xy_only: clustering ran on (x, y) only, no z to show
+            x, y = centroid
+            pos_str = f"(x,y)  =({x:+.3f},{y:+.3f})m"
+        print(f"  track {tid:>3} [{kind:7}]  dist={dist:5.2f}m  {pos_str}"
               f"  npts={npts:3d}  age={tr['seen']:3d}"
               f"  vel={np.linalg.norm(tr['vel']):.3f} m/s{flag}")
 
     if true_xyz is not None:
         if tracks:
-            best = min(tracks, key=lambda t: np.linalg.norm(t[1]["centroid"] - true_xyz))
-            err = np.linalg.norm(best[1]["centroid"] - true_xyz)
+            # tracks' centroids may be (x,y) only (--xy_only); compare in
+            # whatever dimensionality the tracks actually have, so this
+            # never breaks with a (2,)-vs-(3,) shape mismatch.
+            dim = len(tracks[0][1]["centroid"])
+            true_cmp = true_xyz[:dim]
+            best = min(tracks, key=lambda t: np.linalg.norm(t[1]["centroid"] - true_cmp))
+            err = np.linalg.norm(best[1]["centroid"] - true_cmp)
             print(f"  [synthetic check] true=({true_xyz[0]:+.3f},{true_xyz[1]:+.3f},"
-                  f"{true_xyz[2]:+.3f})  closest track error = {err:.3f} m")
+                  f"{true_xyz[2]:+.3f})  closest track error = {err:.3f} m"
+                  + ("  (xy-only comparison)" if dim < 3 else ""))
         else:
             print(f"  [synthetic check] true=({true_xyz[0]:+.3f},{true_xyz[1]:+.3f},"
                   f"{true_xyz[2]:+.3f})  -- MISSED, no track detected")
@@ -144,18 +162,14 @@ class LivePlot:
     (capped, subsampled) member point of tr["points"], not per centroid.
 
     mode="3d"  -- single rotatable 3D scatter (original view).
-    mode="2d"  -- single flat panel, top-down / bird's-eye: X (right) vs Z
-                  (forward/depth, camera optical frame -- see
-                  backproject_depth_to_world). Camera sits at the near edge
-                  since a camera physically can't see behind itself; the
-                  cloud only ever fans out ahead of it, never surrounding
-                  it. Y (vertical) is dropped, so height differences (e.g.
-                  floor vs ceiling clutter) collapse onto one plane -- use
-                  --plot_mode 3d if that distinction matters."""
+    mode="2d"  -- single flat panel; see the `axes` param for which pair of
+                  camera axes is plotted."""
 
-    def __init__(self, radius_limit: float | None, mode: str = "3d", axis_limit: float = 3.0):
+    def __init__(self, radius_limit: float | None, mode: str = "3d",
+                 axes: str = "xz", axis_limit: float = 3.0):
         plt.ion()
         self.mode = mode
+        self.axes = axes  # only used when mode == "2d": "xz" or "xy"
         self.axis_limit = radius_limit if radius_limit is not None else axis_limit
         if mode == "3d":
             self.fig = plt.figure(figsize=(7, 7))
@@ -200,45 +214,57 @@ class LivePlot:
         plt.pause(0.001)
 
     def _update_2d(self, pts_raw, pts_filtered, tracks, frame_idx, true_xyz):
-        """Single-panel top-down / bird's-eye view: X (right) vs Z (forward/
-        depth), camera optical frame. Deliberately uses Z, not Y, as the
-        vertical plot axis -- an RGBD camera only ever sees what's in front
-        of the lens (for a D455, roughly an 87 deg horizontal FOV cone), so
-        every real point has Z >= 0. Plotting against Z keeps that true: the
-        camera sits at the near edge and the cloud only fans out ahead of
-        it. An X-vs-Y plot (dropping Z) loses this entirely -- lateral/
-        vertical offset alone puts points symmetrically all around the
-        camera marker, which visually implies coverage on every side, as if
-        the sensor could somehow see behind itself. It can't; that plot was
-        just discarding the one axis that would have shown it."""
+        """axes="xz" (default, recommended): top-down / bird's-eye, X (right)
+        vs Z (forward/depth). Camera sits at the near edge since a camera
+        physically can't see behind itself -- the cloud only ever fans out
+        ahead of it, never surrounding it.
+
+        axes="xy": front-on view, X (right) vs Y (down) -- depth is dropped,
+        so the camera marker sits in the MIDDLE with points on every side,
+        which looks like 360 deg coverage even though the sensor only sees
+        a forward FOV cone. Two real points at different depths but similar
+        (x, y) will also overlap here. Useful only if you specifically want
+        to check lateral/vertical spread irrespective of distance -- for a
+        geometrically honest view, use axes="xz"."""
         ax = self.ax2d
         lim = self.axis_limit
-        ax.cla()
 
+        if self.axes == "xz":
+            col_x, col_y = 0, 2
+            xlabel, ylabel = "X -- right (m)", "Z -- forward/depth (m)"
+            xlim, ylim = (-lim, lim), (-0.2, lim)  # depth is forward-only
+            title_suffix = "top-down (X vs Z)"
+        elif self.axes == "xy":
+            col_x, col_y = 0, 1
+            xlabel, ylabel = "X -- right (m)", "Y -- down (m)"
+            xlim, ylim = (-lim, lim), (-lim, lim)
+            title_suffix = "front-on (X vs Y)"
+        else:
+            raise ValueError(f"unknown axes '{self.axes}', expected 'xz' or 'xy'")
+
+        ax.cla()
         if len(pts_raw):
-            ax.scatter(pts_raw[:, 0], pts_raw[:, 2],
+            ax.scatter(pts_raw[:, col_x], pts_raw[:, col_y],
                        s=2, c="lightgray", alpha=0.35, label=f"raw ({len(pts_raw)})")
         if len(pts_filtered):
-            ax.scatter(pts_filtered[:, 0], pts_filtered[:, 2],
+            ax.scatter(pts_filtered[:, col_x], pts_filtered[:, col_y],
                        s=8, c="tab:blue", label=f"filtered ({len(pts_filtered)})")
         if true_xyz is not None:
-            ax.scatter([true_xyz[0]], [true_xyz[2]],
+            ax.scatter([true_xyz[col_x]], [true_xyz[col_y]],
                        s=140, marker="*", c="gold", edgecolors="black",
                        label="ground truth", zorder=6)
-        ax.scatter([0], [0], s=60, c="black", marker="^")  # camera, at the
-                                                             # near edge -- not
-                                                             # the center, since
-                                                             # nothing can be
-                                                             # detected behind it
+        ax.scatter([0], [0], s=60, c="black", marker="^")  # camera origin
 
-        ax.set_xlim(-lim, lim)
-        ax.set_ylim(-0.2, lim)  # depth is forward-only; never symmetric
-        ax.set_xlabel("X -- right (m)")
-        ax.set_ylabel("Z -- forward/depth (m)")
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        if self.axes == "xy":
+            ax.invert_yaxis()  # data Y is down-positive; flip so screen-up = real-up
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
         ax.set_aspect("equal", adjustable="box")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper left", fontsize=8)
-        ax.set_title(f"Frame {frame_idx}  |  tracks={len(tracks)}  |  top-down (X vs Z)")
+        ax.set_title(f"Frame {frame_idx}  |  tracks={len(tracks)}  |  {title_suffix}")
 
         self.fig.tight_layout()
         plt.pause(0.001)
@@ -261,7 +287,7 @@ def run_synthetic(args, tracker):
     cx, cy = W / 2.0, H / 2.0
     bg_depth = args.max_range * 0.9
 
-    plot = LivePlot(args.radius_limit, mode=args.plot_mode) if args.viz else None
+    plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes) if args.viz else None
     prev_t = time.time()
     for i in range(args.n_frames):
         depth = np.full((H, W), bg_depth, dtype=np.float32)
@@ -311,7 +337,7 @@ def run_zarr(args, tracker):
     fx, fy, cx, cy = camera_intrinsics(FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH,
                                         FPV_HORIZONTAL_APERTURE)
 
-    plot = LivePlot(args.radius_limit, mode=args.plot_mode) if args.viz else None
+    plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes) if args.viz else None
     prev_t = time.time()
     for i, frame_idx in enumerate(range(start, end, args.stride_frames)):
         depth = z["depth"][frame_idx]
@@ -350,7 +376,7 @@ def run_realsense(args, tracker):
           f"fx={intr.fx:.1f} fy={intr.fy:.1f} cx={intr.ppx:.1f} cy={intr.ppy:.1f}, "
           f"depth_scale={depth_scale}")
 
-    plot = LivePlot(args.radius_limit, mode=args.plot_mode) if args.viz else None
+    plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes) if args.viz else None
     prev_t = time.time()
     i = 0
     try:
@@ -393,7 +419,7 @@ def run_ros2(args, tracker):
               "        source /opt/ros/humble/setup.bash")
         return
 
-    plot = LivePlot(args.radius_limit, mode=args.plot_mode) if args.viz else None
+    plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes) if args.viz else None
 
     class DepthObstacleNode(Node):
         """Caches the latest CameraInfo (for intrinsics) and runs the full
@@ -466,6 +492,14 @@ def main():
     p.add_argument("--outlier_min_neighbors", type=int, default=4)
     p.add_argument("--eps", type=float, default=0.12)
     p.add_argument("--min_samples", type=int, default=4)
+    p.add_argument("--xy_only", action="store_true",
+                    help="cluster/track in (x,y) only, dropping z right before DBSCAN. "
+                         "Real corridor obstacles are vertical columns spanning the full "
+                         "flight envelope height; 3D clustering can chop one physical column "
+                         "into several tracks stacked at different heights (points >eps apart "
+                         "in z alone). This merges those height-slices back into one track. "
+                         "Point-cloud display (both --plot_mode 3d and 2d) is unaffected -- "
+                         "only clustering/tracking is flattened, not what you see plotted.")
     p.add_argument("--rate", type=float, default=10.0, help="replay/print rate in Hz")
     p.add_argument("--radius_limit", type=float, default=None,
                     help="spherical crop radius in metres from the camera origin, applied "
@@ -475,9 +509,16 @@ def main():
     p.add_argument("--viz", action="store_true",
                     help="show a live-updating scatter plot of raw/filtered points and tracks")
     p.add_argument("--plot_mode", choices=["3d", "2d"], default="3d",
-                    help="'3d': single rotatable 3D scatter. '2d': two flat panels stacked, "
-                         "top-down X-Y above and side-on X-Z below -- easier to read corridor/"
-                         "wall clearance without rotating a 3D view. Only used with --viz.")
+                    help="'3d': single rotatable 3D scatter. '2d': single flat panel (see "
+                         "--plot_axes for which pair). Only used with --viz.")
+    p.add_argument("--plot_axes", choices=["xz", "xy"], default="xz",
+                    help="Only used with --viz --plot_mode 2d. 'xz' (default, recommended): "
+                         "top-down/bird's-eye, X vs forward-depth Z -- camera sits at the near "
+                         "edge, geometrically honest since a camera can't see behind itself. "
+                         "'xy': front-on, X vs down-axis Y, depth dropped -- camera sits in the "
+                         "middle with points on every side, which visually implies 360 deg "
+                         "coverage the sensor doesn't actually have. Use only if you specifically "
+                         "need lateral/vertical spread irrespective of distance.")
 
     # synthetic source
     p.add_argument("--n_frames", type=int, default=60)

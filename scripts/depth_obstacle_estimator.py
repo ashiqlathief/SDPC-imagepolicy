@@ -109,7 +109,7 @@ def backproject_depth_to_world(depth: np.ndarray, fx: float, fy: float, cx: floa
 def filter_points(points: np.ndarray, x_bounds, y_bounds, z_bounds,
                    voxel_size: float = 0.05, outlier_radius: float = 0.15,
                    outlier_min_neighbors: int = 4, wall_pad: float = 0.15,
-                   z_margin: float = 0.05) -> np.ndarray:
+                   z_margin: float = 0.05, output_2d: bool = False) -> np.ndarray:
     """Crop obviously-invalid points (sensor noise/reflections far outside the
     flight envelope), voxel-downsample, then drop points with too few
     neighbors (isolated depth noise / "flying pixels" near occlusion edges).
@@ -128,6 +128,24 @@ def filter_points(points: np.ndarray, x_bounds, y_bounds, z_bounds,
     -- the drone's flight-envelope z_halfspaces already fence the top/bottom,
     and floor points are typically the noisiest source of false obstacles for
     a low-flying drone, so they're left out unless requested otherwise.
+
+    output_2d: if True, drop the Z column AFTER all of the above 3D-based
+    filtering (crop, voxel-downsample, outlier removal) and return (x, y)
+    only. Motivation: real corridor obstacles (BOXES/CYLINDERS) are vertical
+    columns spanning the full flight envelope height, so their points can
+    easily be MORE than `eps` apart in Z alone once you get more than
+    ~10-15cm off the floor -- 3D DBSCAN (see cluster_points) then chops one
+    physical column into several separate clusters stacked at different
+    heights, each getting its own track ID (this is very likely why you see
+    hundreds of short-lived, high-numbered track IDs for what's really a
+    handful of objects). Clustering in (x, y) only merges every height-slice
+    of the same column back into one cluster. Safe to enable even where Z
+    mattered downstream: tracks_to_constraints() and ObstacleTracker never
+    read a point's Z value in the first place (the projector's own point
+    constraints are ("sphere_outside", [0, 1], ...) -- horizontal-plane
+    only), so nothing downstream actually loses information it was using.
+    cluster_points() and ObstacleTracker are dimension-agnostic and need no
+    changes to accept (N,2) input.
     """
     if len(points) == 0:
         return points
@@ -140,18 +158,22 @@ def filter_points(points: np.ndarray, x_bounds, y_bounds, z_bounds,
     )
     points = points[keep]
     if len(points) == 0:
-        return points
+        return points[:, :2] if output_2d else points
 
     voxel_idx = np.round(points / voxel_size).astype(np.int64)
     _, unique_idx = np.unique(voxel_idx, axis=0, return_index=True)
     points = points[unique_idx]
     if len(points) < outlier_min_neighbors + 1:
-        return points
+        return points[:, :2].astype(np.float32) if output_2d else points
 
     nn = NearestNeighbors(radius=outlier_radius).fit(points)
     neighbor_lists = nn.radius_neighbors(points, return_distance=False)
     neighbor_counts = np.array([len(idxs) - 1 for idxs in neighbor_lists])  # exclude self
-    return points[neighbor_counts >= outlier_min_neighbors]
+    points = points[neighbor_counts >= outlier_min_neighbors]
+
+    if output_2d and len(points):
+        points = points[:, :2].astype(np.float32)
+    return points
 
 
 # =============================================================================
