@@ -1,3 +1,12 @@
+# Same evaluation pipeline as eval_crazieflie.py, but the drone is flown by
+# PX4StyleController (isaac/scripts/px4_style_controller.py, quaternion
+# attitude control) instead of the default cascaded small-angle PID
+# controller. isaac/scripts/crazyflie_env.py itself is left completely
+# untouched: Crazyflie.step()/.reset() call a module-level
+# `controller_motor_forces` function looked up by name at call time, so
+# monkey-patching that module attribute (see _install_px4_controller() below)
+# swaps the controller without editing the env class. Everything else
+# (policy, projector, plotting, logging) is identical to eval_crazieflie.py.
 import argparse
 import importlib
 import os
@@ -18,7 +27,10 @@ from matplotlib.patches import Rectangle, Circle, Polygon
 import diffuser.utils as utils
 from diffuser.sampling.projection import Projector
 from diffuser.sampling.policies import temporal_consistency_distances
-from metrics_logger import MetricsLogger   
+from metrics_logger import MetricsLogger
+from isaac.scripts.px4_style_controller import (
+    PX4StyleController, position_error_to_body_vel_cmd, yaw_from_quat,
+)
 cfg = importlib.import_module("config.avoiding-crazyflie")
 BOXES = cfg.BOXES
 CYLINDERS = cfg.CYLINDERS
@@ -36,6 +48,85 @@ z_halfspaces = [
     ([0.0, 0.0,  1.0], 1.0),   # z <=  1.0 m  — drone cannot fly above wall/ceiling
     ([0.0, 0.0, -1.0], 0.0),           # z >= 0.0 m   — drone cannot go underground
 ]
+
+# ── PX4-style controller, monkey-patched into crazyflie_env.controller_motor_forces ──
+# Crazyflie.step()/.reset() call the module-level name `controller_motor_forces`
+# (looked up in the crazyflie_env module's globals at call time, not bound at
+# import time), so replacing that module attribute swaps the controller every
+# place the env uses it, without touching isaac/scripts/crazyflie_env.py.
+#
+# Outer position->velocity gains match the original controller_motor_forces'
+# own Kp_pos/Kd_pos/vel_des clamp (crazyflie_env.py), so this is an apples-to-
+# apples swap of just the low-level controller, not a re-tuned task.
+_PX4_POS_KP = torch.tensor([0.8, 0.8, 1.5])
+_PX4_POS_KD = torch.tensor([0.8, 0.8, 0.8])
+_PX4_VEL_LIMIT = 0.5
+
+def _px4_controller_motor_forces(root_state, target_pos, env_origins, sim_dt, robot_mass, gravity, num_envs, sim):
+    """Drop-in replacement for crazyflie_env.controller_motor_forces: same call
+    signature and (N,4) per-motor upward-force return, but drives PX4StyleController
+    (quaternion attitude control) instead of the small-angle cascaded PID.
+
+    target_pos may carry an optional 4th column: [x, y, z] (as before) or
+    [x, y, z, yaw] -- the latter directly overrides the controller's yaw setpoint
+    (action_mode='xz_yaw' callers build this; see main()). Without a 4th column,
+    yaw is held at 0 every call, matching the original controller_motor_forces'
+    permanent yaw_des=0 behavior.
+    """
+    device = sim.device
+    if (not hasattr(_px4_controller_motor_forces, "controller")
+            or _px4_controller_motor_forces.controller.num_envs != num_envs):
+        controller = PX4StyleController(num_envs, device)
+        controller.yaw_sp.zero_()
+        controller._yaw_sp_initialized[:] = True
+        _px4_controller_motor_forces.controller = controller
+        _px4_controller_motor_forces.pos_kp = _PX4_POS_KP.to(device)
+        _px4_controller_motor_forces.pos_kd = _PX4_POS_KD.to(device)
+        _px4_controller_motor_forces.zero_yaw_rate = torch.zeros(num_envs, device=device)
+
+    controller = _px4_controller_motor_forces.controller
+    pos = root_state[:, 0:3]
+    quat = root_state[:, 3:7]      # (w,x,y,z), root_state's native layout
+    lin_vel_w = root_state[:, 7:10]
+    yaw = yaw_from_quat(quat)
+
+    target_pos_xyz = target_pos[..., :3]
+    if target_pos.shape[-1] >= 4:
+        # Directly set the yaw setpoint every call (idempotent: update() re-wraps
+        # yaw_sp + yaw_rate_cmd*dt below, and we pass yaw_rate_cmd=0, so repeating
+        # this every physics substep of the same control step is a no-op past the
+        # first call).
+        controller.yaw_sp = target_pos[..., 3].reshape(-1).expand(num_envs).clone().to(device)
+    else:
+        controller.yaw_sp.zero_()
+
+    vel_cmd_b = position_error_to_body_vel_cmd(
+        pos, target_pos_xyz, lin_vel_w, yaw,
+        _px4_controller_motor_forces.pos_kp,
+        _px4_controller_motor_forces.pos_kd,
+        _PX4_VEL_LIMIT,
+    )
+    return controller.update(
+        root_state, vel_cmd_b, _px4_controller_motor_forces.zero_yaw_rate,
+        sim_dt, robot_mass, gravity,
+    )
+
+def _install_px4_controller():
+    """Monkey-patch crazyflie_env.controller_motor_forces -> _px4_controller_motor_forces.
+    Call once, right after importing Crazyflie/CrazyflieEnvCfg."""
+    import isaac.scripts.crazyflie_env as crazyflie_env_module
+    crazyflie_env_module.controller_motor_forces = _px4_controller_motor_forces
+
+def _reset_px4_controller():
+    """Call right after env.reset(). Crazyflie.reset()'s own controller-reset
+    block only recognizes the original controller_motor_forces' state attributes
+    (vel_int/att_int/start_pos/...), which this replacement doesn't have, so that
+    block silently no-ops for it -- reset the PX4 controller's own state here."""
+    controller = getattr(_px4_controller_motor_forces, "controller", None)
+    if controller is not None:
+        controller.reset()
+        controller.yaw_sp.zero_()
+        controller._yaw_sp_initialized[:] = True
 
 projection_variants = [
   'sdpc-r',
@@ -369,19 +460,37 @@ def choose_trajectory(actions_real, strategy="first", prev_actions_real=None):
     # reaches here.
     return 0
 
-def integrate_candidates_xyz(pos0_xyz, a_candidates_real):
+def integrate_candidates_xyz(pos0_xyz, a_candidates_real, heading0=None):
     """
-    Integrates delta-position candidates into absolute (x,y,z) positions.
+    Integrates a chunk of per-step candidate actions into absolute (x,y,z)
+    positions, for plotting/logging only (not used to drive the drone).
     Kept as xyz (not xy-only) so candidate/planned horizons carry altitude
     too, not just the top-down (x,y) path.
     pos0_xyz: (3,)
     a_candidates_real: (K,H,3)
+    heading0: None for action_mode="xyz" (world-frame dx,dy,dz -> plain cumsum,
+      the original behavior). For action_mode="xz_yaw" (dx_body,dz,dyaw), pass
+      the drone's current yaw (rad): each step's forward distance is rotated by
+      the heading accumulated so far (sequential, since heading changes step to
+      step), so a candidate that turns actually curves in the plot instead of
+      being misread as straight-line xyz deltas.
     Returns: traj_xyz (K, H+1, 3)
     """
     K, H, _ = a_candidates_real.shape
     traj_xyz = np.zeros((K, H + 1, 3), dtype=np.float32)
     traj_xyz[:, 0, :] = pos0_xyz[:3][None, :]
-    traj_xyz[:, 1:, :] = pos0_xyz[:3][None, None, :] + np.cumsum(a_candidates_real[:, :, :3], axis=1)
+
+    if heading0 is None:
+        traj_xyz[:, 1:, :] = pos0_xyz[:3][None, None, :] + np.cumsum(a_candidates_real[:, :, :3], axis=1)
+        return traj_xyz
+
+    heading = np.full(K, heading0, dtype=np.float32)
+    for h in range(H):
+        dx, dz, dyaw = a_candidates_real[:, h, 0], a_candidates_real[:, h, 1], a_candidates_real[:, h, 2]
+        traj_xyz[:, h + 1, 0] = traj_xyz[:, h, 0] + dx * np.cos(heading)
+        traj_xyz[:, h + 1, 1] = traj_xyz[:, h, 1] + dx * np.sin(heading)
+        traj_xyz[:, h + 1, 2] = traj_xyz[:, h, 2] + dz
+        heading = heading + dyaw
     return traj_xyz
 
 def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None,
@@ -712,6 +821,14 @@ def main():
         print(f"[INFO] Running evaluation in {'RGB-D' if use_depth else 'RGB'} mode "
               f"(use_depth={use_depth}, in_chans={getattr(diffusion.model, 'in_chans', 3)})")
 
+        # action_mode is likewise a property of how the checkpoint was trained, not
+        # a CLI flag: "xyz" (world-frame dx,dy,dz, the default) or "xz_yaw"
+        # (dx_body,dz,dyaw -- see diffuser/datasets/crazyflie.py). Only "diffuser"
+        # (no obstacle projector) is wired up for "xz_yaw" so far -- the projector's
+        # world-frame waypoint math hasn't been redone for unicycle kinematics yet.
+        action_mode = str(getattr(dataset, "action_mode", "xyz"))
+        print(f"[INFO] action_mode={action_mode}")
+
         # ── derive eval dt from the trained dataset ───────────────────────────
         # a0_real is a displacement over `dataset.control_dt` seconds of sim time
         # (control_dt = stride * collection_dt). The eval env's sim dt must match
@@ -742,6 +859,7 @@ def main():
             # channel whenever the loaded checkpoint needs one.
             cfg.USE_DEPTH = use_depth
             from isaac.scripts.crazyflie_env import Crazyflie, CrazyflieEnvCfg
+            _install_px4_controller()
 
             env_cfg = CrazyflieEnvCfg(
                 num_envs=1,
@@ -758,6 +876,7 @@ def main():
                 drone_radius=drone_radius,
             )
             env = Crazyflie(env_cfg)
+            print("[INFO] Low-level controller: px4 (PX4StyleController, monkey-patched)")
             shared_use_depth = use_depth
             shared_eval_dt = eval_dt
         else:
@@ -825,6 +944,14 @@ def main():
         # ------------------ Episodes ------------------
         for ep, variant_name in enumerate(projection_variants):
             vcfg = variant_cfg(variant_name)
+            if action_mode == "xz_yaw" and vcfg["use_projection"]:
+                raise NotImplementedError(
+                    f"variant '{variant_name}' uses the obstacle projector, which still "
+                    "assumes world-frame (dx,dy,dz) waypoints. action_mode='xz_yaw' "
+                    "(dx_body,dz,dyaw) only supports unprojected variants ('diffuser') "
+                    "so far -- the projector's world-frame integration hasn't been "
+                    "redone for unicycle kinematics yet."
+                )
             if args.num_candidates is not None and vcfg["selection"] != "first":
                 vcfg["num_candidates"] = args.num_candidates
             # ------------------ Optional projection ------------------
@@ -858,6 +985,7 @@ def main():
             print(f"\n[INFO] ===== Episode {ep+1}/{len(projection_variants)}_{variant_name} =====")
             episode_start_time = time.time()
             _ = env.reset(seed=ep)
+            _reset_px4_controller()
             logger.begin_episode(variant_name, episode=ep, seed=ep)
 
             # Camera warm-up (important for Isaac/Replicator)
@@ -1027,11 +1155,29 @@ def main():
                 a0_real = a_candidates_proj_real[which, 0]  # action_scale already applied pre-projection
                 prev_actions_real = a_candidates_proj_real[which:which+1]
 
-                # Convert delta-pos -> absolute command (your env seems to accept xyz setpoints)
-                cmd_xyz = pos.copy()
-                cmd_xyz[:action_dim] = cmd_xyz[:action_dim] + a0_real[:action_dim]
+                # Convert action -> absolute [x,y,z] (+yaw for action_mode="xz_yaw") command.
+                if action_mode == "xz_yaw":
+                    # dx_body is a body-frame forward distance (rotate into world xy by
+                    # the drone's CURRENT heading, read live from the sim -- matches the
+                    # dataset's convention of projecting onto the heading at the START of
+                    # each step, see CrazyflieImageDataset._actions_from_deltas). dyaw is
+                    # a heading change reaching target_yaw by the end of this control
+                    # step; _px4_controller_motor_forces reads the 4th column directly as
+                    # a yaw setpoint override.
+                    quat_now = env.robot.data.root_state_w[:, 3:7]  # (1,4), (w,x,y,z)
+                    current_yaw = float(yaw_from_quat(quat_now)[0].item())
+                    dx_body, dz, dyaw = float(a0_real[0]), float(a0_real[1]), float(a0_real[2])
+                    cmd_xyz = np.array([
+                        pos[0] + dx_body * np.cos(current_yaw),
+                        pos[1] + dx_body * np.sin(current_yaw),
+                        pos[2] + dz,
+                        current_yaw + dyaw,
+                    ], dtype=np.float32)
+                else:
+                    cmd_xyz = pos.copy()
+                    cmd_xyz[:action_dim] = cmd_xyz[:action_dim] + a0_real[:action_dim]
                 # cmd_xyz[2] = 0.3 # If you want fixed altitude, uncomment:
-                print(f"[MODEL OUTPUT] which={which} a0_real={a0_real}" f" cmd_xyz={cmd_xyz[:3]}")
+                print(f"[MODEL OUTPUT] which={which} a0_real={a0_real}" f" cmd_xyz={cmd_xyz[:4] if action_mode == 'xz_yaw' else cmd_xyz[:3]}")
                 obs_next, _rew, done_vec, info = env.step(cmd_xyz)
 
                 # update rgb(d) history after step
@@ -1058,19 +1204,27 @@ def main():
 
                 # xyz is a strict superset of xy (xyz[..., :2] == xy) -- integrate
                 # once and slice for any xy-only consumer instead of integrating twice.
-                cand_xyz = integrate_candidates_xyz(pos2, a_candidates_real)  # (K,H+1,3)
+                # action_mode="xz_yaw": candidate rollouts need the drone's actual
+                # post-step heading as the anchor for the unicycle integration below
+                # (plotting only -- the executed action already used the pre-step
+                # heading, above).
+                heading0 = None
+                if action_mode == "xz_yaw":
+                    quat_post = env.robot.data.root_state_w[:, 3:7]
+                    heading0 = float(yaw_from_quat(quat_post)[0].item())
+                cand_xyz = integrate_candidates_xyz(pos2, a_candidates_real, heading0=heading0)  # (K,H+1,3)
                 # projected/safe version of the chosen candidate's horizon —
                 # same data project_action_candidates_with_positions() already
                 # computed above (a_candidates_proj_real), just also integrated
                 # and kept instead of being discarded after action selection
                 cand_xyz_proj = integrate_candidates_xyz(
-                    pos2, a_candidates_proj_real[which:which + 1]
+                    pos2, a_candidates_proj_real[which:which + 1], heading0=heading0
                 )[0]  # (H+1,3)
                 # plain/unguided model output for the same candidate index and
                 # noise draw — see a_plain_real above (only differs from
                 # a_candidates_real for "sdpc" mode's in-loop-guided sampling)
                 cand_xyz_plain = integrate_candidates_xyz(
-                    pos2, a_plain_real[which:which + 1]
+                    pos2, a_plain_real[which:which + 1], heading0=heading0
                 )[0]  # (H+1,3)
                 cand_snapshots.append({
                     "step": step,
@@ -1302,6 +1456,7 @@ def main():
                 print("[PLOT] saved:", out_path)
 
             env.reset()
+            _reset_px4_controller()
         logger.save()
 
     env.close()

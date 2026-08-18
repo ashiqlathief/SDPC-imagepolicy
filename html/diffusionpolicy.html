@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Diffusion Policy</title>
+  <style>
+    @page { size: 240mm 100mm; margin: 0; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 240mm; height: 100mm;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .diagram {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 28px;
+      padding: 10px 18px;
+    }
+
+    /* ── Left: data collection box ── */
+    .collection-box {
+      border: 2px dashed #555;
+      border-radius: 6px;
+      padding: 14px 18px 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .box-label {
+      font-size: 9.5px;
+      font-weight: 700;
+      color: #555;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .inner-loop {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .node {
+      border: 1.8px solid #333;
+      border-radius: 4px;
+      padding: 7px 14px;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: #111;
+      background: white;
+      text-align: center;
+      white-space: nowrap;
+    }
+    .node.scripted {
+      border-color: #1a7a1a;
+      color: #1a7a1a;
+      font-weight: 700;
+    }
+
+    .loop-arrows {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+    }
+    .loop-arrows .lbl {
+      font-size: 10px;
+      color: #555;
+      text-align: center;
+      line-height: 1.2;
+    }
+
+    .automated {
+      font-size: 10.5px;
+      color: #1a7a1a;
+      font-style: italic;
+      font-weight: 600;
+    }
+
+    /* ── Middle big arrow ── */
+    .mid-arrow {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+    }
+    .mid-arrow .lbl {
+      font-size: 10px;
+      color: #555;
+      text-align: center;
+      line-height: 1.4;
+    }
+
+    /* ── Right: pipeline ── */
+    .pipeline {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+    }
+
+    .pipe-node {
+      border: 1.8px solid #333;
+      border-radius: 4px;
+      padding: 7px 22px;
+      font-size: 12.5px;
+      font-weight: 500;
+      text-align: center;
+      background: white;
+      white-space: nowrap;
+    }
+    .pipe-node.dp {
+      border-color: #2255aa;
+      color: #1a3a8a;
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .pipe-lbl {
+      font-size: 10.5px;
+      color: #444;
+      line-height: 1.6;
+    }
+
+    /* ── Denoise strip ── */
+    .denoise-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .traj-box {
+      width: 52px; height: 52px;
+      border-radius: 3px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .blue-arr {
+      font-size: 17px;
+      color: #3a6abf;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .strip-lbl {
+      font-size: 9.5px;
+      color: #666;
+      text-align: center;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+<div class="diagram">
+
+  <!-- ── Left: data collection ── -->
+  <div class="collection-box">
+    <div class="box-label">Data Collection</div>
+
+    <div class="inner-loop">
+      <div class="node">Environment</div>
+
+      <div class="loop-arrows">
+        <!-- state: env → scripted policy (right arrow, top) -->
+        <div class="lbl">State</div>
+        <svg width="42" height="14" viewBox="0 0 42 14">
+          <line x1="0" y1="7" x2="34" y2="7" stroke="#333" stroke-width="1.6"/>
+          <polygon points="34,3 42,7 34,11" fill="#333"/>
+        </svg>
+        <!-- action: scripted policy → env (left arrow, bottom) -->
+        <svg width="42" height="14" viewBox="0 0 42 14">
+          <line x1="42" y1="7" x2="8" y2="7" stroke="#333" stroke-width="1.6"/>
+          <polygon points="8,3 0,7 8,11" fill="#333"/>
+        </svg>
+        <div class="lbl">Action</div>
+      </div>
+
+      <div class="node scripted">Scripted<br/>Policy</div>
+    </div>
+
+    <div class="automated">✓ Fully automated</div>
+  </div>
+
+  <!-- ── Middle arrow ── -->
+  <div class="mid-arrow">
+    <div class="lbl">State<br/>Action</div>
+    <svg width="50" height="16" viewBox="0 0 50 16">
+      <line x1="0" y1="8" x2="40" y2="8" stroke="#222" stroke-width="2"/>
+      <polygon points="40,3 50,8 40,13" fill="#222"/>
+    </svg>
+  </div>
+
+  <!-- ── Right: pipeline ── -->
+  <div class="pipeline">
+    <div class="pipe-node">Offline data</div>
+    <div class="pipe-lbl">↓ Imitation Learning ↓</div>
+    <div class="pipe-node dp">Diffusion Policy</div>
+
+    <!-- denoising strip -->
+    <div class="denoise-strip">
+      <!-- noisy -->
+      <div class="traj-box">
+        <svg width="52" height="52" viewBox="0 0 52 52" xmlns="http://www.w3.org/2000/svg">
+          <rect width="52" height="52" fill="#c8d8e8"/>
+          <!-- noise dots -->
+          <rect x="2"  y="3"  width="3" height="3" fill="#8aaccc" opacity="0.8"/>
+          <rect x="8"  y="7"  width="2" height="2" fill="#a0bcd0" opacity="0.7"/>
+          <rect x="15" y="2"  width="3" height="3" fill="#7090b8" opacity="0.9"/>
+          <rect x="22" y="8"  width="2" height="2" fill="#90a8c4" opacity="0.8"/>
+          <rect x="30" y="4"  width="3" height="3" fill="#8090c0" opacity="0.7"/>
+          <rect x="38" y="7"  width="2" height="2" fill="#a0b0d0" opacity="0.9"/>
+          <rect x="44" y="3"  width="3" height="3" fill="#7888b8" opacity="0.8"/>
+          <rect x="5"  y="14" width="2" height="2" fill="#9ab0cc" opacity="0.6"/>
+          <rect x="12" y="18" width="3" height="3" fill="#6888b0" opacity="0.9"/>
+          <rect x="20" y="13" width="2" height="2" fill="#8898c8" opacity="0.7"/>
+          <rect x="28" y="17" width="3" height="3" fill="#9090c0" opacity="0.8"/>
+          <rect x="36" y="12" width="2" height="2" fill="#7898b8" opacity="0.7"/>
+          <rect x="45" y="16" width="3" height="3" fill="#8090b8" opacity="0.9"/>
+          <rect x="3"  y="24" width="3" height="3" fill="#9aaccc" opacity="0.7"/>
+          <rect x="10" y="28" width="2" height="2" fill="#7090b8" opacity="0.8"/>
+          <rect x="18" y="23" width="3" height="3" fill="#8898c4" opacity="0.6"/>
+          <rect x="26" y="27" width="2" height="2" fill="#9090bc" opacity="0.9"/>
+          <rect x="34" y="22" width="3" height="3" fill="#7888b4" opacity="0.8"/>
+          <rect x="42" y="26" width="2" height="2" fill="#a0a8c8" opacity="0.7"/>
+          <rect x="6"  y="34" width="2" height="2" fill="#8090c0" opacity="0.8"/>
+          <rect x="14" y="38" width="3" height="3" fill="#9098c4" opacity="0.7"/>
+          <rect x="22" y="33" width="2" height="2" fill="#7080b4" opacity="0.9"/>
+          <rect x="30" y="37" width="3" height="3" fill="#8898b8" opacity="0.6"/>
+          <rect x="38" y="32" width="2" height="2" fill="#9090bc" opacity="0.8"/>
+          <rect x="46" y="36" width="3" height="3" fill="#7888b0" opacity="0.7"/>
+          <rect x="4"  y="44" width="2" height="2" fill="#9aaccc" opacity="0.8"/>
+          <rect x="12" y="47" width="3" height="3" fill="#8090c0" opacity="0.7"/>
+          <rect x="20" y="43" width="2" height="2" fill="#9090c4" opacity="0.9"/>
+          <rect x="28" y="46" width="3" height="3" fill="#7888b8" opacity="0.6"/>
+          <rect x="36" y="42" width="2" height="2" fill="#a098c8" opacity="0.8"/>
+          <rect x="44" y="46" width="3" height="3" fill="#8090b4" opacity="0.7"/>
+        </svg>
+      </div>
+
+      <div class="blue-arr">→</div>
+
+      <!-- semi-denoised -->
+      <div class="traj-box">
+        <svg width="52" height="52" viewBox="0 0 52 52" xmlns="http://www.w3.org/2000/svg">
+          <rect width="52" height="52" fill="#dce8f4"/>
+          <!-- faint noise remains -->
+          <rect x="5"  y="5"  width="2" height="2" fill="#9ab0cc" opacity="0.4"/>
+          <rect x="16" y="9"  width="2" height="2" fill="#8898c0" opacity="0.3"/>
+          <rect x="28" y="6"  width="2" height="2" fill="#9090bc" opacity="0.4"/>
+          <rect x="40" y="10" width="2" height="2" fill="#8090b8" opacity="0.3"/>
+          <rect x="10" y="20" width="2" height="2" fill="#9aaccc" opacity="0.3"/>
+          <rect x="22" y="24" width="2" height="2" fill="#8090c0" opacity="0.4"/>
+          <rect x="34" y="18" width="2" height="2" fill="#9090c0" opacity="0.3"/>
+          <rect x="46" y="22" width="2" height="2" fill="#7888b8" opacity="0.4"/>
+          <!-- emerging curve -->
+          <path d="M4 44 C16 44, 20 10, 48 10"
+                stroke="#5b9bd5" stroke-width="2.5" fill="none"
+                stroke-linecap="round" opacity="0.65"/>
+        </svg>
+      </div>
+
+      <div class="blue-arr">→</div>
+
+      <!-- clean -->
+      <div class="traj-box" style="border: 1px solid #ccc;">
+        <svg width="52" height="52" viewBox="0 0 52 52" xmlns="http://www.w3.org/2000/svg">
+          <rect width="52" height="52" fill="white"/>
+          <path d="M4 44 C16 44, 20 10, 48 10"
+                stroke="#3a7abf" stroke-width="2.5" fill="none"
+                stroke-linecap="round"/>
+        </svg>
+      </div>
+    </div>
+    <div class="strip-lbl">noise &nbsp;→&nbsp; denoised trajectory</div>
+  </div>
+
+</div>
+</body>
+</html>

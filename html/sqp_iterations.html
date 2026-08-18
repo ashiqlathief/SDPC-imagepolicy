@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>SLSQP Iterations</title>
+<style>
+  @page { size: 190mm 150mm; margin: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 190mm; height: 150mm;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: white;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  h1 { font-size: 13px; font-weight: 700; color: #222; margin-bottom: 2px; }
+  .subtitle { font-size: 10px; color: #777; margin-bottom: 8px; text-align: center; max-width: 460px; }
+  .legend { display: flex; gap: 18px; margin-top: 8px; font-size: 10px; color: #444; flex-wrap: wrap; justify-content: center; max-width: 480px;}
+  .li { display: flex; align-items: center; gap: 5px; }
+  .sw-line { width: 18px; height: 0; border-top: 2px solid; display: inline-block; }
+  .sw-dash { width: 18px; height: 0; border-top: 2px dashed; display: inline-block; }
+  .sw-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+</style>
+</head>
+<body>
+
+<h1>Projection as Constrained Optimization &mdash; SLSQP Iterates</h1>
+<p class="subtitle">
+  min<sub>x</sub> &frac12;&Vert;x &minus; x&#770;&Vert;&sup2; &nbsp; s.t. &nbsp; &Vert;x &minus; c<sub>obs</sub>&Vert; &ge; r<sub>o</sub>+r<sub>d</sub>
+  &nbsp;&mdash;&nbsp; project the unconstrained candidate x&#770; onto the nearest feasible point
+</p>
+
+<svg width="480" height="420" viewBox="0 0 480 420" xmlns="http://www.w3.org/2000/svg">
+
+  <!-- ── infeasible region (obstacle exclusion disk) ── -->
+  <circle cx="230" cy="230" r="110" fill="#f7c9a0" opacity="0.35"/>
+  <circle cx="230" cy="230" r="110" fill="none" stroke="#e07b1a" stroke-width="2.2"/>
+  <text x="230" y="234" font-size="11" fill="#a85510" text-anchor="middle" font-style="italic">infeasible</text>
+  <text x="175" y="280" font-size="10.5" fill="#a85510" text-anchor="middle">&Vert;x &minus; c<tspan baseline-shift="sub" font-size="8">obs</tspan>&Vert; &lt; r<tspan baseline-shift="sub" font-size="8">o</tspan>+r<tspan baseline-shift="sub" font-size="8">d</tspan></text>
+
+  <!-- ── objective level sets, centred on unconstrained target x_hat ── -->
+  <g stroke="#8aa8cf" stroke-width="1.3" stroke-dasharray="5,4" fill="none" opacity="0.85">
+    <circle cx="380" cy="120" r="30"/>
+    <circle cx="380" cy="120" r="60"/>
+    <circle cx="380" cy="120" r="95"/>
+    <circle cx="380" cy="120" r="132"/>
+  </g>
+  <text x="380" y="90" font-size="9.5" fill="#5c7aa8" text-anchor="middle">objective level sets</text>
+  <text x="380" y="101" font-size="9.5" fill="#5c7aa8" text-anchor="middle">&frac12;&Vert;x &minus; x&#770;&Vert;&sup2;</text>
+
+  <!-- unconstrained target x_hat -->
+  <circle cx="380" cy="120" r="4.5" fill="#1a3a8a"/>
+  <text x="392" y="116" font-size="12" fill="#1a3a8a" font-weight="700">x&#770;</text>
+  <text x="392" y="130" font-size="9" fill="#1a3a8a">(raw diffusion output)</text>
+
+  <!-- ── obstacle centre ── -->
+  <circle cx="230" cy="230" r="4" fill="#a85510"/>
+  <text x="238" y="226" font-size="9.5" fill="#a85510">c<tspan baseline-shift="sub" font-size="7.5">obs</tspan></text>
+
+  <!-- ── SLSQP iterates: x0 (infeasible start) -> x1 -> x2 -> x* (feasible optimum on boundary) ── -->
+  <!-- x0: initial guess, inside infeasible region -->
+  <circle cx="300" cy="185" r="5.5" fill="#c62828"/>
+  <text x="308" y="180" font-size="11" fill="#c62828" font-weight="700">x<tspan font-size="8" dy="3">(0)</tspan></text>
+
+  <!-- x1: SLSQP step 1, moved toward boundary -->
+  <circle cx="325" cy="205" r="5" fill="#e65100"/>
+  <text x="332" y="200" font-size="11" fill="#e65100" font-weight="700">x<tspan font-size="8" dy="3">(1)</tspan></text>
+
+  <!-- x2: SLSQP step 2, closer -->
+  <circle cx="322" cy="180" r="5" fill="#e65100"/>
+  <text x="330" y="174" font-size="11" fill="#e65100" font-weight="700">x<tspan font-size="8" dy="3">(2)</tspan></text>
+
+  <!-- x*: converged optimum, on the constraint boundary, nearest point to x_hat -->
+  <circle cx="316" cy="153" r="6" fill="#1b7a1b"/>
+  <text x="298" y="140" font-size="12.5" fill="#1b7a1b" font-weight="700">x*</text>
+  <text x="330" y="148" font-size="9" fill="#1b7a1b">(feasible optimum)</text>
+
+  <!-- iterate path arrows -->
+  <g stroke="#333" stroke-width="1.6" fill="none" marker-end="url(#arrow)">
+    <path d="M300,185 L320,203"/>
+    <path d="M325,205 L320,182"/>
+    <path d="M322,180 L316,157"/>
+  </g>
+
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#333"/>
+    </marker>
+  </defs>
+
+  <!-- constraint boundary tangent hint at x* -->
+  <line x1="230" y1="230" x2="316" y2="153" stroke="#888" stroke-width="1" stroke-dasharray="2,3"/>
+  <text x="255" y="205" font-size="8.5" fill="#777">r<tspan baseline-shift="sub" font-size="6.5">o</tspan>+r<tspan baseline-shift="sub" font-size="6.5">d</tspan></text>
+
+</svg>
+
+<div class="legend">
+  <div class="li"><span class="sw-dot" style="background:#c62828;"></span>x<sup>(0)</sup> initial (infeasible)</div>
+  <div class="li"><span class="sw-dot" style="background:#e65100;"></span>x<sup>(k)</sup> SLSQP iterate</div>
+  <div class="li"><span class="sw-dot" style="background:#1b7a1b;"></span>x* converged optimum</div>
+  <div class="li"><span class="sw-dash" style="border-color:#8aa8cf;"></span>objective level sets</div>
+  <div class="li"><span class="sw-line" style="border-color:#e07b1a;"></span>constraint boundary</div>
+</div>
+
+</body>
+</html>

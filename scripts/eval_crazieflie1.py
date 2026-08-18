@@ -18,7 +18,12 @@ from matplotlib.patches import Rectangle, Circle, Polygon
 import diffuser.utils as utils
 from diffuser.sampling.projection import Projector
 from diffuser.sampling.policies import temporal_consistency_distances
-from metrics_logger import MetricsLogger   
+from metrics_logger import MetricsLogger
+from depth_obstacle_estimator import (
+    camera_intrinsics, camera_world_pose, backproject_depth_to_world,
+    filter_points, cluster_points, ObstacleTracker, tracks_to_constraints,
+    FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE,
+)
 cfg = importlib.import_module("config.avoiding-crazyflie")
 BOXES = cfg.BOXES
 CYLINDERS = cfg.CYLINDERS
@@ -564,6 +569,75 @@ def build_position_projector(horizon_H, gradient, device, boxes, cylinders, sphe
 
     return projector
 
+def build_point_obstacle_constraints(static_points, dynamic_predictions, radius):
+    """--depth_obstacles counterpart to the cylinder loop inside
+    build_obstacle_constraint_list(): same ("sphere_outside", ...) /
+    ("sphere_outside_dynamic", ...) tuple shapes, one entry per detected
+    surface point instead of one per fitted circle (see
+    depth_obstacle_estimator.py's module docstring -- "option b")."""
+    constraints = []
+    for (x, y) in static_points:
+        constraints.append(("sphere_outside", [0, 1], [float(x), float(y)], float(radius)))
+    for centers_per_t in dynamic_predictions.values():
+        constraints.append(("sphere_outside_dynamic", [0, 1],
+                             [[float(cx), float(cy)] for cx, cy in centers_per_t],
+                             float(radius)))
+    return constraints
+
+def build_position_projector_from_points(horizon_H, gradient, device, boxes,
+                                          static_points, dynamic_predictions, point_radius,
+                                          spheres=None, normalizer=None, tighten=0.0, dt=0.1,
+                                          use_dynamics=True, drone_radius=0.0, sphere_radius=0.0,
+                                          active_halfspaces=None):
+    """--depth_obstacles counterpart to build_position_projector(): identical
+    bounds/box/sphere/halfspace setup (reuses build_obstacle_constraint_list
+    unchanged, with cylinders=[] so no ground-truth cylinder constraints get
+    added), but cylinder obstacles come from a detected point cloud (see
+    depth_obstacle_estimator.py) instead of CYLINDERS / env.get_cylinder_positions().
+    """
+    Hp1 = horizon_H + 1
+    x_bounds = (-0.5, 4.5)
+    y_bounds = (-0.95, 0.95)
+    z_bounds = (0.0, 1.0)
+    transition_dim = 3
+
+    constraint_list = build_obstacle_constraint_list(
+        boxes=boxes,
+        cylinders=[],
+        spheres=spheres,
+        x_bounds=x_bounds,
+        y_bounds=y_bounds,
+        z_bounds=z_bounds,
+        corridor_halfspaces=active_halfspaces or [],
+        z_halfspaces=z_halfspaces,
+        tighten=tighten,
+        drone_radius=drone_radius,
+        sphere_radius=sphere_radius,
+    )
+    constraint_list += build_point_obstacle_constraints(
+        static_points, dynamic_predictions,
+        radius=point_radius + drone_radius + tighten,
+    )
+
+    projector = Projector(
+        horizon=Hp1,
+        transition_dim=transition_dim,
+        action_dim=0,
+        goal_dim=0,
+        constraint_list=constraint_list,
+        normalizer=normalizer,
+        gradient=gradient,
+        gradient_weights=[1, 0.5, 2],
+        dt=dt if use_dynamics else 0.0,
+        variant="states",
+        skip_initial_state=True,
+        diffusion_timestep_threshold=0.8,
+        device=str(device),
+        solver="scipy",
+        parallelize=True,
+    )
+    return projector
+
 def project_action_candidates_with_positions(projector, pos0, a_candidates_real, device):
     """
     pos0: (3,) current position
@@ -633,6 +707,29 @@ def main():
                              "this invocation.")
     parser.add_argument("--video_fps", type=int, default=20,
                         help="Playback fps of saved videos (independent of sim dt).")
+    parser.add_argument("--depth_obstacles", action="store_true", default=False,
+                        help="Perceive obstacles from the FPV depth camera (see "
+                             "depth_obstacle_estimator.py / depth.md) instead of feeding the "
+                             "projector ground-truth CYLINDERS / env.get_cylinder_positions(). "
+                             "Independent of the loaded model's own use_depth -- the model can "
+                             "still be an RGB-only checkpoint; this only changes what the "
+                             "*projector* sees, not what the policy sees.")
+    parser.add_argument("--depth_obstacle_radius", type=float, default=0.01,
+                        help="Keep-out radius (m) around each detected surface point, on top "
+                             "of drone_radius (--depth_obstacles only).")
+    parser.add_argument("--depth_obstacle_max_range", type=float, default=4.0,
+                        help="Drop depth points farther than this from the camera (m).")
+    parser.add_argument("--depth_obstacle_stride", type=int, default=2,
+                        help="Pixel stride when back-projecting the depth image (speed/density trade-off).")
+    parser.add_argument("--depth_obstacle_voxel", type=float, default=0.05,
+                        help="Voxel size (m) for downsampling the back-projected point cloud.")
+    parser.add_argument("--depth_obstacle_max_points", type=int, default=12,
+                        help="Cap on keep-out points passed to the projector per tracked obstacle "
+                             "(bounds the SLSQP solve's constraint count).")
+    parser.add_argument("--depth_obstacle_debug", action="store_true", default=False,
+                        help="Log estimated-vs-ground-truth cylinder position error every 20 steps "
+                             "(uses env.get_cylinder_positions() only for this printout, never fed "
+                             "to the projector) -- for validating the estimator against sim truth.")
     args, _unknown = parser.parse_known_args()
 
     device         = torch.device("cuda:0")
@@ -641,6 +738,13 @@ def main():
     obs_frequency  = 0.45
     sphere_amplitude = 0.20
     sphere_frequency = 0.20
+
+    # FPV camera intrinsics for --depth_obstacles' point-cloud back-projection
+    # (see depth_obstacle_estimator.py -- constants there mirror FPV_CAMERA_CFG
+    # in crazyflie_env_cfg.py).
+    depth_fx, depth_fy, depth_cx, depth_cy = camera_intrinsics(
+        FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE
+    )
 
     # ── active halfspaces: from config only when --use_halfspaces is set ─────────
     active_halfspaces = corridor_halfspaces if args.use_halfspaces else []
@@ -739,8 +843,11 @@ def main():
             # Propagate the detected mode to the FPV camera config before crazyflie_env_cfg
             # (which builds CrazyflieSceneCfg.FPV_CAMERA_CFG's data_types from cfg.USE_DEPTH
             # at import time) is imported, so the simulated camera actually has a depth
-            # channel whenever the loaded checkpoint needs one.
-            cfg.USE_DEPTH = use_depth
+            # channel whenever the loaded checkpoint needs one OR --depth_obstacles needs
+            # one for the projector -- these are independent: `use_depth` alone still
+            # controls what channels get fed to the model (preprocess_obs_stack below),
+            # so an RGB-only checkpoint stays RGB-only even with --depth_obstacles on.
+            cfg.USE_DEPTH = use_depth or args.depth_obstacles
             from isaac.scripts.crazyflie_env import Crazyflie, CrazyflieEnvCfg
 
             env_cfg = CrazyflieEnvCfg(
@@ -831,8 +938,86 @@ def main():
             projection_mode=vcfg["projection_mode"]
             gradient = (projection_mode == "gradient")
             pos_projector = None   # obstacle-aware SLSQP projector (post-hoc + sdpc in-loop)
+            depth_tracker = ObstacleTracker() if args.depth_obstacles else None
+            # latest --depth_obstacles detection, stashed per step into cand_snapshots
+            # below so the final XY plot can show what the projector actually saw.
+            depth_static_pts_latest, depth_dyn_preds_latest = [], {}
+            # Full-episode accumulation of every point ever detected, independent of
+            # the small per-step cap (--depth_obstacle_max_points) the projector's
+            # constraints use -- for the "show/save everything" plot only, never fed
+            # back into build_position_projector_from_points. Keyed by voxel-grid
+            # cell (for dedup) but stores the real, continuous detected position as
+            # the value -- so a curved surface still plots as a curve, not a grid of
+            # voxel-snapped squares.
+            depth_static_accum: dict[tuple[int, int], tuple[float, float]] = {}
+            depth_dynamic_accum: dict[tuple[int, int], tuple[float, float]] = {}
 
-            if vcfg["use_projection"]:
+            def _rebuild_depth_projector(current_pos):
+                """--depth_obstacles: capture a depth frame, back-project -> filter ->
+                cluster -> track (see depth_obstacle_estimator.py), and build the
+                point-based projector from that instead of ground-truth cylinder
+                geometry. Called once after camera warm-up and then every step."""
+                depth = env.get_depth()
+                root = env.robot.data.root_state_w[0].detach().cpu().numpy()
+                pos_body_w, quat_body_w = root[0:3], root[3:7]
+                pos_cam_w, quat_cam_w = camera_world_pose(pos_body_w, quat_body_w)
+                pts = backproject_depth_to_world(
+                    depth, depth_fx, depth_fy, depth_cx, depth_cy, pos_cam_w, quat_cam_w,
+                    max_range=args.depth_obstacle_max_range, stride=args.depth_obstacle_stride,
+                )
+                pts = filter_points(
+                    pts, x_bounds=(-0.5, 4.5), y_bounds=(-0.95, 0.95), z_bounds=(0.0, 1.0),
+                    voxel_size=args.depth_obstacle_voxel,
+                )
+                clusters = cluster_points(pts)
+                # One outer eval `step()` call -- and therefore one call to this
+                # function -- advances the sim by env.count physics substeps at
+                # eval_dt each (see Crazyflie.step() in crazyflie_env.py), not by
+                # eval_dt alone. Using eval_dt alone here would inflate every
+                # velocity estimate by ~env.count x, since vel = disp / dt.
+                _rebuild_dt = eval_dt * getattr(env, "count", 100)
+                active_tracks = depth_tracker.update(clusters, dt=_rebuild_dt)
+
+                # Accumulate every freshly-matched (missed==0) point this episode --
+                # separate from tracks_to_constraints' capped output below, which is
+                # what the projector actually uses. Skips missed!=0 tracks so a stale
+                # track's frozen points (unchanged since its last real match) aren't
+                # re-added every single step. Deduped by voxel cell (so re-detecting
+                # the same surface repeatedly doesn't grow the set unbounded), but the
+                # REAL continuous position is stored, not the snapped cell coordinate
+                # -- keeps a curved surface looking curved in the plot, not gridded.
+                _voxel = args.depth_obstacle_voxel
+                for _tid, _tr in active_tracks:
+                    if _tr["missed"] != 0:
+                        continue
+                    _accum = depth_dynamic_accum if _tr["is_dynamic"] else depth_static_accum
+                    for _p in _tr["points"]:
+                        _x, _y = float(_p[0]), float(_p[1])
+                        _key = (round(_x / _voxel), round(_y / _voxel))
+                        _accum.setdefault(_key, (_x, _y))
+
+                static_pts, dyn_preds = tracks_to_constraints(
+                    active_tracks, horizon=horizon, proj_dt=proj_dt,
+                    max_points_per_obstacle=args.depth_obstacle_max_points,
+                )
+                projector = build_position_projector_from_points(
+                    horizon_H=horizon, gradient=gradient, device=device,
+                    boxes=BOXES, static_points=static_pts, dynamic_predictions=dyn_preds,
+                    point_radius=args.depth_obstacle_radius,
+                    spheres=(env.get_sphere_positions() if args.floating_spheres else None),
+                    normalizer=None, tighten=vcfg["tighten"], dt=proj_dt,
+                    use_dynamics=vcfg.get("use_dynamics", True),
+                    drone_radius=drone_radius,
+                    sphere_radius=SPHERE_RADIUS if args.floating_spheres else 0.0,
+                    active_halfspaces=active_halfspaces,
+                )
+                if vcfg["projection_mode"] == "sdpc":
+                    projector.inloop_slsqp = True
+                    projector.action_normalizer = dataset.action_normalizer
+                    projector.pos0 = current_pos
+                return projector, static_pts, dyn_preds
+
+            if vcfg["use_projection"] and not args.depth_obstacles:
                 proj_dt = 0.1
                 # All cylinders (static and dynamic) use the same base radius.
                 # Dynamic ones get their actual positions via --dynamic_obstacles (see below).
@@ -854,6 +1039,8 @@ def main():
                     pos_projector.inloop_slsqp = True
                     pos_projector.action_normalizer = dataset.action_normalizer
                     pos_projector.pos0 = None  # filled in per step
+            elif vcfg["use_projection"]:
+                proj_dt = 0.1   # set here too -- _rebuild_depth_projector below needs it
 
             print(f"\n[INFO] ===== Episode {ep+1}/{len(projection_variants)}_{variant_name} =====")
             episode_start_time = time.time()
@@ -868,6 +1055,12 @@ def main():
                     env.step(cmd_xyz)
                 except Exception:
                     pass
+
+            if vcfg["use_projection"] and args.depth_obstacles:
+                pos_projector, _init_static_pts, _init_dyn_preds = _rebuild_depth_projector(pos[:3])
+                depth_static_pts_latest, depth_dyn_preds_latest = _init_static_pts, _init_dyn_preds
+                print(f"[INFO] --depth_obstacles: initial projector built from "
+                      f"{len(_init_static_pts)} detected static keep-out points.")
 
             # ── per-episode video writers, one per requested --camera, recorded
             # simultaneously from the same rollout (only for variants the caller asked for) ──
@@ -957,12 +1150,33 @@ def main():
                     a_plain_real = a_candidates_real
 
                 # ── per-step projector update ──────────
+                if args.depth_obstacles and vcfg["use_projection"]:
+                    # Always rebuild: unlike ground-truth cylinders, the detected
+                    # point cloud changes every step regardless of whether any
+                    # obstacle is actually moving (viewpoint, noise, newly-visible
+                    # surfaces), so there's no "no-op, skip it" case here.
+                    pos_projector, _static_pts_dbg, _dyn_preds_dbg = _rebuild_depth_projector(pos[:3])
+                    depth_static_pts_latest, depth_dyn_preds_latest = _static_pts_dbg, _dyn_preds_dbg
+                    if args.depth_obstacle_debug and step % 20 == 0:
+                        # env.get_cylinder_positions() used ONLY for this printout --
+                        # never fed to the projector -- to validate the estimator
+                        # against sim ground truth (see depth.md's validation plan).
+                        gt = env.get_cylinder_positions()
+                        if _static_pts_dbg and gt:
+                            errs = [min(np.hypot(px - gx, py - gy) for gx, gy in gt)
+                                    for px, py in _static_pts_dbg]
+                            print(f"[DEPTH_OBS_DEBUG step={step}] {len(_static_pts_dbg)} static pts, "
+                                  f"nearest-cylinder error: mean={np.mean(errs):.3f}m max={np.max(errs):.3f}m")
+                        else:
+                            print(f"[DEPTH_OBS_DEBUG step={step}] {len(_static_pts_dbg)} static pts detected "
+                                  f"(vs. {len(gt)} ground-truth cylinders)")
+
                 # Gated on --dynamic_obstacles: with no dynamic obstacles,
                 # get_cylinder_positions() returns the same rest positions every step, so
                 # rebuilding the projector (full constraint-matrix reconstruction) would be
                 # a no-op — skip it and keep reusing the projector built once above.
                 _need_rebuild = (args.dynamic_obstacles_enabled or args.floating_spheres)
-                if _need_rebuild and vcfg["use_projection"]:
+                if _need_rebuild and vcfg["use_projection"] and not args.depth_obstacles:
                     # get_cylinder_positions() returns current positions for ALL cylinders
                     # (static ones at rest, dynamic ones at actual current position)
                     cyl_now = env.get_cylinder_positions()
@@ -1084,6 +1298,11 @@ def main():
                     "chosen": int(which),
                     "cyl_xy":  env.get_cylinder_positions() if args.dynamic_obstacles_enabled else None,
                     "sph_xyz": env.get_sphere_positions()   if args.floating_spheres          else None,
+                    # --depth_obstacles: what the projector actually saw/enforced this
+                    # step, so the final XY plot can show real detections instead of
+                    # (potentially misleading) ground truth. See plot block below.
+                    "depth_static_pts": list(depth_static_pts_latest) if args.depth_obstacles else None,
+                    "depth_dyn_preds":  dict(depth_dyn_preds_latest)  if args.depth_obstacles else None,
                 })
 
                 if done:
@@ -1127,6 +1346,38 @@ def main():
                 projection_mode = vcfg["projection_mode"],
                 num_candidates = vcfg["num_candidates"] if vcfg["num_candidates"] > 0 else 1,
                 selection   = vcfg["selection"],
+
+                # ── --depth_obstacles: whether this episode used depth-based
+                # detection at all, and what range it was run with -- so
+                # downstream tools (make_traj_gif.py's --depth_fov wedge) can
+                # tell a depth run from a ground-truth run without a CLI flag ──
+                depth_obstacles = bool(args.depth_obstacles),
+                depth_obstacle_max_range = (float(args.depth_obstacle_max_range)
+                                            if args.depth_obstacles else 0.0),
+
+                # ── --depth_obstacles: every point detected this episode (voxel-
+                # deduped, uncapped -- see depth_static_accum/depth_dynamic_accum) ──
+                depth_static_points = (np.array(list(depth_static_accum.values()), dtype=np.float32)
+                                       if args.depth_obstacles else np.zeros((0, 2), dtype=np.float32)),
+                depth_dynamic_points = (np.array(list(depth_dynamic_accum.values()), dtype=np.float32)
+                                        if args.depth_obstacles else np.zeros((0, 2), dtype=np.float32)),
+
+                # ── --depth_obstacles: what was actually enforced at EACH step
+                # (capped by --depth_obstacle_max_points, unlike the uncapped
+                # accumulator above) -- ragged per-step arrays, dtype=object since
+                # point counts vary step to step. depth_dynamic_pts_traj keeps only
+                # each dynamic point's first predicted position (k=1) per step, same
+                # simplification the live plot already uses.
+                depth_static_pts_traj = np.array(
+                    [np.array(s.get("depth_static_pts") or [], dtype=np.float32) for s in cand_snapshots],
+                    dtype=object,
+                ) if args.depth_obstacles else np.array([], dtype=object),
+                depth_dynamic_pts_traj = np.array(
+                    [np.array([c[0] for c in (s.get("depth_dyn_preds") or {}).values() if c],
+                              dtype=np.float32)
+                     for s in cand_snapshots],
+                    dtype=object,
+                ) if args.depth_obstacles else np.array([], dtype=object),
 
                 # ── candidate snapshots (for replaying plan viz) ──
                 # save full episode length (all steps), not just a truncated prefix
@@ -1208,7 +1459,28 @@ def main():
 
                 # Obstacles overlay
                 add_obstacles_xy(ax, BOXES, [], box_size_xy=0.20, cyl_radius=0.06)  # boxes only
-                if args.dynamic_obstacles_enabled:
+                depth_legend_handles = []
+                if args.depth_obstacles:
+                    # Ground truth shown faint/dashed for reference only -- the
+                    # projector never saw this, it is NOT what was enforced.
+                    for (gx, gy) in CYLINDERS:
+                        ax.add_patch(Circle((gx, gy), 0.06, linewidth=1.0, linestyle="--",
+                                             edgecolor="gray", facecolor="none", alpha=0.4, zorder=2))
+                    # Every point detected this episode (voxel-deduped accumulator,
+                    # see depth_static_accum/depth_dynamic_accum above) -- NOT just
+                    # what any single step's capped projector constraints used.
+                    if depth_static_accum:
+                        _sa = np.array(list(depth_static_accum.values()))
+                        ax.scatter(_sa[:, 0], _sa[:, 1], s=6, color="tab:red", alpha=0.35, zorder=3)
+                    if depth_dynamic_accum:
+                        _da = np.array(list(depth_dynamic_accum.values()))
+                        ax.scatter(_da[:, 0], _da[:, 1], s=6, color="tab:purple", alpha=0.35, zorder=3)
+                    depth_legend_handles = [
+                        mpatches.Patch(color="tab:red", alpha=0.5, label="depth-detected static point"),
+                        mpatches.Patch(color="tab:purple", alpha=0.5, label="depth-detected dynamic point"),
+                        mpatches.Patch(facecolor="none", edgecolor="gray", label="ground truth (reference only)"),
+                    ]
+                elif args.dynamic_obstacles_enabled:
                     dyn_idx = args.dynamic_cyl_indices if args.dynamic_cyl_indices is not None \
                               else list(range(len(CYLINDERS)))
                     _raw_axes = args.obs_axes if args.obs_axes is not None else ["y"]
@@ -1247,9 +1519,12 @@ def main():
                     plot_halfspace_constraints_xy(ax, active_halfspaces, (-0.5, 4.5), (-1.0, 1.0))
 
                 # ---- blue constraint margin overlay ----
+                # Skipped for --depth_obstacles: it draws the ground-truth CYLINDERS'
+                # margin, which is exactly what this run did NOT enforce -- the red/
+                # purple detected-point scatter above is the honest equivalent.
                 tighten_val = vcfg.get("tighten", 0.0)
-                constraint_handles = []
-                if vcfg["use_projection"]:
+                constraint_handles = list(depth_legend_handles)
+                if vcfg["use_projection"] and not args.depth_obstacles:
                     if args.dynamic_obstacles_enabled:
                         _dyn_set_plot = set(args.dynamic_cyl_indices) if args.dynamic_cyl_indices is not None \
                                         else set(range(len(CYLINDERS)))

@@ -48,11 +48,17 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         returns_scale=100.0,
         include_returns=False,
         zarr_subdir="zarr",
+        data_subdir="data",         # isaac/dataset/avoiding_crazyflie/<data_subdir>/<zarr_subdir>
         stride=1,                   # frames-per-action-step at collection rate (see `dt`)
         dt=0.005,                   # sim dt the raw zarr frames were collected at
         use_depth=False,            # load and concat the depth channel collected via quadcopter.py --use_depth
         depth_near=None,            # metres; defaults to config/avoiding-crazyflie.py DEPTH_NEAR
         depth_far=None,             # metres; defaults to config/avoiding-crazyflie.py DEPTH_FAR
+        action_mode="xyz",          # "xyz" (default: world-frame dx,dy,dz) or
+                                     # "xz_yaw" (dx=body-frame forward distance, dz=world
+                                     # altitude delta, dyaw=wrapped heading change; needs
+                                     # quaternion in states, e.g. data collected via
+                                     # quadcopter_px4.py -- see data_subdir="data_px4")
     ):
         super().__init__()
         self.env = env
@@ -68,6 +74,9 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         self.in_chans = 4 if self.use_depth else 3
         self.depth_near = float(depth_near) if depth_near is not None else _DEFAULT_DEPTH_NEAR
         self.depth_far = float(depth_far) if depth_far is not None else _DEFAULT_DEPTH_FAR
+        if action_mode not in ("xyz", "xz_yaw"):
+            raise ValueError(f"action_mode must be 'xyz' or 'xz_yaw', got {action_mode!r}")
+        self.action_mode = action_mode
         # The wall-clock time one predicted action step spans. eval's sim dt
         # must equal this for a0_real to mean what the model thinks it means.
         self.control_dt = self.stride * self.dt
@@ -76,7 +85,7 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
             preprocess_fns = []
 
         # --- Find Zarr stores ---
-        data_dir = project_path("isaac", "dataset", "avoiding_crazyflie", "data", zarr_subdir)
+        data_dir = project_path("isaac", "dataset", "avoiding_crazyflie", data_subdir, zarr_subdir)
         if not os.path.isdir(data_dir):
             raise FileNotFoundError(f"Zarr folder not found: {data_dir}")
 
@@ -100,8 +109,16 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         # self.action_dim = int(g0["actions"].shape[1])
 
         self.pos_slice = slice(0, 3)   # CHANGE if needed
-        self.action_dim = 3            # velocity from x,y,z diffs
-        # For SDPC compatibility prints
+        self.action_dim = 3            # (dx,dy,dz) or (dx_body,dz,dyaw), see action_mode
+        if self.action_mode == "xz_yaw":
+            state_dim = g0["states"].shape[1]
+            if state_dim < 7:
+                raise ValueError(
+                    f"action_mode='xz_yaw' needs quaternion in states (dims 3:7), but "
+                    f"states has only {state_dim} dims. Collect with quadcopter_px4.py "
+                    "(13-dim state: pos, quat_xyzw, linvel, angvel) via data_subdir='data_px4'."
+                )
+            self.quat_slice = slice(3, 7)   # (x,y,z,w), matches quadcopter_px4.py's state layout
         self.observation_dim = 0
         self.goal_dim = 0
 
@@ -164,15 +181,17 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         for gi, g in enumerate (self.groups):
             s = g["states"]  # (T, state_dim)
             pos_all = s[:, self.pos_slice]
+            quat_all = s[:, self.quat_slice] if self.action_mode == "xz_yaw" else None
             T = s.shape[0]
             print(f"\n[DIAG] group gi={gi}, states shape={s.shape}")
-            
+
             for (ep_gi, ep_start, ep_end) in self.episodes:
                 if ep_gi != gi:
                     continue
-                
-                p   = pos_all[ep_start : ep_end + 1]   # fully within real episode
-                vel = p[self.stride:] - p[:-self.stride] if self.stride > 1 else p[1:] - p[:-1]
+
+                p = pos_all[ep_start : ep_end + 1]                        # fully within real episode
+                q = quat_all[ep_start : ep_end + 1] if quat_all is not None else None
+                vel = self._actions_from_deltas(p, q, self.stride)        # (>=0, action_dim)
 
                 if vel.shape[0] == 0:
                     continue
@@ -188,11 +207,48 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
 
         print(f"[ZarrCrazyflieImageDataset] Loaded {len(self.groups)} zarr stores from: {data_dir}")
         print(f"[ZarrCrazyflieImageDataset] Episodes: {len(self.episodes)} | Indices: {len(self.indices)}")
-        print(f"[ZarrCrazyflieImageDataset] Image: {self.img_h}x{self.img_w} | action_dim={self.action_dim}")
+        print(f"[ZarrCrazyflieImageDataset] Image: {self.img_h}x{self.img_w} | action_mode={self.action_mode} "
+              f"| action_dim={self.action_dim}")
         print(f"[ZarrCrazyflieImageDataset] To={self.n_obs_steps} | H={self.horizon} | stride={self.stride} "
               f"| collection_dt={self.dt} | control_dt={self.control_dt} (eval sim dt must match this)")
         print(f"[ZarrCrazyflieImageDataset] Action min (should be small negatives): {a_mins}")
         print(f"[ZarrCrazyflieImageDataset] Action max (should be small positives): {a_maxs}")
+
+    @staticmethod
+    def _yaw_from_quat_xyzw(quat_xyzw):
+        """quat_xyzw: (..., 4) in (x,y,z,w) -- matches quadcopter_px4.py's stored state
+        layout. Returns yaw (...,) in radians."""
+        x, y, z, w = quat_xyzw[..., 0], quat_xyzw[..., 1], quat_xyzw[..., 2], quat_xyzw[..., 3]
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        return np.arctan2(siny_cosp, cosy_cosp)
+
+    @staticmethod
+    def _wrap_to_pi(angle):
+        return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+    def _actions_from_deltas(self, pos, quat_xyzw, gap):
+        """pos: (L,3) world xyz. quat_xyzw: (L,4) or None (only needed for 'xz_yaw').
+        gap: frame separation each action spans -- `self.stride` when `pos`/`quat_xyzw`
+        are dense per-episode arrays (normalizer fitting), or 1 when they're already
+        pre-strided (__getitem__). Returns (L-gap, action_dim), each row spanning
+        control_dt seconds of sim time.
+        """
+        if self.action_mode == "xyz":
+            return pos[gap:] - pos[:-gap]
+
+        # "xz_yaw": dx = body-frame forward distance (world xy delta projected onto
+        # the heading at the START of the step), dz = world altitude delta, dyaw =
+        # wrapped heading change. See feedback thread: only meaningful once the
+        # demonstration policy actually turns to steer; with a fixed heading (as in
+        # today's collectors) dyaw~=0 and dx reduces to plain world-frame x-delta.
+        yaw = self._yaw_from_quat_xyzw(quat_xyzw)          # (L,)
+        heading = yaw[:-gap]
+        delta_xy = pos[gap:, :2] - pos[:-gap, :2]           # (L-gap, 2)
+        dx = delta_xy[:, 0] * np.cos(heading) + delta_xy[:, 1] * np.sin(heading)
+        dz = pos[gap:, 2] - pos[:-gap, 2]
+        dyaw = self._wrap_to_pi(yaw[gap:] - yaw[:-gap])
+        return np.stack([dx, dz, dyaw], axis=-1)            # (L-gap, 3)
 
     def __len__(self):
         return len(self.indices)
@@ -228,11 +284,12 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         # --- target: action chunk starting at t_start ---
         # actions = g["actions"][t_start : t_start + H].astype(np.float32)  # (H, action_dim)
         # actions = self.action_normalizer.normalize(actions)              # -> [-1, 1]
-        
+
         # Need H+1 strided states (stride raw frames apart) to compute H velocity steps
         states = g["states"][t_start : t_start + H * self.stride + 1 : self.stride].astype(np.float32)  # (H+1, state_dim)
         pos = states[:, self.pos_slice]                                     # (H+1, 3)
-        actions = pos[1:] - pos[:-1]                                        # (H, 3), each spanning control_dt
+        quat = states[:, self.quat_slice] if self.action_mode == "xz_yaw" else None
+        actions = self._actions_from_deltas(pos, quat, 1)                   # (H, action_dim), each spanning control_dt
 
         actions = self.action_normalizer.normalize(actions.astype(np.float32))
         conditions = {"obs_rgb": rgb}

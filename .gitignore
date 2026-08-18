@@ -7,6 +7,7 @@ __pycache__/
 **/__pycache__/
 *.pyc
 isaac/dataset/avoiding_crazyflie/data/*
+isaac/dataset/avoiding_crazyflie/data_px4/*
 isaac/scripts/logs/*
 *.npz
 *.npy
@@ -36,3 +37,8 @@ scripts/eval.py
 scripts/attention_viz.py
 interview.md
 erdi_thesis
+exp2vla
+depth.md
+THESIS_FEEDBACK.md
+interview.md
+cmd.txt

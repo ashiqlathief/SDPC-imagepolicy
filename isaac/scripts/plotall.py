@@ -18,6 +18,13 @@ Each .npz file contains:
     selection      str
     success        bool
     fell           bool
+    depth_static_points   (N,2)  every static point --depth_obstacles ever detected
+                                  this episode (voxel-deduped, real positions)
+    depth_dynamic_points  (M,2)  same, for points classified dynamic
+    depth_static_pts_traj  (T,) object array of (n_t,2) -- per-step, capped
+                                 detections actually enforced by the projector
+    depth_dynamic_pts_traj (T,) object array of (m_t,2) -- per-step, dynamic
+                                 points' first predicted position each step
 
 Usage
 -----
@@ -197,6 +204,14 @@ def load_npz(path: str) -> dict:
     sphere_amplitude = float(d["sphere_amplitude"])                                   if "sphere_amplitude"  in d else 0.20
     sph_xyz_traj     = np.array(d["sph_xyz_traj"], dtype=np.float32)                 if "sph_xyz_traj"      in d else np.zeros((0, 0, 3), np.float32)
 
+    # --depth_obstacles data (see depth_obstacle_estimator.py / eval_crazieflie1.py) --
+    # absent entirely on npz files from runs without --depth_obstacles, or older files
+    # saved before this was added.
+    depth_static_points  = np.array(d["depth_static_points"],  dtype=np.float32) if "depth_static_points"  in d else np.zeros((0, 2), np.float32)
+    depth_dynamic_points = np.array(d["depth_dynamic_points"], dtype=np.float32) if "depth_dynamic_points" in d else np.zeros((0, 2), np.float32)
+    depth_static_pts_traj  = d["depth_static_pts_traj"]  if "depth_static_pts_traj"  in d else np.array([], dtype=object)
+    depth_dynamic_pts_traj = d["depth_dynamic_pts_traj"] if "depth_dynamic_pts_traj" in d else np.array([], dtype=object)
+
     cand_traj_xy = np.array(d["cand_traj_xy"], dtype=np.float32) if "cand_traj_xy" in d else np.zeros((0, 0, 0, 2), np.float32)
     snap_chosen  = np.array(d["snap_chosen"],  dtype=np.int64)   if "snap_chosen"  in d else np.zeros((0,), np.int64)
     cyl_xy_traj  = np.array(d["cyl_xy_traj"],  dtype=np.float32) if "cyl_xy_traj"  in d else np.zeros((0, 0, 2), np.float32)
@@ -233,6 +248,10 @@ def load_npz(path: str) -> dict:
         cand_traj_xy_proj=cand_traj_xy_proj,
         snap_chosen=snap_chosen,
         cyl_xy_traj=cyl_xy_traj,
+        depth_static_points=depth_static_points,
+        depth_dynamic_points=depth_dynamic_points,
+        depth_static_pts_traj=depth_static_pts_traj,
+        depth_dynamic_pts_traj=depth_dynamic_pts_traj,
     )
 
 
@@ -360,6 +379,23 @@ def plot_experiment(
                 alpha=0.25, zorder=2,
             ))
 
+    # ── --depth_obstacles: every point ever detected, unioned across the
+    # variants on this figure (each has its own accumulator, but they're all
+    # perceiving the same physical scene, so overlaying them is a reasonable
+    # "everything anyone saw" view) -- XY only, matches how it's collected. ──
+    has_depth_points = False
+    if plane == "xy":
+        static_all  = [rec["depth_static_points"]  for rec in records if len(rec.get("depth_static_points",  [])) > 0]
+        dynamic_all = [rec["depth_dynamic_points"] for rec in records if len(rec.get("depth_dynamic_points", [])) > 0]
+        if static_all:
+            has_depth_points = True
+            pts = np.concatenate(static_all, axis=0)
+            ax.scatter(pts[:, 0], pts[:, 1], s=5, color="tab:red", alpha=0.3, zorder=3)
+        if dynamic_all:
+            has_depth_points = True
+            pts = np.concatenate(dynamic_all, axis=0)
+            ax.scatter(pts[:, 0], pts[:, 1], s=5, color="tab:purple", alpha=0.3, zorder=3)
+
     # ── floating spheres ───────────────────────────────────────────────────────
     if ref.get("floating_spheres") and len(ref["sphere_positions"]) > 0:
         sr  = ref["sphere_radius"]
@@ -459,6 +495,13 @@ def plot_experiment(
                edgecolor="#e87020", linestyle=":", linewidth=0.8,
                label=f"Unsafe/exclusion zone (drone_radius={DRONE_RADIUS} m)"),
     ]
+    if has_depth_points:
+        legend_handles += [
+            Line2D([0], [0], marker="o", color="none", markerfacecolor="tab:red",
+                   alpha=0.6, markersize=6, label="Depth-detected static point"),
+            Line2D([0], [0], marker="o", color="none", markerfacecolor="tab:purple",
+                   alpha=0.6, markersize=6, label="Depth-detected dynamic point"),
+        ]
     if ref.get("dynamic_obstacles"):
         amp = ref.get("obs_amplitude", 0.35)
         legend_handles.append(
@@ -625,6 +668,10 @@ def plot_variant_steps(
     if has_cyl_traj:
         cyl_xy_traj = np.asarray(cyl_xy_traj)
 
+    depth_static_pts_traj  = rec.get("depth_static_pts_traj",  np.array([], dtype=object))
+    depth_dynamic_pts_traj = rec.get("depth_dynamic_pts_traj", np.array([], dtype=object))
+    has_depth_traj = len(depth_static_pts_traj) > 0 or len(depth_dynamic_pts_traj) > 0
+
     if plane == "xz":
         h_idx, v_idx = 0, 2
         h_label, v_label = "x  (m)", "z  (m)"
@@ -696,6 +743,23 @@ def plot_variant_steps(
                         color="darkorange", linewidth=1.6, alpha=0.9, zorder=6,
                     ))
 
+        # ── --depth_obstacles: what was actually detected/enforced THIS step
+        # (capped, unlike the full-episode accumulator) -- xy only. ──────────────
+        n_depth_static_this_step = 0
+        if plane == "xy" and has_depth_traj:
+            si = t - 1  # same snap-i <-> xyz[i+1] mapping as cand_traj_xy above
+            if 0 <= si < len(depth_static_pts_traj):
+                sp = np.asarray(depth_static_pts_traj[si])
+                if sp.size > 0:
+                    n_depth_static_this_step = len(sp)
+                    ax.scatter(sp[:, 0], sp[:, 1], s=14, color="tab:red",
+                               alpha=0.6, zorder=6)
+            if 0 <= si < len(depth_dynamic_pts_traj):
+                dp = np.asarray(depth_dynamic_pts_traj[si])
+                if dp.size > 0:
+                    ax.scatter(dp[:, 0], dp[:, 1], s=14, color="tab:purple",
+                               alpha=0.6, zorder=6)
+
         # ── predicted horizon: raw diffusion output vs. projected/safe ──────────
         # cand_traj_xy(_proj) is (H+1, 2) for old npz files, (H+1, 3) for new
         # ones that also captured z. The xy plane only ever needs columns 0/1
@@ -745,6 +809,8 @@ def plot_variant_steps(
         info_lines.append(f"Tighten margin: {rec.get('tighten', 0.0):.3g} m")
         info_lines.append(f"Projection mode: {rec.get('projection_mode', 'none')}")
         info_lines.append(f"Selection: {rec.get('selection', 'first')}")
+        if plane == "xy" and has_depth_traj:
+            info_lines.append(f"Depth-detected points this step: {n_depth_static_this_step}")
         if t == T - 1 and rec.get("success") is not None:
             info_lines.append(f"Outcome: {'success' if rec['success'] else ('fell' if rec['fell'] else 'fail')}")
         ax.text(0.02, 0.97, "\n".join(info_lines), transform=ax.transAxes,

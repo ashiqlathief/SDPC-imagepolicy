@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>One Denoising Step</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: "Segoe UI", Arial, sans-serif;
+  background: #f5f6f8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 36px 24px 48px;
+  color: #1a1a2e;
+}
+h1  { font-size: 16px; font-weight: 700; letter-spacing: 0.03em; margin-bottom: 4px; }
+.subtitle { font-size: 11px; color: #888; margin-bottom: 28px; }
+
+/* ── outer wrapper ── */
+.diagram {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  max-width: 720px;
+}
+
+/* ── generic arrow (vertical line + arrowhead) ── */
+.arr {
+  width: 2px; height: 22px;
+  background: #aab; position: relative;
+}
+.arr::after {
+  content: "";
+  position: absolute; bottom: -6px; left: 50%;
+  transform: translateX(-50%);
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 7px solid #aab;
+}
+/* centre, left-quarter, right-quarter */
+.arr-c  { margin: 0 auto; }
+.arr-lq { margin-left: calc(25% - 1px); }
+.arr-rq { margin-left: calc(75% - 1px); }
+
+/* ── input box ── */
+.inputs {
+  border-radius: 10px; padding: 14px 16px;
+  border: 1.5px solid #7986cb; background: #e8eaf6;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.inp-title {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; color: #3949ab;
+}
+.inp-items {
+  display: flex; gap: 0; width: 100%;
+  justify-content: space-evenly; align-items: center;
+}
+.inp-chip {
+  background: rgba(255,255,255,0.7); border-radius: 6px;
+  padding: 5px 14px; font-size: 12px; font-style: italic; color: #1a237e;
+  white-space: nowrap; text-align: center;
+}
+
+/* ── card ── */
+.card { border-radius: 10px; padding: 14px 16px; }
+.ctitle {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; margin-bottom: 10px;
+  display: flex; justify-content: space-between; align-items: center; gap: 6px;
+}
+.blue   { background: #e3f2fd; border: 2px solid #1976d2; }
+.blue   .ctitle { color: #1565c0; }
+.green  { background: #e8f5e9; border: 2px solid #388e3c; }
+.green  .ctitle { color: #2e7d32; }
+.orange { background: #fff3e0; border: 2px solid #ef6c00; }
+.orange .ctitle { color: #bf360c; }
+
+/* inference-only tag */
+.inf-tag {
+  font-size: 9px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em; background: #fce4ec; color: #c62828;
+  border: 1px solid #ef9a9a; border-radius: 4px; padding: 1px 7px;
+  white-space: nowrap; flex-shrink: 0;
+}
+
+/* ── noise visual in denoiser ── */
+.noise-wrap {
+  position: relative; width: 100%; height: 64px;
+  border-radius: 6px; overflow: hidden; margin-top: 8px;
+}
+.noise-layer {
+  position: absolute; inset: 0;
+  filter: url(#static-noise); background: #90b4d4; opacity: 0.55;
+}
+.noise-label {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+}
+.noise-chip {
+  background: rgba(255,255,255,0.82); border-radius: 5px;
+  padding: 4px 12px; font-size: 12px; font-style: italic;
+  color: #0d47a1; font-weight: 600; white-space: nowrap;
+}
+
+/* ── two-column rows ── */
+.row-grid {
+  display: grid;
+  grid-template-columns: 1fr 36px 1fr;
+  align-items: center;
+  gap: 0;
+}
+/* horizontal arrow cell */
+.h-arr {
+  text-align: center; font-size: 20px;
+  color: #9ea7b8; font-weight: 700;
+}
+
+/* ── snake connector: ③ (right) → ④ (left) ── */
+/* right col center ≈ 76%, left col center ≈ 24% of row width */
+.snake {
+  position: relative; height: 36px;
+}
+.sn-r {
+  position: absolute; left: calc(76% - 1px); top: 0;
+  width: 2px; height: 18px; background: #aab;
+}
+.sn-h {
+  position: absolute; top: 18px;
+  left: 24%; right: 24%; height: 2px; background: #aab;
+}
+.sn-l {
+  position: absolute; left: calc(24% - 1px); top: 18px;
+  width: 2px; height: 18px; background: #aab;
+}
+.sn-l::after {
+  content: ''; position: absolute; bottom: -6px; left: 50%;
+  transform: translateX(-50%);
+  border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-top: 7px solid #aab;
+}
+
+/* ── equation chip ── */
+.eq {
+  display: inline-block; background: rgba(255,255,255,0.6);
+  border-radius: 6px; padding: 5px 12px;
+  font-size: 12px; font-style: italic; color: #1b5e20;
+}
+
+/* ── SLSQP badge + steps ── */
+.badge {
+  display: inline-block; font-size: 9px; font-weight: 600;
+  border-radius: 4px; padding: 2px 7px; margin-bottom: 8px;
+  background: #ffe0b2; color: #e65100;
+}
+.p0-note {
+  font-size: 10px; color: #8d4e00; margin-bottom: 8px;
+  font-style: italic;
+}
+.proj-steps { display: flex; align-items: center; gap: 3px; }
+.pstep {
+  flex: 1; background: rgba(255,255,255,0.55); border-radius: 5px;
+  padding: 5px 3px; text-align: center;
+}
+.pstep .n { font-size: 12px; font-weight: 700; color: #bf360c; display: block; }
+.pstep .s { font-size: 8.5px; font-weight: 700; text-transform: uppercase;
+             letter-spacing: 0.03em; color: #e65100; display: block; }
+.pstep.hot { background: rgba(230,74,25,0.12); }
+.parr { font-size: 13px; color: #ef6c00; font-weight: 700; flex: 0; }
+
+/* ── output ── */
+.output {
+  background: #1a237e; color: white;
+  border-radius: 10px; padding: 14px; text-align: center;
+  font-size: 15px; font-weight: 700;
+}
+.output .sub { font-size: 10.5px; font-weight: 400; margin-top: 4px; opacity: 0.8; }
+
+/* ── legend ── */
+.legend {
+  display: flex; gap: 16px; flex-wrap: wrap;
+  justify-content: center; margin-top: 26px; font-size: 11px; color: #555;
+}
+.li { display: flex; align-items: center; gap: 5px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; border: 1.5px solid #999; }
+</style>
+</head>
+<body>
+
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <filter id="static-noise" x="0%" y="0%" width="100%" height="100%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.72" numOctaves="4" stitchTiles="stitch" result="noise"/>
+    <feColorMatrix type="saturate" values="0" in="noise"/>
+  </filter>
+</svg>
+
+<h1>One Denoising Step &nbsp;·&nbsp; x<sub>t</sub> → x<sub>t−1</sub></h1>
+<p class="subtitle">p_sample( x<sub>t</sub>, cond, t ) &nbsp;—&nbsp; repeated T times at inference</p>
+
+<div class="diagram">
+
+  <!-- INPUTS -->
+  <div class="inputs">
+    <div class="inp-title">Inputs</div>
+    <div class="inp-items">
+      <div class="inp-chip">Camera frames &nbsp;o<sub>t</sub></div>
+      <div class="inp-chip">Noisy trajectory &nbsp;x<sub>t</sub></div>
+      <div class="inp-chip">Timestep &nbsp;t</div>
+    </div>
+  </div>
+
+  <!-- ↓ to left block (②) -->
+  <div class="arr arr-c"></div>
+
+  <!-- ① DENOISER — full width -->
+  <div class="card blue">
+    <div class="ctitle">① Denoiser &nbsp;(Transformer)</div>
+    <div class="noise-wrap">
+      <div class="noise-layer"></div>
+      <div class="noise-label">
+        <div class="noise-chip">x<sub>t</sub> &nbsp;(noisy)</div>
+        <div style="font-size:18px; color:#1565c0; font-weight:700; text-shadow:0 0 4px #fff;">→</div>
+        <div class="noise-chip">ε̂ &nbsp;(predicted noise)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ↓ to left block (②) -->
+  <div class="arr arr-lq"></div>
+
+  <!-- Row 1: ② → ③ -->
+  <div class="row-grid">
+    <div class="card green">
+      <div class="ctitle">② Predict x̂<sub>0</sub> <span class="inf-tag">inference only</span></div>
+      <div class="eq">x̂<sub>0</sub> = x<sub>t</sub>/√ᾱ<sub>t</sub> − √(1−ᾱ<sub>t</sub>)/√ᾱ<sub>t</sub> · ε̂</div>
+    </div>
+    <div class="h-arr">→</div>
+    <div class="card orange">
+      <div class="ctitle">③ SLSQP Projection <span class="inf-tag">inference only</span></div>
+      <div class="p0-note">uses current drone position p<sub>0</sub></div>
+      <span class="badge">if inloop_slsqp &amp;&amp; t ≤ T·τ</span>
+      <div class="proj-steps">
+        <div class="pstep"><span class="n">1</span><span class="s">Unnorm</span></div>
+        <div class="parr">→</div>
+        <div class="pstep"><span class="n">2</span><span class="s">Integrate</span></div>
+        <div class="parr">→</div>
+        <div class="pstep hot"><span class="n">3</span><span class="s">SLSQP</span></div>
+        <div class="parr">→</div>
+        <div class="pstep"><span class="n">4</span><span class="s">Renorm</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- snake connector: ③ (right) → ④ (left) -->
+  <div class="snake">
+    <div class="sn-r"></div>
+    <div class="sn-h"></div>
+    <div class="sn-l"></div>
+  </div>
+
+  <!-- Row 2: ④ → ⑤ -->
+  <div class="row-grid">
+    <div class="card green">
+      <div class="ctitle">④ Posterior Mean &nbsp; μ<sub>t−1</sub> <span class="inf-tag">inference only</span></div>
+      <div class="eq">μ<sub>t−1</sub> = c<sub>1</sub>(t)·x̂<sub>0</sub> + c<sub>2</sub>(t)·x<sub>t</sub></div>
+    </div>
+    <div class="h-arr">→</div>
+    <div class="card green">
+      <div class="ctitle">⑤ Sample &nbsp; x<sub>t−1</sub> <span class="inf-tag">inference only</span></div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <div class="eq">x<sub>t−1</sub> = μ<sub>t−1</sub> + σ<sub>t</sub>·ε &nbsp;(t &gt; 0)</div>
+        <div class="eq">x<sub>t−1</sub> = μ<sub>t−1</sub> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(t = 0)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ↓ from right block (⑤) -->
+  <div class="arr arr-rq"></div>
+
+  <!-- OUTPUT -->
+  <div class="output">
+    x<sub>t−1</sub> ∈ ℝ<sup>H×3</sup>
+    <div class="sub">one step less noisy &nbsp;·&nbsp; repeat T times → x<sub>0</sub></div>
+  </div>
+
+</div>
+
+<!-- LEGEND -->
+<div class="legend">
+  <div class="li"><div class="sw" style="background:#e3f2fd;border-color:#1976d2;"></div>Denoiser</div>
+  <div class="li"><div class="sw" style="background:#e8f5e9;border-color:#388e3c;"></div>Diffusion math</div>
+  <div class="li"><div class="sw" style="background:#fff3e0;border-color:#ef6c00;"></div>SLSQP projection (conditional)</div>
+  <div class="li"><div class="sw" style="background:#fce4ec;border-color:#ef9a9a;"></div>Inference only</div>
+</div>
+
+</body>
+</html>

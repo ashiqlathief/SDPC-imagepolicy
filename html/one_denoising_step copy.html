@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>One Denoising Step — DiMPC</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: #f7f8fa;
+    padding: 32px;
+    color: #1a1a2e;
+  }
+  h1 {
+    font-size: 17px;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 6px;
+    letter-spacing: 0.02em;
+    color: #1a1a2e;
+  }
+  .subtitle {
+    font-size: 12px;
+    text-align: center;
+    color: #666;
+    margin-bottom: 28px;
+  }
+
+  /* ── layout: three columns ── */
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    max-width: 860px;
+    margin: 0 auto;
+  }
+
+  /* ── generic block ── */
+  .block {
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 12.5px;
+    line-height: 1.55;
+    position: relative;
+  }
+  .block-title {
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .math { font-style: italic; }
+
+  /* ── arrow ── */
+  .arrow {
+    width: 2px;
+    background: #888;
+    height: 18px;
+    margin: 0 auto;
+    position: relative;
+  }
+  .arrow::after {
+    content: "";
+    position: absolute;
+    bottom: -6px;
+    left: 50%;
+    transform: translateX(-50%);
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 7px solid #888;
+  }
+  .arrow-label {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10.5px;
+    color: #555;
+    white-space: nowrap;
+  }
+
+  /* ── INPUTS ── */
+  .inputs-row {
+    display: flex;
+    gap: 10px;
+    width: 100%;
+    margin-bottom: 0;
+  }
+  .input-box {
+    flex: 1;
+    background: #e8eaf6;
+    border: 1.5px solid #7986cb;
+    border-radius: 8px;
+    padding: 9px 12px;
+    font-size: 12px;
+    text-align: center;
+  }
+  .input-box .label {
+    font-weight: 700;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #3949ab;
+    margin-bottom: 3px;
+  }
+  .input-box .desc {
+    font-size: 11.5px;
+    color: #283593;
+    font-style: italic;
+  }
+
+  /* ── DENOISER section ── */
+  .section-denoiser {
+    background: #e3f2fd;
+    border: 2px solid #1976d2;
+    border-radius: 10px;
+    padding: 14px 18px;
+    width: 100%;
+  }
+  .section-denoiser .section-title {
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #1565c0;
+    margin-bottom: 10px;
+  }
+  .denoiser-inner {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+  }
+  .denoiser-col {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .denoiser-col.wide { flex: 2; }
+  .denoiser-col.narrow { flex: 1; }
+  .sub-block {
+    background: #bbdefb;
+    border: 1px solid #64b5f6;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+  .sub-block .sub-title {
+    font-weight: 700;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #1565c0;
+    margin-bottom: 2px;
+  }
+  .sub-block.repeat {
+    border-style: dashed;
+    background: #e1f5fe;
+  }
+  .connector-right {
+    align-self: center;
+    font-size: 18px;
+    color: #1976d2;
+    font-weight: 700;
+    padding: 0 4px;
+  }
+  .connector-down {
+    text-align: center;
+    font-size: 14px;
+    color: #1976d2;
+    margin: 2px 0;
+  }
+
+  /* ── MATH STEP ── */
+  .section-math {
+    background: #e8f5e9;
+    border: 2px solid #388e3c;
+    border-radius: 10px;
+    padding: 12px 18px;
+    width: 100%;
+  }
+  .section-math .section-title {
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #2e7d32;
+    margin-bottom: 6px;
+  }
+  .eq {
+    font-size: 13px;
+    font-style: italic;
+    color: #1b5e20;
+    background: #c8e6c9;
+    border-radius: 5px;
+    padding: 5px 10px;
+    display: inline-block;
+  }
+
+  /* ── PROJECTION section (conditional) ── */
+  .section-proj {
+    background: #fff3e0;
+    border: 2px solid #ef6c00;
+    border-radius: 10px;
+    padding: 12px 18px;
+    width: 100%;
+  }
+  .section-proj .section-title {
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #bf360c;
+    margin-bottom: 8px;
+  }
+  .proj-condition {
+    font-size: 11px;
+    color: #e65100;
+    background: #ffe0b2;
+    border-radius: 4px;
+    padding: 3px 8px;
+    display: inline-block;
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .proj-steps {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .proj-step {
+    flex: 1;
+    background: #ffe0b2;
+    border: 1px solid #ff9800;
+    border-radius: 6px;
+    padding: 7px 9px;
+    font-size: 11.5px;
+    text-align: center;
+  }
+  .proj-step .num {
+    font-weight: 700;
+    font-size: 13px;
+    color: #bf360c;
+    display: block;
+    margin-bottom: 2px;
+  }
+  .proj-step .name {
+    font-weight: 700;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #e65100;
+    display: block;
+    margin-bottom: 3px;
+  }
+  .proj-arrow {
+    font-size: 18px;
+    color: #ef6c00;
+    font-weight: 700;
+    flex: 0;
+  }
+
+  /* ── GRADIENT section (conditional) ── */
+  .section-grad {
+    background: #f3e5f5;
+    border: 2px solid #7b1fa2;
+    border-radius: 10px;
+    padding: 12px 18px;
+    width: 100%;
+  }
+  .section-grad .section-title {
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #4a148c;
+    margin-bottom: 6px;
+  }
+  .grad-condition {
+    font-size: 11px;
+    color: #6a1b9a;
+    background: #e1bee7;
+    border-radius: 4px;
+    padding: 3px 8px;
+    display: inline-block;
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+
+  /* ── POSTERIOR + SAMPLE ── */
+  .section-posterior {
+    background: #e8f5e9;
+    border: 2px solid #388e3c;
+    border-radius: 10px;
+    padding: 12px 18px;
+    width: 100%;
+  }
+  .section-posterior .section-title {
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #2e7d32;
+    margin-bottom: 6px;
+  }
+
+  /* ── OUTPUT ── */
+  .output-box {
+    background: #1a237e;
+    color: white;
+    border-radius: 10px;
+    padding: 12px 24px;
+    font-size: 14px;
+    font-weight: 700;
+    text-align: center;
+    width: 100%;
+  }
+  .output-box .sub {
+    font-size: 11px;
+    font-weight: 400;
+    margin-top: 3px;
+    opacity: 0.85;
+  }
+
+  /* ── LEGEND ── */
+  .legend {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 22px;
+    font-size: 11.5px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .legend-swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1.5px solid #555;
+  }
+
+  /* ── wide arrow between sections ── */
+  .wide-arrow {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 26px;
+    position: relative;
+  }
+  .wide-arrow svg {
+    width: 40px;
+    height: 26px;
+  }
+</style>
+</head>
+<body>
+
+<h1>One Denoising Step — <span style="font-style:italic">p</span>_sample( x<sub>t</sub>, t )</h1>
+<p class="subtitle">Implements x<sub>t</sub> → x<sub>t−1</sub> · Based on <code>diffusion.py</code>, <code>transformer_denoiserDIT.py</code>, <code>projection.py</code></p>
+
+<div class="diagram">
+
+  <!-- ═══════════════════ INPUTS ═══════════════════ -->
+  <div class="inputs-row">
+    <div class="input-box">
+      <div class="label">Camera History</div>
+      <div class="desc">o<sub>t−T<sub>o</sub>+1 : t</sub><br>
+      <span style="font-size:10.5px;color:#3949ab">(T<sub>o</sub> RGB frames, 96×96×3)</span></div>
+    </div>
+    <div class="input-box">
+      <div class="label">Noisy Trajectory</div>
+      <div class="desc">x<sub>t</sub> ∈ ℝ<sup>H×3</sup><br>
+      <span style="font-size:10.5px;color:#3949ab">(K candidates, normalized deltas)</span></div>
+    </div>
+    <div class="input-box">
+      <div class="label">Diffusion Timestep</div>
+      <div class="desc">t ∈ {T−1, …, 0}<br>
+      <span style="font-size:10.5px;color:#3949ab">(current noise level)</span></div>
+    </div>
+    <div class="input-box" style="border-color:#ef6c00; background:#fff3e0;">
+      <div class="label" style="color:#bf360c;">Drone Position</div>
+      <div class="desc" style="color:#e65100;">p<sub>0</sub> ∈ ℝ<sup>3</sup><br>
+      <span style="font-size:10.5px">(only used for in-loop projection)</span></div>
+    </div>
+  </div>
+
+  <!-- arrow -->
+  <div class="wide-arrow">
+    <svg viewBox="0 0 40 26"><line x1="20" y1="0" x2="20" y2="18" stroke="#888" stroke-width="2"/><polygon points="12,18 28,18 20,26" fill="#888"/></svg>
+  </div>
+
+  <!-- ═══════════════════ DENOISER ═══════════════════ -->
+  <div class="section-denoiser">
+    <div class="section-title">① Denoiser Forward Pass — ε̂ = ε<sub>θ</sub>(x<sub>t</sub>, t, z)</div>
+    <div class="denoiser-inner">
+
+      <!-- left col: image path -->
+      <div class="denoiser-col narrow">
+        <div class="sub-block">
+          <div class="sub-title">ViT Encoder</div>
+          Patch embed (P×P) → pos embed<br>
+          + class token → 6 × pre-norm block<br>
+          (LayerNorm → MHSA → res → FFN → res)<br>
+          → class token → mean-pool (T<sub>o</sub>) → proj<br>
+          <span style="font-weight:700; color:#1565c0;">→ z ∈ ℝ<sup>d<sub>cond</sub></sup></span>
+        </div>
+        <div class="sub-block" style="margin-top:2px;">
+          <div class="sub-title">Time Embedding</div>
+          sinusoidal(t) → MLP → e<sub>t</sub> ∈ ℝ<sup>d<sub>model</sub></sup>
+        </div>
+        <div class="sub-block" style="background:#90caf9; border-color:#1976d2;">
+          <div class="sub-title">Global Cond. Vector</div>
+          <span style="font-weight:700;">c = e<sub>t</sub> + W<sub>c</sub> z</span><br>
+          shared across all blocks
+        </div>
+      </div>
+
+      <div class="connector-right">→</div>
+
+      <!-- right col: denoiser blocks -->
+      <div class="denoiser-col wide">
+        <div class="sub-block">
+          <div class="sub-title">Action Tokenization</div>
+          x<sub>t</sub><sup>(h)</sup> ∈ ℝ<sup>3</sup> → Linear → ℝ<sup>d<sub>model</sub></sup> + pos embed p<sub>h</sub><br>
+          → u<sub>1</sub>, …, u<sub>H</sub>
+        </div>
+        <div class="sub-block repeat">
+          <div class="sub-title">× 6  DiT Block  (depth=6, d_model=512, 8 heads)</div>
+          <div style="display:flex; gap:6px; margin-top:4px;">
+            <div style="flex:1; background:#b3e5fc; border-radius:4px; padding:5px 7px; font-size:11.5px;">
+              <b>AdaLN-Zero</b> from <i>c</i><br>
+              shift<sub>1</sub>, scale<sub>1</sub>, gate<sub>1</sub> =<br>MLP(c).chunk(9)[0:3]<br>
+              (zero-init weights)
+            </div>
+            <div style="display:flex; flex-direction:column; gap:4px; flex:2;">
+              <div style="background:#e1f5fe; border-radius:4px; padding:5px 7px; font-size:11.5px;">
+                <b>1. Self-Attention</b>  Q=K=V=u<sub>1:H</sub><br>
+                x ← x + gate<sub>1</sub> · MHSA( modulate(norm1(x), shift, scale) )
+              </div>
+              <div style="background:#e1f5fe; border-radius:4px; padding:5px 7px; font-size:11.5px;">
+                <b>2. Cross-Attention</b>  Q=u<sub>1:H</sub>, K=V=z<br>
+                x ← x + gate<sub>2</sub> · CrossAttn( modulate(norm2(x)), context=z )
+              </div>
+              <div style="background:#e1f5fe; border-radius:4px; padding:5px 7px; font-size:11.5px;">
+                <b>3. FFN</b>  (Linear→GELU→Linear)<br>
+                x ← x + gate<sub>3</sub> · FFN( modulate(norm3(x), shift, scale) )
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="sub-block" style="background:#90caf9; border-color:#1976d2;">
+          <div class="sub-title">Output Projection</div>
+          AdaLN-Zero(norm_out, c) → Linear → <span style="font-weight:700;">ε̂ ∈ ℝ<sup>H×3</sup></span>  (predicted noise, zero-init)
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow -->
+  <div class="wide-arrow">
+    <svg viewBox="0 0 40 26"><line x1="20" y1="0" x2="20" y2="18" stroke="#888" stroke-width="2"/><polygon points="12,18 28,18 20,26" fill="#888"/></svg>
+  </div>
+
+  <!-- ═══════════════════ PREDICT x̂₀ ═══════════════════ -->
+  <div class="section-math">
+    <div class="section-title">② Predict Clean Trajectory  x̂<sub>0</sub></div>
+    <div style="display:flex; align-items:center; gap:18px; flex-wrap:wrap;">
+      <div class="eq">
+        x̂<sub>0</sub> = (1/√ᾱ<sub>t</sub>) · x<sub>t</sub> − (√(1−ᾱ<sub>t</sub>)/√ᾱ<sub>t</sub>) · ε̂
+      </div>
+      <div style="font-size:11.5px; color:#2e7d32;">
+        <code>predict_start_from_noise(x_t, t, ε̂)</code><br>
+        Recovers an estimate of the clean trajectory<br>
+        from the noisy sample and the denoiser's output.
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow -->
+  <div class="wide-arrow">
+    <svg viewBox="0 0 40 26"><line x1="20" y1="0" x2="20" y2="18" stroke="#888" stroke-width="2"/><polygon points="12,18 28,18 20,26" fill="#888"/></svg>
+  </div>
+
+  <!-- ═══════════════════ IN-LOOP SLSQP PROJECTION ═══════════════════ -->
+  <div class="section-proj">
+    <div class="section-title">③ In-Loop SLSQP Projection  (DiMPC)</div>
+    <div class="proj-condition">
+      ONLY IF: inloop_slsqp=True &nbsp;AND&nbsp; t ≤ T · threshold &nbsp;AND&nbsp; p<sub>0</sub> is set
+    </div>
+    <div class="proj-steps">
+      <div class="proj-step">
+        <span class="num">1</span>
+        <span class="name">Unnormalize</span>
+        x̂<sub>0</sub> (norm. deltas)<br>→ Δp<sub>1:H</sub><br>(physical m)
+      </div>
+      <div class="proj-arrow">→</div>
+      <div class="proj-step">
+        <span class="num">2</span>
+        <span class="name">Integrate</span>
+        p<sub>i</sub> = p<sub>0</sub> + Σ<sub>j≤i</sub> Δp<sub>j</sub><br>→ world-frame<br>waypoints p<sub>0:H</sub>
+      </div>
+      <div class="proj-arrow">→</div>
+      <div class="proj-step" style="background:#ffccbc; border-color:#e64a19;">
+        <span class="num">3</span>
+        <span class="name">SLSQP Solve</span>
+        min ½‖p − p̂‖²<br>s.t. workspace bounds<br>+ obstacle constraints<br>→ p*<sub>0:H</sub>
+      </div>
+      <div class="proj-arrow">→</div>
+      <div class="proj-step">
+        <span class="num">4</span>
+        <span class="name">Renormalize</span>
+        Δp*<sub>i</sub> = p*<sub>i</sub> − p*<sub>i−1</sub><br>→ normalize<br>clip(·,−1,1)<br>→ x̂*<sub>0</sub>
+      </div>
+    </div>
+    <div style="margin-top:8px; font-size:11px; color:#bf360c;">
+      Cost matrix: Q = I (identity) &nbsp;|&nbsp; Obstacle constraints: s<sup>T</sup>Ps + q<sup>T</sup>s ≤ v (sphere-outside) &nbsp;|&nbsp; Workspace: linear bounds C·z ≤ d
+    </div>
+  </div>
+
+  <!-- arrow -->
+  <div class="wide-arrow">
+    <svg viewBox="0 0 40 26"><line x1="20" y1="0" x2="20" y2="18" stroke="#888" stroke-width="2"/><polygon points="12,18 28,18 20,26" fill="#888"/></svg>
+  </div>
+
+  <!-- ═══════════════════ POSTERIOR MEAN ═══════════════════ -->
+  <div class="section-posterior">
+    <div class="section-title">④ Posterior Mean  μ<sub>t−1</sub></div>
+    <div style="display:flex; align-items:center; gap:18px; flex-wrap:wrap;">
+      <div class="eq">
+        μ<sub>t−1</sub> = c<sub>1</sub>(t) · x̂*<sub>0</sub> &nbsp;+&nbsp; c<sub>2</sub>(t) · x<sub>t</sub>
+      </div>
+      <div style="font-size:11.5px; color:#2e7d32;">
+        c<sub>1</sub> = β<sub>t</sub>√ᾱ<sub>t−1</sub> / (1−ᾱ<sub>t</sub>) &nbsp;&nbsp;
+        c<sub>2</sub> = (1−ᾱ<sub>t−1</sub>)√α<sub>t</sub> / (1−ᾱ<sub>t</sub>)<br>
+        <code>q_posterior(x_start=x̂*₀, x_t, t)</code>
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow -->
+  <div class="wide-arrow">
+    <svg viewBox="0 0 40 26"><line x1="20" y1="0" x2="20" y2="18" stroke="#888" stroke-width="2"/><polygon points="12,18 28,18 20,26" fill="#888"/></svg>
+  </div>
+
+  <!-- ═══════════════════ GRADIENT (optional) ═══════════════════ -->
+  <div class="section-grad">
+    <div class="section-title">⑤ Gradient Projection Nudge  (optional)</div>
+    <div class="grad-condition">
+      ONLY IF: gradient=True &nbsp;AND&nbsp; t ≤ T · threshold
+    </div>
+    <div style="display:flex; align-items:center; gap:18px; flex-wrap:wrap; margin-top:6px;">
+      <div class="eq" style="background:#ce93d8; color:#1a1a2e;">
+        μ<sub>t−1</sub> &nbsp;+=&nbsp; ∇<sub>x̂₀</sub> L<sub>violation</sub>
+      </div>
+      <div style="font-size:11.5px; color:#4a148c;">
+        Analytic gradient of constraint violations<br>
+        (equality + inequality + obstacle) added<br>
+        to posterior mean — no full SLSQP solve.<br>
+        <code>compute_gradient(x̂₀, constraints)</code>
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow -->
+  <div class="wide-arrow">
+    <svg viewBox="0 0 40 26"><line x1="20" y1="0" x2="20" y2="18" stroke="#888" stroke-width="2"/><polygon points="12,18 28,18 20,26" fill="#888"/></svg>
+  </div>
+
+  <!-- ═══════════════════ SAMPLE ═══════════════════ -->
+  <div class="section-math">
+    <div class="section-title">⑥ Sample  x<sub>t−1</sub></div>
+    <div style="display:flex; align-items:center; gap:24px; flex-wrap:wrap;">
+      <div>
+        <div class="eq">x<sub>t−1</sub> = μ<sub>t−1</sub> + σ<sub>t</sub> · ε &nbsp;&nbsp; (t &gt; 0)</div>
+        <div class="eq" style="margin-top:6px; background:#a5d6a7;">x<sub>t−1</sub> = μ<sub>t−1</sub> &nbsp;&nbsp; (t = 0, no noise)</div>
+      </div>
+      <div style="font-size:11.5px; color:#2e7d32;">
+        σ<sub>t</sub> = exp(½ · log_var<sub>t</sub>)<br>
+        ε ~ 𝒩(0, I),  scaled by 0.5 in code<br>
+        nonzero_mask zeros out noise at t=0
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow -->
+  <div class="wide-arrow">
+    <svg viewBox="0 0 40 26"><line x1="20" y1="0" x2="20" y2="18" stroke="#888" stroke-width="2"/><polygon points="12,18 28,18 20,26" fill="#888"/></svg>
+  </div>
+
+  <!-- ═══════════════════ OUTPUT ═══════════════════ -->
+  <div class="output-box">
+    x<sub>t−1</sub> ∈ ℝ<sup>H×3</sup>  — one step less noisy
+    <div class="sub">Feed back into p_sample_loop → repeat for t = T−1 … 0 → final x<sub>0</sub></div>
+  </div>
+
+</div><!-- end .diagram -->
+
+<!-- ═══════════════════ LEGEND ═══════════════════ -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-swatch" style="background:#e3f2fd; border-color:#1976d2;"></div> Denoiser (ViT + DiT)</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#e8f5e9; border-color:#388e3c;"></div> Diffusion math (DDPM)</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#fff3e0; border-color:#ef6c00;"></div> In-loop SLSQP projection (DiMPC) — conditional</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#f3e5f5; border-color:#7b1fa2;"></div> Gradient nudge — conditional, alternative to SLSQP</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#e8eaf6; border-color:#7986cb;"></div> Inputs</div>
+</div>
+
+<p style="text-align:center; font-size:10.5px; color:#888; margin-top:18px;">
+  Source: <code>diffuser/models/diffusion.py</code> · <code>diffuser/models/transformer_denoiserDIT.py</code> · <code>diffuser/sampling/projection.py</code>
+</p>
+
+</body>
+</html>

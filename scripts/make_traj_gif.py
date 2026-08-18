@@ -11,6 +11,7 @@ Usage:
 import argparse
 import glob
 import importlib
+import math
 import os
 import sys
 import types
@@ -21,7 +22,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.patches import Circle, Rectangle, FancyArrowPatch
+from matplotlib.patches import Circle, Rectangle, FancyArrowPatch, Wedge
 from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
@@ -34,6 +35,16 @@ sys.modules.setdefault("diffuser",       types.ModuleType("diffuser"))
 sys.modules.setdefault("diffuser.utils", _du)
 _cfg = importlib.import_module("config.avoiding-crazyflie")
 CONFIG_HALFSPACES = list(getattr(_cfg, "CORRIDOR_HALFSPACES", []))
+
+# FPV depth camera's horizontal half-FOV, from the same intrinsics
+# depth_obstacle_estimator.py uses (fx = focal*width/aperture, cx = width/2,
+# half_fov = atan(cx/fx)) -- copied as constants here rather than imported so
+# this script keeps working standalone without a sklearn dependency.
+from depth_obstacle_estimator import camera_intrinsics, FPV_WIDTH, FPV_HEIGHT, \
+    FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE
+_fx, _fy, _cx, _cy = camera_intrinsics(FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH,
+                                        FPV_HORIZONTAL_APERTURE)
+DEPTH_HALF_FOV_DEG = math.degrees(math.atan(_cx / _fx))
 
 
 def _draw_halfspaces_xy(ax, halfspaces, xlim, ylim, alpha=0.12):
@@ -230,6 +241,8 @@ def make_gif(
     figsize: tuple = (9, 4),
     dpi: int = 100,
     plane: str = "xy",     # "xy" (top-down), "xz" (side/altitude), "xyz" (3D)
+    depth_fov: Optional[bool] = None,   # None = auto (follow the saved run's --depth_obstacles)
+    depth_range: Optional[float] = None,   # None = use the saved run's --depth_obstacle_max_range
 ) -> str:
     if out_path is None:
         out_path = npz_path.replace(".npz", f"_anim_{plane}.gif")
@@ -246,6 +259,12 @@ def make_gif(
     dynamic     = bool(data.get("dynamic_obstacles", False))
     cyl_xy_traj = data.get("cyl_xy_traj", None)   # (T_snap, M, 2)
     dyn_indices = data.get("dynamic_cyl_indices", np.array([], dtype=int))
+
+    # --depth_obstacles: every point detected over the whole episode (see
+    # depth_static_accum/depth_dynamic_accum in eval_crazieflie1.py) -- a
+    # fixed background scatter, not per-frame, same as that script's own plot.
+    depth_static_points  = np.asarray(data.get("depth_static_points",  np.zeros((0, 2))))
+    depth_dynamic_points = np.asarray(data.get("depth_dynamic_points", np.zeros((0, 2))))
 
     # floating sphere data
     has_spheres   = bool(data.get("floating_spheres", False))
@@ -283,6 +302,23 @@ def make_gif(
         halfspaces = []
 
     T = len(xyz)
+
+    # ── depth-camera FOV wedge + detected-point scatter: only ever shown for
+    # episodes actually run with --depth_obstacles. Prefer the explicit
+    # `depth_obstacles` flag (added alongside this feature); .npz files saved
+    # before that fall back to "did it record any detected points at all",
+    # since depth_static_points/depth_dynamic_points are always exactly empty
+    # when --depth_obstacles was off, on every version of eval_crazieflie1.py.
+    ran_with_depth = (bool(data.get("depth_obstacles", False))
+                       or depth_static_points.size > 0
+                       or depth_dynamic_points.size > 0)
+    show_fov = plane == "xy" and ran_with_depth and depth_fov is not False
+    if depth_fov and not ran_with_depth:
+        print(f"[WARN] --depth_fov requested but {npz_path} was not run with "
+              f"--depth_obstacles -- skipping the scan overlay.")
+    if show_fov:
+        fov_range = (depth_range if depth_range is not None
+                     else float(data.get("depth_obstacle_max_range", 2.0)))
 
     has_cyl_traj = (
         dynamic
@@ -425,6 +461,17 @@ def make_gif(
         gen_cand_lines, gen_chosen_lines = [], []
         cand_lines = []
 
+    # ── --depth_obstacles: every point detected this episode ─────────────────
+    if plane == "xy" and ran_with_depth:
+        if depth_static_points.size > 0:
+            ax.scatter(depth_static_points[:, 0], depth_static_points[:, 1],
+                       s=6, color="tab:red", alpha=0.35, zorder=3,
+                       label="depth-detected static point")
+        if depth_dynamic_points.size > 0:
+            ax.scatter(depth_dynamic_points[:, 0], depth_dynamic_points[:, 1],
+                       s=6, color="tab:purple", alpha=0.35, zorder=3,
+                       label="depth-detected dynamic point")
+
     # ── static sphere footprints ──────────────────────────────────────────────
     for k, spos in enumerate(sph_pos_rest):
         sx, sy, sz = float(spos[0]), float(spos[1]), float(spos[2])
@@ -457,11 +504,28 @@ def make_gif(
     # ── drone artists ─────────────────────────────────────────────────────────
     h0 = xyz[:, h_idx]
     v0 = xyz[:, v_idx]
+
+    # depth-camera FOV wedge (see `show_fov`/`fov_range` above). Drone yaw is
+    # commanded to 0 for the whole flight (yaw_des = 0 in crazyflie_env.py's
+    # attitude controller), so the FPV camera always points along world +x --
+    # the wedge only needs to translate with the drone, not rotate.
+    if show_fov:
+        fov_wedge = Wedge(
+            (h0[0], v0[0]), fov_range,
+            -DEPTH_HALF_FOV_DEG, DEPTH_HALF_FOV_DEG,
+            facecolor="#4a9de0", edgecolor="#1f6fbf",
+            linewidth=0.8, alpha=0.15, zorder=2.5,
+            label=f"depth cam scan ({fov_range:.1f} m)",
+        )
+        ax.add_patch(fov_wedge)
+
     trail_line, = ax.plot([], [], linewidth=2.0, color="steelblue", alpha=0.7, zorder=6)
     drone_dot,  = ax.plot([], [], "o", markersize=8, color="steelblue", zorder=7)
     ax.plot(h0[0], v0[0], "o", markersize=7, color="green", zorder=8)
     step_text = ax.text(0.02, 0.95, "", transform=ax.transAxes,
                         fontsize=8, verticalalignment="top")
+    if show_fov or (plane == "xy" and ran_with_depth):
+        ax.legend(loc="upper right", fontsize=7, framealpha=0.8)
 
     fig.tight_layout()
 
@@ -477,7 +541,8 @@ def make_gif(
         return min(t, sph_xyz_traj.shape[0] - 1)
 
     all_patches = ([p for _, p in dyn_cyl_patches] + [p for _, p in sph_patches]
-                   + [a for _, a in dyn_cyl_arrows] + cand_lines)
+                   + [a for _, a in dyn_cyl_arrows] + cand_lines
+                   + ([fov_wedge] if show_fov else []))
 
     def init():
         trail_line.set_data([], [])
@@ -489,6 +554,9 @@ def make_gif(
         trail_line.set_data(h0[:t + 1], v0[:t + 1])
         drone_dot.set_data([h0[t]], [v0[t]])
         step_text.set_text(f"step {t}/{T - 1}")
+
+        if show_fov:
+            fov_wedge.set_center((h0[t], v0[t]))
 
         # move dynamic cylinders
         ci = _cyl_snap_idx(t)
@@ -569,6 +637,15 @@ def main():
                         choices=["xy", "xz", "xyz"],
                         help="View: 'xy' top-down (default), 'xz' side/altitude, "
                              "'xyz' full 3D")
+    parser.add_argument("--no_depth_fov", action="store_true", default=False,
+                        help="Suppress the depth-camera scan wedge even for "
+                             "trajectories recorded with --depth_obstacles "
+                             "(by default it's shown automatically for those, "
+                             "and never shown for ground-truth runs).")
+    parser.add_argument("--depth_range", type=float, default=None,
+                        help="Override the depth camera scan range (metres) used "
+                             "for the wedge. Default: read --depth_obstacle_max_range "
+                             "from the trajectory file itself.")
     args = parser.parse_args()
 
     resolved = []
@@ -587,7 +664,9 @@ def main():
 
     for npz_path in resolved:
         make_gif(npz_path, fps=args.fps, out_path=args.out,
-                 figsize=tuple(args.figsize), dpi=args.dpi, plane=args.plane)
+                 figsize=tuple(args.figsize), dpi=args.dpi, plane=args.plane,
+                 depth_fov=(False if args.no_depth_fov else None),
+                 depth_range=args.depth_range)
 
 
 if __name__ == "__main__":

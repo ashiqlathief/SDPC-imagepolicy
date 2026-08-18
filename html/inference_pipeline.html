@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Inference Pipeline</title>
+  <style>
+    @page { size: 500mm 350mm; margin: 8mm; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #f0f0f0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+
+    h2 {
+      font-size: 16px;
+      color: #333;
+      margin-bottom: 24px;
+      letter-spacing: 0.05em;
+    }
+
+    /* ─── Overall grid layout ─── */
+    .diagram {
+      display: grid;
+      grid-template-columns: 250px 40px 270px 40px 290px;
+      grid-template-rows: auto 20px auto;
+      row-gap: 18px;
+      align-items: start;
+    }
+
+    /* ─── Shared block base ─── */
+    .block {
+      border-radius: 14px;
+      padding: 16px 15px;
+    }
+
+    .block-num {
+      font-style: italic;
+      opacity: 0.65;
+      margin-right: 5px;
+    }
+
+    /* ─── Block 1: INPUTS ─── */
+    .block-inputs {
+      grid-column: 1; grid-row: 1;
+      background: #eae7f5;
+      border: 2px solid #9b8ec4;
+    }
+
+    .block-inputs .title {
+      font-size: 13px; font-weight: 800;
+      color: #4a3d8f; letter-spacing: 0.08em;
+      margin-bottom: 13px;
+    }
+
+    .input-card {
+      display: flex; align-items: center;
+      justify-content: space-between;
+      background: white; border-radius: 9px;
+      padding: 9px 13px; margin-bottom: 9px;
+      font-style: italic; font-size: 13.5px; color: #333;
+    }
+    .input-card:last-child { margin-bottom: 0; }
+
+    .noise-box {
+      width: 44px; height: 44px;
+      background: repeating-linear-gradient(
+        45deg, #9ab 0px, #cde 4px, #8ab 8px, #bcd 12px, #9bc 16px);
+      border-radius: 4px; flex-shrink: 0;
+    }
+
+    /* ─── Block 2: DENOISING LOOP ─── */
+    .block-denoising {
+      grid-column: 3; grid-row: 1;
+      background: white;
+      border: 2.5px dashed #4a86c8;
+    }
+
+    .block-denoising .title {
+      font-size: 13px; font-weight: 800;
+      color: #2255aa; letter-spacing: 0.08em;
+      margin-bottom: 13px;
+    }
+
+    .d-step {
+      background: #5b9bd5; color: white;
+      border-radius: 8px; padding: 9px 12px;
+      text-align: center; font-size: 13.5px;
+      margin-bottom: 3px;
+    }
+    .d-step.orange { background: #f4b07a; color: #6b3000; }
+
+    .d-arrow {
+      text-align: center; color: #666;
+      font-size: 15px; line-height: 1.1; margin: 1px 0;
+    }
+
+    .traj-vis {
+      display: flex; align-items: center;
+      justify-content: center; gap: 10px; margin-top: 11px;
+    }
+
+    .noise-thumb {
+      width: 58px; height: 58px;
+      background: repeating-linear-gradient(
+        45deg, #9ab 0px, #cde 4px, #8ab 8px, #bcd 12px);
+      border-radius: 4px; position: relative;
+    }
+
+    /* ─── Block 3: POST-HOC SLSQP ─── */
+    .block-posthoc {
+      grid-column: 5; grid-row: 1 / 4;
+      background: #fef3e2;
+      border: 2.5px solid #e07b00;
+      display: flex; flex-direction: column; gap: 11px;
+    }
+
+    .block-posthoc .ph-header {
+      display: flex; align-items: center; gap: 8px;
+    }
+    .block-posthoc .title {
+      font-size: 13px; font-weight: 800;
+      color: #c06000; letter-spacing: 0.08em;
+    }
+    .optional-badge {
+      background: #e07b00; color: white;
+      font-size: 9.5px; font-weight: 700;
+      padding: 2px 7px; border-radius: 4px;
+      letter-spacing: 0.06em;
+    }
+
+    /* SDPC inputs — fills the empty space */
+    .sdpc-box {
+      background: #fff8ee;
+      border: 1.5px dashed #c06000;
+      border-radius: 10px;
+      padding: 11px 12px;
+    }
+    .sdpc-box .sdpc-title {
+      font-size: 10.5px; font-weight: 700;
+      color: #a05000; letter-spacing: 0.07em;
+      text-transform: uppercase; margin-bottom: 9px;
+    }
+    .sdpc-params {
+      display: flex; gap: 8px; justify-content: center;
+    }
+    .sp {
+      background: white;
+      border: 1.5px solid #e07b00;
+      border-radius: 8px;
+      padding: 6px 10px; text-align: center; flex: 1;
+    }
+    .sp .pname {
+      font-size: 13px; font-style: italic;
+      color: #c06000; font-weight: 700; line-height: 1.4;
+    }
+    .sp .pdesc {
+      font-size: 9.5px; color: #999; margin-top: 2px;
+    }
+    .sdpc-footer {
+      text-align: center; font-size: 10.5px;
+      color: #a05000; margin-top: 7px; font-style: italic;
+    }
+
+    .slsqp-formula {
+      background: #fff8ee; border-radius: 10px;
+      padding: 10px 12px; text-align: center;
+      font-size: 15.5px; color: #c06000;
+      font-style: italic; font-weight: 600;
+    }
+
+    .proj-label {
+      color: #2a7a2a; font-size: 12.5px;
+      font-style: italic; font-weight: 600;
+      text-align: center; margin: 2px 0;
+    }
+
+    /* ─── OUTPUT ─── */
+    .block-output {
+      grid-column: 1; grid-row: 3;
+      background: #1a1a4a;
+      border-radius: 14px; padding: 16px 15px;
+      display: flex; align-items: center; gap: 12px;
+    }
+    .block-output .title {
+      font-size: 13px; font-weight: 800;
+      color: white; letter-spacing: 0.08em; margin-bottom: 5px;
+    }
+    .block-output p { font-size: 13px; color: #bbb; line-height: 1.6; }
+
+    /* ─── Block 4: EXECUTE ─── */
+    .block-execute {
+      grid-column: 3; grid-row: 3;
+      background: #1a6e6e;
+      border-radius: 14px; padding: 16px 15px;
+    }
+    .block-execute .title {
+      font-size: 13px; font-weight: 800;
+      color: white; letter-spacing: 0.08em; margin-bottom: 9px;
+    }
+    .block-execute p { font-size: 13px; color: #c0eeee; line-height: 1.8; }
+
+    /* ─── Arrows ─── */
+    .arr {
+      display: flex; align-items: center;
+      justify-content: center;
+      font-size: 26px; color: #444;
+    }
+    .arr.flip { transform: scaleX(-1); }
+
+    /* arrow 1→2 */
+    .arr-12 { grid-column: 2; grid-row: 1; }
+    /* arrow 2→3 */
+    .arr-23 { grid-column: 4; grid-row: 1; }
+    /* arrow 3→4 (bottom, pointing left from col5 to col3) */
+    .arr-34 { grid-column: 4; grid-row: 3; }
+    /* arrow 4→out */
+    .arr-4o { grid-column: 2; grid-row: 3; }
+
+    @media print {
+      body { background: #ffffff; }
+    }
+  </style>
+</head>
+<body>
+
+<h2>Inference Pipeline</h2>
+
+<div class="diagram">
+
+  <!-- ══ Block 1: INPUTS ══ -->
+  <div class="block block-inputs">
+    <div class="title"><span class="block-num">1</span>INPUTS</div>
+
+    <div class="input-card" style="flex-direction:column; align-items:flex-start; gap:7px;">
+      <span>Camera frames</span>
+      <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
+        <span style="font-size:28px;">🚁</span>
+        <span style="font-size:16px; color:#666;">→</span>
+        <span style="font-size:10.5px; font-style:normal; font-weight:700;
+                     color:#4a3d8f; background:#eae7f5; border:1.5px solid #9b8ec4;
+                     border-radius:6px; padding:4px 8px; white-space:nowrap;">Image Encoder</span>
+        <span style="font-size:16px; color:#666;">→</span>
+        <span style="font-size:14px;"><i>z</i></span>
+      </div>
+    </div>
+
+    <div class="input-card">
+      <span>Timestep</span>
+      <span style="font-size:14px;"><i>t</i></span>
+    </div>
+
+    <div class="input-card" style="flex-direction:column; align-items:flex-start; gap:7px;">
+      <span>Noisy trajectory</span>
+      <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
+        <span style="font-size:12.5px;"><i>x</i><sub>T</sub> ∼ 𝒩(0, <i>I</i>)</span>
+        <div class="noise-box"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow 1→2 -->
+  <div class="arr arr-12">→</div>
+
+  <!-- ══ Block 2: DENOISING LOOP ══ -->
+  <div class="block block-denoising">
+    <div class="title"><span class="block-num" style="color:#5577cc;">2</span>DENOISING LOOP</div>
+
+    <div class="d-step">Denoiser(<i>z</i>, <i>t</i>) → ε</div>
+    <div class="d-arrow">↓</div>
+    <div class="d-step">Predict <i>x̂</i><sub>0</sub></div>
+    <div class="d-arrow">↓</div>
+    <div class="d-step orange">In-loop SLSQP (optional)</div>
+    <div class="d-arrow">↓</div>
+    <div class="d-step">Posterior μ<sub>t−1</sub></div>
+    <div class="d-arrow">↓</div>
+    <div class="d-step">Sample <i>x</i><sub>t−1</sub></div>
+
+    <div class="traj-vis">
+      <div class="noise-thumb"></div>
+      <span style="font-size:20px; color:#666;">→</span>
+      <svg width="68" height="58" viewBox="0 0 68 58" xmlns="http://www.w3.org/2000/svg">
+        <path d="M4 50 C22 50, 30 8, 64 8" stroke="#5b9bd5"
+              stroke-width="2.5" fill="none" stroke-linecap="round"/>
+      </svg>
+    </div>
+  </div>
+
+  <!-- arrow 2→3 -->
+  <div class="arr arr-23">→</div>
+
+  <!-- ══ Block 3: POST-HOC SLSQP (spans both rows) ══ -->
+  <div class="block block-posthoc">
+    <div class="ph-header">
+      <span class="title"><span class="block-num">3</span>POST-HOC SLSQP</span>
+      <span class="optional-badge">OPTIONAL</span>
+    </div>
+
+    <!-- ▼ DPCC safety variants filling the previously empty space ▼ -->
+    <div class="sdpc-box">
+      <div class="sdpc-title">Safety Variants</div>
+      <div class="sdpc-params">
+        <div class="sp">
+          <div class="pname">DPCC-r</div>
+          <div class="pdesc">K=1<br>repair / project</div>
+        </div>
+        <div class="sp">
+          <div class="pname">DPCC-c</div>
+          <div class="pdesc">K=8<br>min. proj. cost</div>
+        </div>
+        <div class="sp">
+          <div class="pname">DPCC-t</div>
+          <div class="pdesc">K=8<br>temporal consist.</div>
+        </div>
+      </div>
+      <div class="sdpc-footer">↓ post-hoc SLSQP projection + candidate select</div>
+    </div>
+
+    <!-- Constraints -->
+    <div class="sdpc-box" style="border-color:#7a5500;">
+      <div class="sdpc-title" style="color:#7a5500;">Constraints</div>
+      <div style="display:flex; gap:8px;">
+        <div style="flex:1; background:white; border:1.5px solid #c07000;
+                    border-radius:8px; padding:7px 9px;">
+          <div style="font-size:10.5px; font-weight:700; color:#8b4500;
+                      margin-bottom:4px;">Obstacle</div>
+          <div style="font-size:10px; color:#555; line-height:1.6;">
+            ‖p − c<sub>obs</sub>‖ ≥ r<sub>obs</sub> + r<sub>drone</sub><br>
+            Cylinders · Boxes<br>
+            (+ tighten margin)
+          </div>
+        </div>
+        <div style="flex:1; background:white; border:1.5px solid #c07000;
+                    border-radius:8px; padding:7px 9px;">
+          <div style="font-size:10.5px; font-weight:700; color:#8b4500;
+                      margin-bottom:4px;">Halfspace</div>
+          <div style="font-size:10px; color:#555; line-height:1.6;">
+            <b>n</b>·<b>p</b> ≤ d<br>
+            Corridor walls<br>
+            Floor / Ceiling
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLSQP formula -->
+    <div class="slsqp-formula">
+      <i>x</i><sub>0</sub> → SLSQP → <i>x*</i><sub>0</sub>
+    </div>
+
+    <!-- trajectory visualisation -->
+    <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:6px;">
+      <!-- pink dashed candidate trajectories -->
+      <svg width="100%" viewBox="0 0 270 72" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="ag" markerWidth="7" markerHeight="5"
+                  refX="3.5" refY="2.5" orient="auto">
+            <polygon points="0 0, 7 2.5, 0 5" fill="#2a8a2a"/>
+          </marker>
+        </defs>
+        <path d="M8 58 C70 18, 140 8, 262 22"
+              stroke="#e080b0" stroke-width="1.8" fill="none"
+              stroke-dasharray="6,4" opacity="0.75"/>
+        <path d="M8 58 C70 30, 145 52, 262 38"
+              stroke="#e080b0" stroke-width="1.8" fill="none"
+              stroke-dasharray="6,4" opacity="0.65"/>
+        <path d="M8 58 C70 42, 145 38, 262 30"
+              stroke="#e080b0" stroke-width="1.8" fill="none"
+              stroke-dasharray="6,4" opacity="0.45"/>
+        <!-- green down-arrow -->
+        <line x1="135" y1="62" x2="135" y2="70"
+              stroke="#2a8a2a" stroke-width="2"
+              marker-end="url(#ag)"/>
+      </svg>
+
+      <div class="proj-label">projected + select</div>
+
+      <!-- selected green trajectory -->
+      <svg width="100%" viewBox="0 0 270 36" xmlns="http://www.w3.org/2000/svg">
+        <path d="M8 26 C70 26, 145 14, 258 18"
+              stroke="#ccdd66" stroke-width="2" fill="none"
+              stroke-linecap="round" opacity="0.7"/>
+        <path d="M8 22 C70 22, 145 10, 258 14"
+              stroke="#3aaa3a" stroke-width="3.5" fill="none"
+              stroke-linecap="round"/>
+        <circle cx="258" cy="14" r="8"
+                fill="#2a7a2a" stroke="white" stroke-width="2"/>
+      </svg>
+    </div>
+  </div>
+
+  <!-- ══ Bottom row arrows ══ -->
+  <!-- arrow 3→4 (←) -->
+  <div class="arr arr-34 flip">→</div>
+
+  <!-- ══ Block 4: EXECUTE ══ -->
+  <div class="block block-execute">
+    <div class="title"><span class="block-num" style="color:#aee;">4</span>EXECUTE</div>
+    <p>Apply first action<br>Shift Window<br>Discard <i>H</i>−1 remaining actions.</p>
+  </div>
+
+  <!-- arrow 4→output (←) -->
+  <div class="arr arr-4o flip">→</div>
+
+  <!-- ══ OUTPUT ══ -->
+  <div class="block-output">
+    <div>
+      <div class="title">OUTPUT</div>
+      <p>Drone moves.<br>New observation captured</p>
+    </div>
+    <span style="font-size:30px; flex-shrink:0;">🚁</span>
+  </div>
+
+</div>
+
+</body>
+</html>

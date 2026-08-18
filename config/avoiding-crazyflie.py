@@ -35,10 +35,6 @@ CYLINDERS = [
     # (3.5, -0.4),
     # (3, -0.7),
 ]
-
-# Floating sphere obstacles — (x, y, z) rest positions, all in metres.
-# Spread along the corridor at varied heights so the drone must navigate
-# in all three dimensions to avoid them.
 SPHERE_RADIUS = 0.10   # physical radius (m); Minkowski exclusion = SPHERE_RADIUS + drone_radius
 SPHERES = [
     # # x     y      z     spread along corridor, varied height & lateral position
@@ -92,6 +88,7 @@ args_to_watch = [
     ('horizon', 'H'),
     ('n_diffusion_steps', 'K'),
     ('model', 'D'),
+    ('action_mode', 'A'),
     ('encoder_type', 'E'),
     ('image_cond_dim', 'L'),
     ('stride', 'DT'),
@@ -151,6 +148,8 @@ base = {
         'include_returns': False,
         'returns_scale': 400,   # Determined using rewards from the dataset
         'discount': 0.99,
+        'action_mode': 'xz_yaw',  #xz_yaw xyz
+        
 
         ## serialization
         'logbase': logbase,

@@ -1,3 +1,8 @@
+import argparse
+import matplotlib
+matplotlib.rcParams['pdf.fonttype'] = 42   # embed TrueType (Type 42) instead of Type 3
+                                            # -- Type 3 glyphs have no ToUnicode mapping,
+                                            # which breaks PDF/A conversion (e.g. in Adobe).
 import zarr, numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Circle
@@ -7,6 +12,11 @@ from isaac.dataset.sim_path import sim_framework_path
 
 plt.style.use('seaborn-v0_8-whitegrid')
 plt.rcParams['font.size'] = 12
+
+parser = argparse.ArgumentParser(description="Visualize crazyflie zarr dataset trajectories")
+parser.add_argument("--max-episodes", type=int, default=50,
+                     help="Maximum number of episodes to overlay in each plot (default: 50)")
+args = parser.parse_args()
 
 # ── corridor / scene constants (kept in sync with plotall.py) ─────────────
 CORRIDOR_END  = 4.1      # x position of the end wall / gate
@@ -92,7 +102,7 @@ def add_obstacles(ax, boxes, cylinders, tighten=0.0,
 
 
 # ── load zarr dataset ─────────────────────────────────────────────────────
-path = sim_framework_path("isaac", "dataset", "avoiding_crazyflie", "data", "zarr", "env_000.zarr")
+path = sim_framework_path("isaac", "dataset", "avoiding_crazyflie", "data1", "zarr", "env_000.zarr")
 g = zarr.open_group(path, mode="r")
 
 print("arrays:", list(g.array_keys()))
@@ -124,6 +134,11 @@ keep = np.ones(len(starts), dtype=bool)
 keep[EXCLUDED_EPISODES] = False
 starts, ends, lengths = starts[keep], ends[keep], lengths[keep]
 print(f"[INFO] excluded episodes {EXCLUDED_EPISODES} -> {len(starts)} episodes remain")
+
+# ── cap the number of episodes overlaid in each plot (CLI: --max-episodes) ─
+if args.max_episodes is not None and args.max_episodes < len(starts):
+    starts, ends, lengths = starts[:args.max_episodes], ends[:args.max_episodes], lengths[:args.max_episodes]
+    print(f"[INFO] limiting plots to first {args.max_episodes} episodes")
 
 
 
@@ -181,8 +196,8 @@ ax_xz_solo.set_ylim(*Z_LIM_XZ)
 ax_xz_solo.grid(True, alpha=0.25)
 fig_xz.tight_layout()
 z_path = "plots/datasetxz.pdf"
-fig_xz.savefig(z_path, dpi=300, bbox_inches="tight")
-fig_xz.savefig("plots/datasetxz.png", dpi=300, bbox_inches="tight")
+fig_xz.savefig(z_path, dpi=150, bbox_inches="tight")
+fig_xz.savefig("plots/datasetxz.png", dpi=150, bbox_inches="tight")
 plt.show()
 
 fig, ax_xy = plt.subplots(figsize=(7, 5))
@@ -214,8 +229,8 @@ ax_xy.set_aspect("equal", adjustable="box")
 ax_xy.legend(fontsize=8, loc="upper left")
 ax_xy.grid(True, alpha=0.25)
 fig.tight_layout()
-fig.savefig("plots/dataset.pdf", dpi=300, bbox_inches="tight")
-fig.savefig("plots/dataset.png", dpi=300, bbox_inches="tight")
+fig.savefig("plots/dataset.pdf", dpi=150, bbox_inches="tight")
+fig.savefig("plots/dataset.png", dpi=150, bbox_inches="tight")
 plt.show()
 
 
@@ -269,8 +284,8 @@ if BOXES or CYLINDERS:
 # it. Reserve the margin manually via subplots_adjust and save the full,
 # un-cropped canvas instead.
 fig3d.subplots_adjust(left=0.02, right=0.88, top=0.98, bottom=0.05)
-fig3d.savefig("plots/dataset3d.pdf", dpi=300)
-fig3d.savefig("plots/dataset3d.png", dpi=300)
+fig3d.savefig("plots/dataset3d.pdf", dpi=150)
+fig3d.savefig("plots/dataset3d.png", dpi=150)
 plt.show()
 
 # ── per-axis action (delta-position) profile, all episodes overlaid ──────
@@ -297,8 +312,8 @@ for ax, label in zip(axes_vel, axis_labels):
 axes_vel[-1].set_xlabel("Timestep", fontsize=14, fontweight="bold")
 # fig_vel.suptitle("Per-step action across all episodes")
 fig_vel.tight_layout()
-fig_vel.savefig("plots/dataset_velocity.pdf", dpi=300, bbox_inches="tight")
-fig_vel.savefig("plots/dataset_velocity.png", dpi=300, bbox_inches="tight")
+fig_vel.savefig("plots/dataset_velocity.pdf", dpi=150, bbox_inches="tight")
+fig_vel.savefig("plots/dataset_velocity.png", dpi=150, bbox_inches="tight")
 plt.show()
 
 # ── altitude (z) over time, all episodes overlaid ─────────────────────────
@@ -324,6 +339,6 @@ ax_z.grid(True, alpha=0.25)
 # ax_z.legend(fontsize=8, loc="upper left")
 # ax_z.set_title("Altitude over time across all episodes")
 fig_z.tight_layout()
-fig_z.savefig("plots/dataset_z_time.pdf", dpi=300, bbox_inches="tight")
-fig_z.savefig("plots/dataset_z_time.png", dpi=300, bbox_inches="tight")
+fig_z.savefig("plots/dataset_z_time.pdf", dpi=150, bbox_inches="tight")
+fig_z.savefig("plots/dataset_z_time.png", dpi=150, bbox_inches="tight")
 plt.show()

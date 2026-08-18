@@ -219,17 +219,17 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    goal = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/Goal",
-        spawn=sim_utils.CuboidCfg(
-            visual_material=GREEN_MAT,
-            size=(WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, 0.1),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(4.0, 0.0, 0.05),
-        ),
-    )
+    # goal = AssetBaseCfg(
+    #     prim_path="/World/envs/env_.*/Goal",
+    #     spawn=sim_utils.CuboidCfg(
+    #         visual_material=GREEN_MAT,
+    #         size=(WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, 0.1),
+    #         collision_props=sim_utils.CollisionPropertiesCfg(),
+    #     ),
+    #     init_state=AssetBaseCfg.InitialStateCfg(
+    #         pos=(4.0, 0.0, 0.05),
+    #     ),
+    # )
 
     ceiling_light = AssetBaseCfg(
         prim_path="/World/CeilingLight",

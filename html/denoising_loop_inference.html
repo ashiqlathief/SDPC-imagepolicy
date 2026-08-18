@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Denoising Loop — Inference</title>
+  <style>
+    @page { size: 420mm 400mm; margin: 8mm; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #f0f0f0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+
+    h2 {
+      font-size: 16px;
+      color: #333;
+      margin-bottom: 6px;
+      letter-spacing: 0.05em;
+      text-align: center;
+    }
+
+    .subtitle {
+      font-size: 12.5px;
+      color: #777;
+      margin-bottom: 30px;
+      text-align: center;
+      max-width: 700px;
+      line-height: 1.5;
+    }
+
+    .col-header {
+      font-size: 13px; font-weight: 800; letter-spacing: 0.07em;
+      padding: 9px 22px; border-radius: 20px; margin-bottom: 22px;
+      text-align: center; text-transform: uppercase;
+      background: #dce6f5; color: #1c3d66; border: 2px solid #4a86c8;
+    }
+    .col-header .sub { display: block; font-size: 9.5px; font-weight: 600;
+      letter-spacing: 0.03em; text-transform: none; opacity: 0.8; margin-top: 2px; }
+
+    /* ─── Inference grid: 3 cols x 2 rows (+ side branch) ─── */
+    .grid-inference {
+      display: grid;
+      grid-template-columns: 300px 40px 300px 40px 300px;
+      grid-template-rows: auto auto auto auto;
+      row-gap: 4px;
+      align-items: start;
+    }
+
+    /* ─── Card base ─── */
+    .step, .inputs-card, .branch-box {
+      background: white;
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+    .step { border: 2px solid #4a86c8; }
+
+    .step-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .step-num {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 22px; height: 22px; border-radius: 50%;
+      background: #5b9bd5; color: white; font-size: 12.5px; font-weight: 800;
+      margin-right: 8px; flex-shrink: 0;
+    }
+
+    .step-title {
+      font-size: 13px; font-weight: 800; color: #2255aa;
+      letter-spacing: 0.03em; display: flex; align-items: center;
+    }
+
+    .badge {
+      font-size: 8.5px; font-weight: 700; letter-spacing: 0.05em;
+      padding: 3px 7px; border-radius: 5px; text-transform: uppercase;
+      flex-shrink: 0;
+    }
+    .badge.train { background: #d9ead3; color: #38761d; }
+    .badge.infer { background: #e7e7f5; color: #4a3d8f; }
+    .badge.opt { background: #fde9cc; color: #a05000; }
+
+    /* ─── inline optional branch, nested inside Step 2 ─── */
+    .branch-inline {
+      margin-top: 10px;
+      background: #fef3e2; border: 2px dashed #e07b00;
+      border-radius: 10px; padding: 9px 11px;
+    }
+    .branch-inline .step-head { margin-bottom: 6px; }
+    .branch-inline .step-title { color: #c06000; font-size: 12px; }
+    .branch-inline .step-num { background: #e07b00; width: 19px; height: 19px; font-size: 11px; }
+    .branch-inline .eqn { background: #fff8ee; color: #8b4500; margin-top: 0; }
+    .branch-inline .note { color: #a05000; }
+
+    /* ─── Inputs card (image encoder) ─── */
+    .inputs-card {
+      background: #eae7f5; border: 2px solid #9b8ec4;
+    }
+    .inputs-card .title {
+      font-size: 11.5px; font-weight: 800; color: #4a3d8f;
+      letter-spacing: 0.06em; margin-bottom: 9px;
+    }
+    .input-row {
+      display: flex; align-items: center; gap: 6px;
+      background: white; border-radius: 8px; padding: 7px 9px;
+      font-size: 11px; color: #333; margin-bottom: 6px;
+      white-space: nowrap;
+    }
+    .input-row:last-child { margin-bottom: 0; }
+    .input-row .enc-badge {
+      font-size: 9.5px; font-weight: 700; color: #4a3d8f;
+      background: #eae7f5; border: 1.3px solid #9b8ec4;
+      border-radius: 6px; padding: 3px 6px; white-space: nowrap;
+    }
+    .input-row .arrow { color: #888; font-size: 12.5px; }
+
+    .eqn {
+      background: #f4f8fd; border-radius: 8px;
+      padding: 9px 11px; margin-top: 6px;
+      font-size: 13px; font-style: italic; color: #1a3a66;
+      text-align: center;
+    }
+
+    .note {
+      font-size: 10.5px; color: #777; margin-top: 7px; line-height: 1.45;
+      font-style: normal;
+    }
+
+    /* fraction helper */
+    .frac {
+      display: inline-flex; flex-direction: column; align-items: center;
+      vertical-align: middle; margin: 0 4px; font-size: 0.82em; line-height: 1.25;
+    }
+    .frac .num { padding: 0 3px; border-bottom: 1.3px solid #1a3a66; }
+    .frac .den { padding: 0 3px; }
+
+    .bar { text-decoration: overline; }
+
+    /* ─── arrows ─── */
+    .arr-h {
+      display: flex; align-items: center; justify-content: center;
+      color: #666; font-size: 22px;
+      align-self: start; height: 132px;
+    }
+    .arr-v {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      color: #666; font-size: 18px; height: 22px;
+    }
+    .arr-v .opt-label {
+      font-size: 8.5px; font-style: italic; font-weight: 600;
+      line-height: 1; margin-top: -2px;
+    }
+
+    /* loop-back caption */
+    .loopback {
+      margin-top: 18px; display: flex; align-items: center; gap: 10px;
+      font-size: 11.5px; color: #555; font-style: italic; text-align: left;
+      max-width: 940px;
+    }
+    .loopback .pill {
+      background: #1a1a4a; color: white; font-style: normal;
+      font-weight: 700; font-size: 10.5px; letter-spacing: 0.04em;
+      padding: 5px 10px; border-radius: 6px; flex-shrink: 0;
+    }
+
+    @media print {
+      body { background: #ffffff; }
+    }
+  </style>
+</head>
+<body>
+
+<h2>Denoising Loop — Inference</h2>
+<div class="subtitle">
+  Inference runs all four reverse-step operations in a loop, then repeats
+  for <i>t</i> = <i>T</i>, …, 1 until <i>x</i><sub>0</sub> is reached,
+  followed by a separate one-time post-hoc SLSQP pass. See
+  <em>denoising_loop_training.html</em> for what runs during training.
+</div>
+
+<div class="col-header">
+  Inference
+  <span class="sub">repeated for t = T, …, 1</span>
+</div>
+
+<div class="grid-inference">
+
+  <!-- Inputs -->
+  <div class="inputs-card" style="grid-column: 1; grid-row: 1;">
+    <div class="title">INPUTS TO THE DENOISER</div>
+    <div class="input-row">
+      <span>Camera frames</span>
+      <span style="font-size:15px;">🚁</span>
+      <span class="arrow">→</span>
+      <span class="enc-badge">Image Encoder</span>
+      <span class="arrow">→</span>
+      <span style="font-style:italic;">z</span>
+    </div>
+    <div class="input-row">
+      <span style="font-style:italic;">z</span>
+      <span class="arrow">+</span>
+      <span>timestep emb. (<i>t</i>)</span>
+      <span class="arrow">→</span>
+      <span style="font-style:italic;">c</span>
+    </div>
+  </div>
+
+  <div class="arr-v" style="grid-column: 1; grid-row: 2;">↓</div>
+
+  <!-- Row 1: Step 1 → Step 2 → Step 3 -->
+  <div class="step" style="grid-column: 1; grid-row: 3;">
+    <div class="step-head">
+      <div class="step-title"><span class="step-num">1</span>Noise Prediction</div>
+      <span class="badge train">train + infer</span>
+    </div>
+    <div class="eqn">ε̂ = ε<sub>θ</sub>(<i>x</i><sub>t</sub>, <i>t</i>, <i>c</i>)</div>
+    <div class="note">
+      Same denoiser call as during training, now applied inside the
+      repeated sampling loop.
+    </div>
+  </div>
+
+  <div class="arr-h" style="grid-column: 2; grid-row: 3;">→</div>
+
+  <div class="step" style="grid-column: 3; grid-row: 3;">
+    <div class="step-head">
+      <div class="step-title"><span class="step-num">2</span>Clean-Sample Estimate</div>
+      <span class="badge infer">infer only</span>
+    </div>
+    <div class="eqn">
+      <i>x̂</i><sub>0</sub> =
+      <span class="frac">
+        <span class="num"><i>x</i><sub>t</sub> − √(1−<span class="bar">α</span><sub>t</sub>) ε̂</span>
+        <span class="den">√<span class="bar">α</span><sub>t</sub></span>
+      </span>
+    </div>
+    <div class="note">
+      One-step estimate of the fully denoised trajectory, obtained by
+      inverting the closed-form forward process.
+    </div>
+
+    <!-- inline optional branch: in-loop SLSQP -->
+    <div class="branch-inline">
+      <div class="step-head">
+        <div class="step-title"><span class="step-num">✳</span>In-Loop SLSQP</div>
+        <span class="badge opt">t ≤ 0.5T</span>
+      </div>
+      <div class="eqn"><i>x̂</i><sub>0</sub> → SLSQP → <i>x̂</i><sub>0</sub><sup>*</sup></div>
+      <div class="note">
+        Only past a configurable noise threshold. Unnormalizes, integrates
+        with the drone's position, projects, and renormalizes, replacing
+        <i>x̂</i><sub>0</sub> in Step&nbsp;3's <i>μ</i><sub>t−1</sub>.
+      </div>
+    </div>
+  </div>
+
+  <div class="arr-h" style="grid-column: 4; grid-row: 3;">→</div>
+
+  <div class="step" style="grid-column: 5; grid-row: 3;">
+    <div class="step-head">
+      <div class="step-title"><span class="step-num">3</span>Posterior Mean</div>
+      <span class="badge infer">infer only</span>
+    </div>
+    <div class="eqn">
+      <i>μ</i><sub>t−1</sub> =
+      <span class="frac">
+        <span class="num">√<span class="bar">α</span><sub>t−1</sub> β<sub>t</sub></span>
+        <span class="den">1−<span class="bar">α</span><sub>t</sub></span>
+      </span>
+      <i>x̂</i><sub>0</sub>
+      +
+      <span class="frac">
+        <span class="num">√α<sub>t</sub>(1−<span class="bar">α</span><sub>t−1</sub>)</span>
+        <span class="den">1−<span class="bar">α</span><sub>t</sub></span>
+      </span>
+      <i>x</i><sub>t</sub>
+    </div>
+    <div class="note">
+      Combines the noisy sample <i>x</i><sub>t</sub> and the (possibly
+      projected) clean estimate <i>x̂</i><sub>0</sub> into the DDPM
+      posterior mean.
+    </div>
+  </div>
+
+  <!-- vertical connector row1 -> row2 -->
+  <div class="arr-v" style="grid-column: 5; grid-row: 4;">↓</div>
+
+  <!-- Row 2: Step 4, under Step 3 -->
+  <div class="step" style="grid-column: 5; grid-row: 5;">
+    <div class="step-head">
+      <div class="step-title"><span class="step-num">4</span>Sample</div>
+      <span class="badge infer">infer only</span>
+    </div>
+    <div class="eqn">
+      <i>x</i><sub>t−1</sub> = <i>μ</i><sub>t−1</sub> + σ<sub>t</sub><i>z′</i>,
+      &nbsp; <i>z′</i> = 0.5<i>z</i>, <i>z</i> ∼ 𝒩(0, <i>I</i>)
+    </div>
+    <div class="note">
+      σ<sub>t</sub><sup>2</sup> =
+      <span class="frac">
+        <span class="num">(1−<span class="bar">α</span><sub>t−1</sub>) β<sub>t</sub></span>
+        <span class="den">1−<span class="bar">α</span><sub>t</sub></span>
+      </span>
+      — at <i>t</i>=1 the noise term is dropped (σ₁=0) for a
+      deterministic final sample.
+    </div>
+  </div>
+
+  <div class="arr-v" style="grid-column: 5; grid-row: 6;">↓</div>
+
+  <div class="step" style="grid-column: 5; grid-row: 7; border-color:#e07b00;">
+    <div class="step-head">
+      <div class="step-title" style="color:#c06000;"><span class="step-num" style="background:#e07b00;">✚</span>Post-Hoc SLSQP</div>
+      <span class="badge opt">final pass</span>
+    </div>
+    <div class="eqn" style="background:#fff8ee; color:#8b4500;">
+      <i>x</i><sub>0</sub> → SLSQP → <i>x</i><sub>0</sub><sup>*</sup>
+    </div>
+    <div class="note">
+      Applied <i>once</i>, after the full T-step loop reaches
+      <i>x</i><sub>0</sub> — not part of the repeated reverse step above.
+    </div>
+  </div>
+
+</div>
+
+<div class="loopback">
+  <span class="pill">repeat</span>
+  with <i>x</i><sub>t−1</sub> in place of <i>x</i><sub>t</sub>, for
+  <i>t</i> = <i>T</i>, …, 1, until <i>x</i><sub>0</sub> is reached.
+</div>
+
+</body>
+</html>

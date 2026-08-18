@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>DDPM Forward/Reverse Process</title>
+<style>
+  @page { size: 260mm 110mm; margin: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    width: 260mm; height: 110mm;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 18px;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .traj-box {
+    width: 74px; height: 74px;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+    overflow: hidden;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .traj-box canvas { display: block; }
+  .traj-box .tag {
+    position: absolute; bottom: 2px; right: 4px;
+    font-size: 10px; font-weight: 700; color: #33415c;
+    text-shadow: 0 0 3px white, 0 0 3px white;
+  }
+
+  .dots { width: 36px; text-align: center; font-size: 20px; color: #888; font-weight: 700; }
+
+  /* arrow columns between boxes: top = forward (gray), bottom = reverse (blue) */
+  .arrows {
+    width: 46px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+  }
+  .arrows svg { display: block; }
+  .arrow-lbl { font-size: 8.5px; text-align: center; line-height: 1.15; white-space: nowrap; }
+  .fwd-lbl { color: #777; }
+  .rev-lbl { color: #2a6fbf; font-weight: 600; }
+
+  .legend {
+    display: flex; gap: 26px; margin-top: 10px;
+    font-size: 10.5px; color: #444;
+  }
+  .legend .li { display: flex; align-items: center; gap: 6px; }
+  .legend .ln { width: 22px; height: 0; border-top: 2px solid; display: inline-block; }
+</style>
+</head>
+<body>
+<div class="diagram">
+
+  <div style="font-size:11px; font-weight:700; color:#333; letter-spacing:.03em; margin-bottom:2px;">
+    Forward process q(x<sub>t</sub>|x<sub>t&minus;1</sub>) adds noise &nbsp;·&nbsp;
+    Reverse process p<sub>&theta;</sub>(x<sub>t&minus;1</sub>|x<sub>t</sub>) removes it
+  </div>
+
+  <div class="row" id="chainRow">
+    <!-- boxes + arrows injected by JS -->
+  </div>
+
+  <div class="legend">
+    <div class="li"><span class="ln" style="border-color:#9aa3b0;"></span>forward (fixed, closed-form)</div>
+    <div class="li"><span class="ln" style="border-color:#2a6fbf;"></span>reverse (learned denoiser, T steps)</div>
+  </div>
+</div>
+
+<script>
+// noise level per stage: 0 = clean trajectory, 1 = pure noise
+const stages = [
+  { t: "x0",  noise: 0.00, tag: "x₀" },
+  { t: "x1",  noise: 0.28, tag: "x₁" },
+  { t: "xk",  noise: 0.62, tag: "xₜ" },
+  { t: "xT1", noise: 0.88, tag: "xₜ₊₁" },
+  { t: "xT",  noise: 1.00, tag: "xᵀ" },
+];
+
+function drawStage(canvas, noise) {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+
+  // background: interpolate from white (clean) to pale blue (noisy)
+  const bg = `rgb(${255 - Math.round(noise*35)}, ${255 - Math.round(noise*22)}, ${255 - Math.round(noise*10)})`;
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, w, h);
+
+  // noise dots, density and jitter scale with noise level
+  const nDots = Math.round(noise * 90);
+  let seed = 42;
+  function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+  for (let i = 0; i < nDots; i++) {
+    const x = rnd() * w, y = rnd() * h;
+    const s = 1.4 + rnd() * 1.8;
+    ctx.fillStyle = `rgba(${90+Math.round(rnd()*60)}, ${110+Math.round(rnd()*50)}, ${180+Math.round(rnd()*40)}, ${0.35 + rnd()*0.45})`;
+    ctx.fillRect(x, y, s, s);
+  }
+
+  // trajectory curve, opacity fades out as noise grows, jitter increases with noise
+  const curveAlpha = Math.max(0, 1 - noise * 1.15);
+  if (curveAlpha > 0.03) {
+    ctx.strokeStyle = `rgba(58, 122, 191, ${curveAlpha})`;
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    const jitter = noise * 10;
+    const pts = [];
+    for (let i = 0; i <= 8; i++) {
+      const px = 6 + (w - 12) * (i / 8);
+      const base = h - 8 - (h - 16) * Math.pow(i / 8, 1.4);
+      const py = base + (rnd() - 0.5) * jitter;
+      pts.push([px, py]);
+    }
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.stroke();
+  }
+}
+
+function fwdArrow() {
+  return `<svg width="40" height="12" viewBox="0 0 40 12">
+    <line x1="2" y1="6" x2="32" y2="6" stroke="#9aa3b0" stroke-width="1.6"/>
+    <polygon points="32,2 40,6 32,10" fill="#9aa3b0"/>
+  </svg>`;
+}
+function revArrow() {
+  return `<svg width="40" height="12" viewBox="0 0 40 12">
+    <line x1="38" y1="6" x2="8" y2="6" stroke="#2a6fbf" stroke-width="2"/>
+    <polygon points="8,2 0,6 8,10" fill="#2a6fbf"/>
+  </svg>`;
+}
+
+const row = document.getElementById("chainRow");
+stages.forEach((s, idx) => {
+  const box = document.createElement("div");
+  box.className = "traj-box";
+  const canvas = document.createElement("canvas");
+  canvas.width = 74; canvas.height = 74;
+  box.appendChild(canvas);
+  const tag = document.createElement("div");
+  tag.className = "tag";
+  tag.innerHTML = s.tag;
+  box.appendChild(tag);
+  row.appendChild(box);
+  drawStage(canvas, s.noise);
+
+  if (idx < stages.length - 1) {
+    const isEllipsis = idx === 2; // between xk and xT-1 -> show dots instead of dense arrows
+    const col = document.createElement("div");
+    col.className = "arrows";
+    col.innerHTML = `
+      ${fwdArrow()}
+      <div class="arrow-lbl fwd-lbl">q(x<sub>t</sub>|x<sub>t&minus;1</sub>)</div>
+      ${revArrow()}
+      <div class="arrow-lbl rev-lbl">p<sub>&theta;</sub>(x<sub>t&minus;1</sub>|x<sub>t</sub>)</div>
+    `;
+    row.appendChild(col);
+  }
+});
+</script>
+
+</body>
+</html>
