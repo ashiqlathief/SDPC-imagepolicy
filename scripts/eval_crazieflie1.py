@@ -730,6 +730,12 @@ def main():
                         help="Log estimated-vs-ground-truth cylinder position error every 20 steps "
                              "(uses env.get_cylinder_positions() only for this printout, never fed "
                              "to the projector) -- for validating the estimator against sim truth.")
+    parser.add_argument("--save_frames", action="store_true", default=False,
+                        help="Save the raw FPV RGB frame captured each step (before "
+                             "model input) to <traj_dir>/frames_<encoder>_L<latent>_"
+                             "<variant>_seed<seed>.npy, shape (T,H,W,3) uint8, one file "
+                             "per episode. Off by default -- adds up across many "
+                             "variants/seeds (~19MB per 700-step episode at 96x96x3).")
     args, _unknown = parser.parse_known_args()
 
     device         = torch.device("cuda:0")
@@ -1096,11 +1102,14 @@ def main():
 
             traj_xyz = []
             actions_taken = []
+            frames_taken = []
             prev_actions_real = None
             cand_snapshots = []
 
             pos_init = env._pos_world().detach().cpu().numpy()[0]
             traj_xyz.append(pos_init.copy())
+            if args.save_frames:
+                frames_taken.append(rgb0[0].copy() if use_depth else rgb0.copy())
 
             for step in range(args.max_steps):
                 # current position (for logging/command conversion)
@@ -1251,6 +1260,8 @@ def main():
                 # update rgb(d) history after step
                 rgb = get_obs_frame_from_env(env, use_depth)
                 rgb_hist.append(rgb)
+                if args.save_frames:
+                    frames_taken.append(rgb[0].copy() if use_depth else rgb.copy())
                 write_video_frame()
                 # if step % 500 == 0:
                 #     plt.imshow(rgb)
@@ -1326,6 +1337,13 @@ def main():
                 traj_dir,
                 f"traj_{encoder_type}_L{latent_dim}_{variant_name}_seed{seedmodel}.npz"
             )
+            if args.save_frames:
+                frames_path = os.path.join(
+                    traj_dir,
+                    f"frames_{encoder_type}_L{latent_dim}_{variant_name}_seed{seedmodel}.npy"
+                )
+                np.save(frames_path, np.array(frames_taken, dtype=np.uint8))  # (T,H,W,3)
+                print(f"[INFO] Saved {len(frames_taken)} frames -> {frames_path}")
             np.savez(
                 traj_path,
                 xyz        = np.array(traj_xyz),        # (T, 3) full trajectory
