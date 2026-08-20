@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from depth_obstacle_estimator import (  # noqa: E402
     backproject_depth_to_world, filter_points, cluster_points, ObstacleTracker,
-    crop_points_by_world_z,
+    crop_points_by_world_z, keep_nearest_along_x, keep_nearest_along_z,
 )
 
 # Identity camera pose: output points are already "relative to the camera,"
@@ -73,6 +73,8 @@ def process_frame(depth, fx, fy, cx, cy, args, tracker, dt, world_crop=None):
         # eval_crazieflie1.py, which already only reads (x, y) from track
         # points/centroids either way, so nothing downstream needs to care.
     )
+    if args.nearest_along_z and len(pts_filtered):
+        pts_filtered = keep_nearest_along_z(pts_filtered, xy_bin_size=args.xy_bin_size)
     n_filtered = len(pts_filtered)
     cluster_input = pts_filtered[:, :2] if args.xy_only else pts_filtered
     clusters = cluster_points(cluster_input, eps=args.eps, min_samples=args.min_samples)
@@ -203,9 +205,9 @@ class LivePlot:
         ax.set_xlim(-lim, lim)
         ax.set_ylim(-0.2, lim)   # forward/depth: camera can't see behind itself
         ax.set_zlim(-lim, lim)  # up/down relative to the camera
-        ax.set_xlabel("Y (m)")
-        ax.set_ylabel("X (m)")
-        ax.set_zlabel("Z (m)")
+        ax.set_xlabel("X -- right (m)")
+        ax.set_ylabel("Z -- forward/depth (m)")
+        ax.set_zlabel("-Y -- up (m)")
         ax.set_title(f"Frame {frame_idx}  |  tracks={len(tracks)}")
         ax.legend(loc="upper left", fontsize=8)
         # Static 3D camera angle is a genuine tradeoff, not something with a
@@ -244,13 +246,13 @@ class LivePlot:
         if self.axes == "topdown":
             def _cols(pts):
                 return pts[:, 0], pts[:, 2]  # x (right), z (forward/depth), as-is
-            xlabel, ylabel = "Y (m)", "X (m)"
+            xlabel, ylabel = "X -- right (m)", "Z -- forward/depth (m)"
             xlim, ylim = (-lim, lim), (-0.2, lim)  # depth is forward-only
             title_suffix = "top-down"
         elif self.axes == "frontal":
             def _cols(pts):
                 return pts[:, 0], -pts[:, 1]  # x (right), -y (camera-y is down-positive, negate for up)
-            xlabel, ylabel = "Y (m)", "Z (m)"
+            xlabel, ylabel = "X -- right (m)", "-Y -- up (m)"
             xlim, ylim = (-lim, lim), (-lim, lim)
             title_suffix = "front-on"
         else:
@@ -274,6 +276,90 @@ class LivePlot:
         ax.legend(loc="upper left", fontsize=8)
         ax.set_title(f"Frame {frame_idx}  |  tracks={len(tracks)}  |  {title_suffix}")
 
+        self.fig.tight_layout()
+        plt.pause(0.001)
+
+    def close(self):
+        plt.ioff()
+        plt.close(self.fig)
+
+
+class WorldSlicePlot:
+    """World-frame (NOT camera-frame) height-sliced top-down view: keeps
+    only points whose real-world altitude falls within `slice_z +-
+    slice_z_band/2`, then plots their world (x, y) -- x = distance down the
+    corridor, y = lateral -- matching your actual flight-envelope
+    convention (x in [0,4], y in [-1,1], z in [0.2,0.7]), not camera frame.
+
+    This is deliberately a SEPARATE class from LivePlot, not another `axes`
+    option there: LivePlot's whole contract is camera-frame data (see its
+    docstring), and camera-frame "z" means forward/depth from the lens --
+    completely different physics from world-frame "z" (height above the
+    floor). Mixing the two into one class risked exactly the kind of
+    silent unit confusion already seen with the mislabeled axes earlier.
+
+    Only usable where a real camera pose is known -- i.e. --source isaac,
+    which reads the drone's actual root_state_w. A handheld camera has no
+    pose (IDENTITY_POS/QUAT is a stand-in, not a real position), so there
+    is no such thing as "world z" to slice by there at all; don't try to
+    wire this into the ros2/realsense/synthetic/zarr sources.
+    """
+
+    def __init__(self, x_bounds, y_bounds, slice_z: float, slice_z_band: float,
+                 nearest_along_x: bool = False, y_bin_size: float = 0.05):
+        plt.ion()
+        self.fig, self.ax = plt.subplots(figsize=(9, 5))
+        self.x_bounds = x_bounds
+        self.y_bounds = y_bounds
+        self.slice_z = slice_z
+        self.slice_z_band = slice_z_band
+        # see keep_nearest_along_x() in depth_obstacle_estimator.py -- when
+        # on, collapses multiple points at the same lateral (y) position but
+        # different depths (x) down to just the nearest one, since anything
+        # farther along the same lane is occluded by (or redundant with,
+        # for avoidance) whatever's directly in front of it.
+        self.nearest_along_x = nearest_along_x
+        self.y_bin_size = y_bin_size
+
+    def update(self, world_pts: np.ndarray, drone_xy, frame_idx: int, obstacles_xy=None):
+        """world_pts: (N,3) world-frame points -- pass every detected point
+        each frame; the height mask is applied here, so callers don't need
+        to pre-filter. drone_xy: (2,) current world (x,y) of the drone.
+        obstacles_xy: optional [(x,y), ...] ground-truth obstacle centers
+        (e.g. BOXES/CYLINDERS from evalcopy.py) for a sanity-check overlay
+        -- purely a visual reference, not used by the detector itself."""
+        ax = self.ax
+        ax.cla()
+
+        n_sliced = 0
+        if len(world_pts):
+            z = world_pts[:, 2]
+            mask = np.abs(z - self.slice_z) <= self.slice_z_band / 2.0
+            sliced = world_pts[mask][:, :2]  # (x, y) only from here on
+            if self.nearest_along_x and len(sliced):
+                sliced = keep_nearest_along_x(sliced, y_bin_size=self.y_bin_size)
+            n_sliced = len(sliced)
+            if n_sliced:
+                label = f"detected ({n_sliced} pts" + (", nearest-x only)" if self.nearest_along_x else ")")
+                ax.scatter(sliced[:, 0], sliced[:, 1], s=14, c="tab:blue", label=label)
+
+        if obstacles_xy:
+            ox = [o[0] for o in obstacles_xy]
+            oy = [o[1] for o in obstacles_xy]
+            ax.scatter(ox, oy, s=70, marker="x", c="tab:red", linewidths=2,
+                       label="ground truth")
+
+        ax.scatter([drone_xy[0]], [drone_xy[1]], s=100, c="black", marker="^", label="drone")
+
+        ax.set_xlim(*self.x_bounds)
+        ax.set_ylim(*self.y_bounds)
+        ax.set_xlabel("World X -- along corridor (m)")
+        ax.set_ylabel("World Y -- lateral (m)")
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="upper right", fontsize=8)
+        ax.set_title(f"Frame {frame_idx}  |  world height slice z={self.slice_z:.2f}m "
+                     f"(+-{self.slice_z_band / 2:.2f}m)  |  {n_sliced} pts in band")
         self.fig.tight_layout()
         plt.pause(0.001)
 
@@ -397,6 +483,13 @@ def run_isaac(args, tracker):
     step_dt = args.isaac_dt * getattr(env, "count", 100)
 
     plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes, axis_limit=args.max_range) if args.viz else None
+    slice_plot = None
+    if args.viz and args.slice_z is not None:
+        slice_plot = WorldSlicePlot(
+            x_bounds=tuple(args.world_x_bounds), y_bounds=tuple(args.world_y_bounds),
+            slice_z=args.slice_z, slice_z_band=args.slice_z_band,
+            nearest_along_x=args.nearest_along_x, y_bin_size=args.y_bin_size,
+        )
     try:
         for i in range(args.n_frames):
             env.step(hover_xyz)
@@ -451,11 +544,19 @@ def run_isaac(args, tracker):
                 print(f"  [height check] world z: min={wz.min():.3f} max={wz.max():.3f} "
                       f"mean={wz.mean():.3f}  (floor=0.0, ceiling={CEILING_HEIGHT:.2f}, "
                       f"camera={pos_cam_w[2]:.3f})")
+                if slice_plot is not None:
+                    slice_plot.update(world_pts, drone_xy=pos_body_w[:2], frame_idx=i)
+            elif slice_plot is not None:
+                # no filtered points this frame -- still refresh so the
+                # drone marker keeps moving even on an empty-detection frame
+                slice_plot.update(np.zeros((0, 3), dtype=np.float32), drone_xy=pos_body_w[:2], frame_idx=i)
             if plot is not None:
                 plot.update(pts_raw, pts_filtered, tracks, i)
     finally:
         if plot is not None:
             plot.close()
+        if slice_plot is not None:
+            slice_plot.close()
         env.close()
 
 
@@ -480,6 +581,19 @@ def main():
                          "in z alone). This merges those height-slices back into one track. "
                          "Point-cloud display (both --plot_mode 3d and 2d) is unaffected -- "
                          "only clustering/tracking is flattened, not what you see plotted.")
+    p.add_argument("--nearest_along_z", action="store_true",
+                    help="collapse points sharing the same lateral (x,y) camera-frame position "
+                         "down to just the nearest-in-depth one, dropping anything behind it. "
+                         "Real depth sensors commonly produce 'flying pixel'/multipath echo "
+                         "points slightly behind the true front surface, especially at object "
+                         "edges or on glossy/reflective surfaces -- this shows up as a faint "
+                         "secondary arc trailing the real surface in a top-down view. UNLIKE "
+                         "--xy_only, this DOES change what's plotted (that's the point -- it "
+                         "removes the ghost points from the display, not just from clustering). "
+                         "Works on any source (ros2/realsense/isaac/...), no pose needed.")
+    p.add_argument("--xy_bin_size", type=float, default=0.05,
+                    help="lateral bucket width (metres) used by --nearest_along_z to decide "
+                         "what counts as 'the same (x,y) position'.")
     p.add_argument("--rate", type=float, default=10.0, help="replay/print rate in Hz")
     p.add_argument("--radius_limit", type=float, default=None,
                     help="spherical crop radius in metres from the camera origin, applied "
@@ -523,6 +637,37 @@ def main():
                          "real ceiling (CEILING_HEIGHT, imported from crazyflie_env_cfg.py -- NOT "
                          "a hardcoded guess) before clustering, so real floor/ceiling patches "
                          "aren't DBSCAN'd into fake 'obstacle' tracks alongside the real cylinders.")
+
+    # world-frame height-slice view (isaac source only -- needs a real pose
+    # to know what "world z" even means; see WorldSlicePlot's docstring)
+    p.add_argument("--slice_z", type=float, default=None,
+                    help="if set, opens a SEPARATE plot window showing only detected points "
+                         "within a band around this real-world altitude (metres), plotted in "
+                         "world (x,y) -- x = distance down the corridor, y = lateral. This is "
+                         "what answers 'what does the obstacle look like at the drone's actual "
+                         "flight height', vs the main --plot_mode view which is camera-frame "
+                         "(depth-from-lens, not world height) and has no such height concept. "
+                         "isaac source only -- other sources have no real camera pose to convert "
+                         "camera-frame points into world frame with in the first place.")
+    p.add_argument("--slice_z_band", type=float, default=0.15,
+                    help="full width (metres) of the world-z band kept around --slice_z, e.g. "
+                         "0.15 keeps points within +-0.075m of --slice_z.")
+    p.add_argument("--world_x_bounds", type=float, nargs=2, default=[0.0, 4.0], metavar=("XMIN", "XMAX"),
+                    help="world-x plot range for --slice_z, i.e. distance down the corridor.")
+    p.add_argument("--world_y_bounds", type=float, nargs=2, default=[-1.0, 1.0], metavar=("YMIN", "YMAX"),
+                    help="world-y plot range for --slice_z, i.e. lateral corridor extent.")
+    p.add_argument("--nearest_along_x", action="store_true",
+                    help="within --slice_z, collapse multiple points at the same lateral (y) "
+                         "position but different depths (x) down to just the nearest one -- "
+                         "e.g. points at x=1 and x=2 at the same y keep only x=1, since it's "
+                         "'first' along the direction of travel and occludes anything behind it. "
+                         "See keep_nearest_along_x() in depth_obstacle_estimator.py. This is a "
+                         "real information loss (distinct obstacles at the same lane collapse "
+                         "to one), not just decluttering -- fine for immediate avoidance, not "
+                         "for anything that needs the full scene.")
+    p.add_argument("--y_bin_size", type=float, default=0.05,
+                    help="lateral bucket width (metres) used by --nearest_along_x to decide "
+                         "what counts as 'the same y lane'.")
 
     args = p.parse_args()
     tracker = ObstacleTracker()

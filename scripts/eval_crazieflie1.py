@@ -20,14 +20,26 @@ from diffuser.sampling.projection import Projector
 from diffuser.sampling.policies import temporal_consistency_distances
 from metrics_logger import MetricsLogger
 from depth_obstacle_estimator import (
-    camera_intrinsics, camera_world_pose, backproject_depth_to_world,
+    camera_intrinsics, camera_world_pose, backproject_depth_to_world, quat_apply,
     filter_points, cluster_points, ObstacleTracker, tracks_to_constraints,
+    keep_nearest_along_z,
     FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE,
 )
 cfg = importlib.import_module("config.avoiding-crazyflie")
 BOXES = cfg.BOXES
 CYLINDERS = cfg.CYLINDERS
 SPHERES = getattr(cfg, 'SPHERES', [])
+
+# Identity pose, used ONLY to get backproject_depth_to_world's output in the
+# camera's own frame (x=right, y=down, z=forward/depth from the lens) before
+# the real world transform below -- keep_nearest_along_z needs genuine
+# camera-frame lateral position to correctly identify "same viewing ray,
+# different depth" (flying-pixel/multipath echo) points. Bucketing by WORLD
+# (x, y) instead -- which is what you'd get by deduping AFTER the real
+# pos_cam_w/quat_cam_w transform -- would incorrectly keep the lowest-height
+# point per world-position bucket instead, a different and wrong operation.
+_IDENTITY_POS = np.zeros(3, dtype=np.float32)
+_IDENTITY_QUAT = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 SPHERE_RADIUS = getattr(cfg, 'SPHERE_RADIUS', 0.10)
 corridor_halfspaces = cfg.CORRIDOR_HALFSPACES
 DEPTH_NEAR = cfg.DEPTH_NEAR
@@ -967,21 +979,31 @@ def main():
                 root = env.robot.data.root_state_w[0].detach().cpu().numpy()
                 pos_body_w, quat_body_w = root[0:3], root[3:7]
                 pos_cam_w, quat_cam_w = camera_world_pose(pos_body_w, quat_body_w)
-                pts = backproject_depth_to_world(
-                    depth, depth_fx, depth_fy, depth_cx, depth_cy, pos_cam_w, quat_cam_w,
+
+                # Camera-frame first (identity pose), NOT world frame directly --
+                # keep_nearest_along_z needs real camera-frame lateral position to
+                # correctly drop flying-pixel/multipath echo points (same viewing
+                # ray, spurious extra depth) behind the true front surface; doing
+                # this after the world transform would bucket by world (x,y)
+                # instead, which is a different and incorrect operation (see
+                # _IDENTITY_POS/_IDENTITY_QUAT comment above).
+                pts_cam = backproject_depth_to_world(
+                    depth, depth_fx, depth_fy, depth_cx, depth_cy, _IDENTITY_POS, _IDENTITY_QUAT,
                     max_range=args.depth_obstacle_max_range, stride=args.depth_obstacle_stride,
                 )
+                # Always applied (not a CLI toggle) -- drops flying-pixel/
+                # multipath echo points behind the true front surface, which
+                # would otherwise become spurious extra keep-out constraints.
+                # Bin width fixed at 5cm rather than exposed as a knob.
+                if len(pts_cam):
+                    pts_cam = keep_nearest_along_z(pts_cam, xy_bin_size=0.05)
+                pts = pos_cam_w[None, :] + quat_apply(quat_cam_w, pts_cam)  # -> world frame
+
                 pts = filter_points(
                     pts, x_bounds=(-0.5, 4.5), y_bounds=(-0.95, 0.95), z_bounds=(0.0, 1.0),
                     voxel_size=args.depth_obstacle_voxel,
                 )
-                # xy_only=True: merge height-slices of one physical vertical
-                # column back into a single cluster/track instead of splitting
-                # by height (see cluster_points()'s docstring in
-                # depth_obstacle_estimator.py) -- otherwise tracks_to_constraints()
-                # below turns each height-slice into its own near-duplicate
-                # (x,y) keep-out circle for what's really one obstacle.
-                clusters = cluster_points(pts, xy_only=True)
+                clusters = cluster_points(pts)
                 # One outer eval `step()` call -- and therefore one call to this
                 # function -- advances the sim by env.count physics substeps at
                 # eval_dt each (see Crazyflie.step() in crazyflie_env.py), not by

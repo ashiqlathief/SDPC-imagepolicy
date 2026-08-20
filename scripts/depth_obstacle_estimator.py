@@ -61,27 +61,101 @@ def camera_world_pose(pos_body_w: np.ndarray, quat_body_w: np.ndarray):
     return pos_cam_w, quat_cam_w
 
 
-def crop_points_by_world_z(points_cam: np.ndarray, pos_cam_w: np.ndarray,
-                            quat_cam_w: np.ndarray, z_lo: float, z_hi: float) -> np.ndarray:
-    """points_cam: (N,3) points already in CAMERA frame (e.g. backprojected
-    with an identity pose, as depth_camera_live_test.py does for its
-    handheld-camera sources). Drops any point whose reconstructed WORLD-
-    frame z falls outside [z_lo, z_hi], returning the survivors still in
-    camera frame -- this only removes points, it never changes convention.
+def crop_points_by_world_z(points_cam: np.ndarray, pos_cam_w: np.ndarray, quat_cam_w: np.ndarray,
+                            z_lo: float, z_hi: float) -> np.ndarray:
+    """Drop points whose WORLD-frame z (real height above the floor) falls
+    outside [z_lo, z_hi], using a known camera pose to convert camera-frame
+    points to world frame for the check. Returns the surviving points in
+    their ORIGINAL camera frame, unchanged -- this only removes points, it
+    does not change which frame the output is in (downstream code still
+    gets camera-frame data, same as when this isn't used).
 
-    For a caller that already has WORLD-frame points (e.g.
-    eval_crazieflie1.py, which backprojects with the real pos_cam_w/
-    quat_cam_w up front), just crop by z_bounds directly -- this function
-    exists specifically for the camera-frame case, where a per-point world
-    z has to be reconstructed first before it can be compared to a known
-    floor/ceiling height. Meaningful only when the caller actually knows
-    the scene's floor/ceiling geometry (e.g. CEILING_HEIGHT in
-    crazyflie_env_cfg.py); a real handheld camera has no such knowledge,
-    so this is opt-in rather than baked into filter_points()."""
+    Requires a real camera pose (pos_cam_w, quat_cam_w from camera_world_
+    pose(), which itself requires the drone's actual root_state_w). A
+    handheld camera with no pose source (IDENTITY_POS/IDENTITY_QUAT) has no
+    meaningful notion of "world z" to crop by -- camera-frame z there means
+    forward/depth from the lens, not height above a floor -- so don't call
+    this for that case; it would silently produce nonsense."""
     if len(points_cam) == 0:
         return points_cam
-    world_z = pos_cam_w[2] + quat_apply(quat_cam_w, points_cam)[:, 2]
-    return points_cam[(world_z >= z_lo) & (world_z <= z_hi)]
+    world_pts = pos_cam_w[None, :] + quat_apply(quat_cam_w, points_cam)
+    keep = (world_pts[:, 2] >= z_lo) & (world_pts[:, 2] <= z_hi)
+    return points_cam[keep]
+
+
+def keep_nearest_along_x(points_xy: np.ndarray, y_bin_size: float = 0.05) -> np.ndarray:
+    """Collapse a world-frame (x, y) point set down to one point per lateral
+    "lane": bucket points by y (bucket width `y_bin_size`), and within each
+    bucket keep only the point with the SMALLEST x -- i.e. whichever one is
+    nearer the corridor entrance / "came first" along the direction of
+    travel. Points at a larger x but the same y-lane are occluded by (or at
+    least redundant with, for avoidance purposes) the nearer one, so this
+    turns a full 3D-ish clutter of points into a single front-facing
+    obstacle surface, similar to one range reading per angle on a 2D lidar
+    scan, rather than every depth-layer stacked behind the front surface.
+
+    points_xy: (N,2) array of (x, y) -- typically WORLD frame here (x =
+    distance down the corridor, y = lateral), since "which one came first"
+    is a direction-of-travel concept that only makes sense in that frame,
+    not camera-frame depth. Pass world_pts[:, :2] from a real-pose source
+    (e.g. --source isaac); this has no meaning for a handheld camera with
+    no notion of world x.
+
+    This is a genuine information loss, not just decluttering -- two real,
+    distinct obstacles at the same lateral position but different depths
+    (e.g. a near cylinder and a far wall segment directly behind it) will
+    collapse to just the near one. That's usually the right call for
+    immediate obstacle avoidance (you can't fly through the near one to
+    reach the far one anyway), but keep in mind before also using this
+    output for anything that needs the full scene, e.g. mapping/logging.
+    """
+    if len(points_xy) == 0:
+        return points_xy
+    x, y = points_xy[:, 0], points_xy[:, 1]
+    bucket = np.round(y / y_bin_size).astype(np.int64)
+    order = np.argsort(x)  # nearest (smallest x) first
+    _, first_idx = np.unique(bucket[order], return_index=True)
+    keep_idx = order[first_idx]
+    return points_xy[keep_idx]
+
+
+def keep_nearest_along_z(points_cam: np.ndarray, xy_bin_size: float = 0.05) -> np.ndarray:
+    """Collapse camera-frame points down to one per lateral (x, y) bucket,
+    keeping only the nearest-in-z (smallest forward/depth) point. Real
+    depth sensors routinely produce "flying pixel" or multipath echo
+    points slightly BEHIND the true front surface -- especially at depth
+    discontinuities (object edges) or on glossy/reflective/dark surfaces --
+    which show up as a faint secondary arc trailing the real surface in a
+    top-down view (an actual observed artifact, not hypothetical: this is
+    what produced the double-crescent shape in a real RealSense frame).
+    This keeps only the front-most return per lateral position and drops
+    anything behind it.
+
+    Bucketed by (x, y) JOINTLY (not one axis like keep_nearest_along_x),
+    since camera frame has two genuinely independent lateral axes -- x
+    (right) and y (down) -- with no height-slice already narrowing it to
+    one, unlike the world-frame case where z was sliced out separately
+    beforehand. Works on ANY source (ros2, realsense, isaac, ...), unlike
+    keep_nearest_along_x / crop_points_by_world_z, which need a real world
+    pose -- this only ever operates in the camera's own frame.
+
+    Same caveat as keep_nearest_along_x: a real information loss, not just
+    cleanup -- two genuinely distinct surfaces at the same lateral position
+    but different depths (e.g. a thin rail in front of a wall) will
+    collapse to just the nearer one.
+    """
+    if len(points_cam) == 0:
+        return points_cam
+    x, y, z = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
+    bx = np.round(x / xy_bin_size).astype(np.int64)
+    by = np.round(y / xy_bin_size).astype(np.int64)
+    # fold the 2D (bx, by) bucket into one integer key; multiplier is just
+    # large enough that by's range can't collide into a different bx's slot
+    bucket = bx * 1_000_003 + by
+    order = np.argsort(z)  # nearest (smallest z / depth) first
+    _, first_idx = np.unique(bucket[order], return_index=True)
+    keep_idx = order[first_idx]
+    return points_cam[keep_idx]
 
 
 # =============================================================================
@@ -203,30 +277,12 @@ def filter_points(points: np.ndarray, x_bounds, y_bounds, z_bounds,
 # Clustering (depth.md step 3/4 -- DBSCAN, no obstacle count needed up front)
 # =============================================================================
 
-def cluster_points(points: np.ndarray, eps: float = 0.12, min_samples: int = 4,
-                    xy_only: bool = False) -> list[np.ndarray]:
+def cluster_points(points: np.ndarray, eps: float = 0.12, min_samples: int = 4) -> list[np.ndarray]:
     """Returns a list of (N_i,3) point arrays, one per cluster (DBSCAN noise
-    points, label -1, are dropped).
-
-    xy_only: run DBSCAN's distance computation on (x, y) only, ignoring z --
-    but each returned cluster still keeps every column `points` had (x,y,z),
-    just grouped differently. Real corridor obstacles (BOXES/CYLINDERS) are
-    vertical columns spanning the full flight envelope height, so two
-    points on the same physical column can easily be MORE than `eps` apart
-    in z alone once you're more than ~10-15cm off the floor -- 3D DBSCAN
-    then chops one column into several clusters stacked at different
-    heights, each becoming its own track (see filter_points' docstring for
-    the same issue from the crop side, and tracks_to_constraints(), which
-    then turns every one of those height-slices' points into its own
-    near-duplicate (x,y) keep-out circle -- multiplying constraint count
-    for what's really one object). Off by default since it's a real
-    tradeoff, not a strict improvement: a genuinely wide horizontal object
-    close to a narrow tall one at similar (x,y) would merge into one
-    cluster here where 3D clustering would have kept them separate."""
+    points, label -1, are dropped)."""
     if len(points) < min_samples:
         return []
-    cluster_input = points[:, :2] if xy_only else points
-    labels = DBSCAN(eps=eps, min_samples=min_samples).fit(cluster_input).labels_
+    labels = DBSCAN(eps=eps, min_samples=min_samples).fit(points).labels_
     return [points[labels == lbl] for lbl in sorted(set(labels)) if lbl != -1]
 
 
