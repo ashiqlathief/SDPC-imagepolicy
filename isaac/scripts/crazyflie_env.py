@@ -1,12 +1,16 @@
 from dataclasses import dataclass
 from time import perf_counter
 import argparse
+import os
 from isaaclab.app import AppLauncher
 from warp import pos
 _parser = argparse.ArgumentParser(add_help=False)
 AppLauncher.add_app_launcher_args(_parser)
 _app_args, _ = _parser.parse_known_args()
-_app_args.headless = True
+# Headless by default (every existing caller relies on this); set
+# CRAZYFLIE_ENV_HEADLESS=0 before importing this module to pop up the actual
+# Isaac Sim GUI instead -- see --source isaac in depth_camera_live_test.py.
+_app_args.headless = os.environ.get("CRAZYFLIE_ENV_HEADLESS", "1") != "0"
 _app_args.enable_cameras = True
 app_launcher = AppLauncher(_app_args)
 simulation_app = app_launcher.app

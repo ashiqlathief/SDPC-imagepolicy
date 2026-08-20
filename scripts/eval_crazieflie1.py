@@ -975,7 +975,13 @@ def main():
                     pts, x_bounds=(-0.5, 4.5), y_bounds=(-0.95, 0.95), z_bounds=(0.0, 1.0),
                     voxel_size=args.depth_obstacle_voxel,
                 )
-                clusters = cluster_points(pts)
+                # xy_only=True: merge height-slices of one physical vertical
+                # column back into a single cluster/track instead of splitting
+                # by height (see cluster_points()'s docstring in
+                # depth_obstacle_estimator.py) -- otherwise tracks_to_constraints()
+                # below turns each height-slice into its own near-duplicate
+                # (x,y) keep-out circle for what's really one obstacle.
+                clusters = cluster_points(pts, xy_only=True)
                 # One outer eval `step()` call -- and therefore one call to this
                 # function -- advances the sim by env.count physics substeps at
                 # eval_dt each (see Crazyflie.step() in crazyflie_env.py), not by

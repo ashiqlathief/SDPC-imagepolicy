@@ -61,6 +61,29 @@ def camera_world_pose(pos_body_w: np.ndarray, quat_body_w: np.ndarray):
     return pos_cam_w, quat_cam_w
 
 
+def crop_points_by_world_z(points_cam: np.ndarray, pos_cam_w: np.ndarray,
+                            quat_cam_w: np.ndarray, z_lo: float, z_hi: float) -> np.ndarray:
+    """points_cam: (N,3) points already in CAMERA frame (e.g. backprojected
+    with an identity pose, as depth_camera_live_test.py does for its
+    handheld-camera sources). Drops any point whose reconstructed WORLD-
+    frame z falls outside [z_lo, z_hi], returning the survivors still in
+    camera frame -- this only removes points, it never changes convention.
+
+    For a caller that already has WORLD-frame points (e.g.
+    eval_crazieflie1.py, which backprojects with the real pos_cam_w/
+    quat_cam_w up front), just crop by z_bounds directly -- this function
+    exists specifically for the camera-frame case, where a per-point world
+    z has to be reconstructed first before it can be compared to a known
+    floor/ceiling height. Meaningful only when the caller actually knows
+    the scene's floor/ceiling geometry (e.g. CEILING_HEIGHT in
+    crazyflie_env_cfg.py); a real handheld camera has no such knowledge,
+    so this is opt-in rather than baked into filter_points()."""
+    if len(points_cam) == 0:
+        return points_cam
+    world_z = pos_cam_w[2] + quat_apply(quat_cam_w, points_cam)[:, 2]
+    return points_cam[(world_z >= z_lo) & (world_z <= z_hi)]
+
+
 # =============================================================================
 # Depth -> world point cloud
 # =============================================================================
@@ -180,12 +203,30 @@ def filter_points(points: np.ndarray, x_bounds, y_bounds, z_bounds,
 # Clustering (depth.md step 3/4 -- DBSCAN, no obstacle count needed up front)
 # =============================================================================
 
-def cluster_points(points: np.ndarray, eps: float = 0.12, min_samples: int = 4) -> list[np.ndarray]:
+def cluster_points(points: np.ndarray, eps: float = 0.12, min_samples: int = 4,
+                    xy_only: bool = False) -> list[np.ndarray]:
     """Returns a list of (N_i,3) point arrays, one per cluster (DBSCAN noise
-    points, label -1, are dropped)."""
+    points, label -1, are dropped).
+
+    xy_only: run DBSCAN's distance computation on (x, y) only, ignoring z --
+    but each returned cluster still keeps every column `points` had (x,y,z),
+    just grouped differently. Real corridor obstacles (BOXES/CYLINDERS) are
+    vertical columns spanning the full flight envelope height, so two
+    points on the same physical column can easily be MORE than `eps` apart
+    in z alone once you're more than ~10-15cm off the floor -- 3D DBSCAN
+    then chops one column into several clusters stacked at different
+    heights, each becoming its own track (see filter_points' docstring for
+    the same issue from the crop side, and tracks_to_constraints(), which
+    then turns every one of those height-slices' points into its own
+    near-duplicate (x,y) keep-out circle -- multiplying constraint count
+    for what's really one object). Off by default since it's a real
+    tradeoff, not a strict improvement: a genuinely wide horizontal object
+    close to a narrow tall one at similar (x,y) would merge into one
+    cluster here where 3D clustering would have kept them separate."""
     if len(points) < min_samples:
         return []
-    labels = DBSCAN(eps=eps, min_samples=min_samples).fit(points).labels_
+    cluster_input = points[:, :2] if xy_only else points
+    labels = DBSCAN(eps=eps, min_samples=min_samples).fit(cluster_input).labels_
     return [points[labels == lbl] for lbl in sorted(set(labels)) if lbl != -1]
 
 

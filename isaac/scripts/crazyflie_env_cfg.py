@@ -81,7 +81,7 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
     # -------------------------
     crazyflie = CRAZYFLIE.replace(
         prim_path="/World/envs/env_.*/Crazyflie",
-        init_state=CRAZYFLIE.init_state.replace(pos=(0.0, 0.0, 0.2))#0.45219916 -0.2618473   0.12736732
+        init_state=CRAZYFLIE.init_state.replace(pos=(0.0, 0.0, 0.5))#0.45219916 -0.2618473   0.12736732
     )
 
     FPV_CAMERA_CFG = CameraCfg(
@@ -242,23 +242,6 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
             rot=(0.966, -0.259, 0.0, 0.0),            # angled slightly forward
         ),
     )
-
-    # # -------------------------
-    # # Obstacles (boxes + cylinders)
-    # # -------------------------
-    # # vars() in a class body returns the class namespace directly,
-    # # so assignments here become real class attributes picked up by @configclass.
-    # for _i, _pos in enumerate(BOXES):
-    #     vars()[f"box_{_i:02d}"] = AssetBaseCfg(
-    #         prim_path=f"/World/envs/env_.*/Box{_i:02d}",
-    #         spawn=sim_utils.CuboidCfg(
-    #             visual_material=RED_MAT,
-    #             size=(0.20, 0.20, WALL_HEIGHT),
-    #             collision_props=sim_utils.CollisionPropertiesCfg(),
-    #         ),
-    #         init_state=AssetBaseCfg.InitialStateCfg(pos=_pos),
-    #     )
-    # del _i, _pos  # prevent loop vars from leaking into the class namespace
 
     for _i, _pos in enumerate(CYLINDERS):
         vars()[f"cyl_{_i:02d}"] = RigidObjectCfg(

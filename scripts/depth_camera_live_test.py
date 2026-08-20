@@ -1,29 +1,7 @@
-"""Standalone test harness for the depth -> obstacle pipeline in
-depth_obstacle_estimator.py, isolated from IsaacLab so it can run against a
-real depth camera (once we have one) or, for now, two stand-ins:
-
-  --source synthetic   a fabricated depth frame with one obstacle at a known
-                        distance, so we can check the pipeline recovers the
-                        right (x,y,z) before ever touching real hardware.
-  --source zarr         replays real recorded depth frames from the existing
-                        Isaac dataset, at roughly real-time rate, as a smoke
-                        test on real depth-shaped imagery/noise.
-  --source realsense    live capture via pyrealsense2 (lazy-imported, only
-                        needed once the camera is actually plugged in).
-  --source ros2          subscribes to an already-running ROS2 depth stream
-                        (e.g. `ros2 launch realsense2_camera rs_launch.py
-                        enable_depth:=true`) instead of opening the camera
-                        directly -- lets this run alongside rviz2/other
-                        consumers of the same topics, or on a different
-                        machine than the one with the camera plugged in.
-
-Output is in CAMERA frame, not world frame: there's no pose source when
-you're holding the camera by hand, so (x,y,z) here means "relative to the
-camera's own position/orientation right now," per the earlier discussion.
-
-Reuses filter_points / cluster_points / ObstacleTracker / backproject_depth_
-to_world unchanged from depth_obstacle_estimator.py -- only the frame source
-and the (now-identity) camera pose are different from the sim path.
+"""
+python scripts/depth_camera_live_test.py --source isaac --viz --radius_limit 3.0 --plot_mode 3d
+python scripts/depth_camera_live_test.py --source isaac --viz --radius_limit 3.0 --plot_mode 2d --plot_axes topdown
+python scripts/depth_camera_live_test.py --source isaac --viz --radius_limit 3.0 --plot_mode 2d --plot_axes frontal
 """
 from __future__ import annotations
 import argparse
@@ -37,6 +15,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from depth_obstacle_estimator import (  # noqa: E402
     backproject_depth_to_world, filter_points, cluster_points, ObstacleTracker,
+    crop_points_by_world_z,
 )
 
 # Identity camera pose: output points are already "relative to the camera,"
@@ -64,12 +43,24 @@ def apply_radius_limit(points: np.ndarray, radius_limit: float | None) -> np.nda
     return points[d <= radius_limit]
 
 
-def process_frame(depth, fx, fy, cx, cy, args, tracker, dt):
+def process_frame(depth, fx, fy, cx, cy, args, tracker, dt, world_crop=None):
+    """world_crop: optional (pos_cam_w, quat_cam_w, z_lo, z_hi) -- when given,
+    drops any point whose WORLD-frame z falls outside [z_lo, z_hi] before
+    clustering, via depth_obstacle_estimator.crop_points_by_world_z().
+    Only meaningful for a source that actually knows the scene's geometry
+    (--source isaac knows the floor is at world z=0 and the ceiling at
+    CEILING_HEIGHT); the handheld-camera sources have no such knowledge,
+    hence why this is opt-in rather than baked into the crop pipeline
+    everyone shares. Output stays camera-frame either way -- this only
+    removes points, it doesn't change the convention downstream."""
     pts_raw = backproject_depth_to_world(
         depth, fx, fy, cx, cy, IDENTITY_POS, IDENTITY_QUAT,
         max_range=args.max_range, stride=args.stride,
     )
     pts_raw = apply_radius_limit(pts_raw, args.radius_limit)
+    if world_crop is not None:
+        pos_cam_w, quat_cam_w, z_lo, z_hi = world_crop
+        pts_raw = crop_points_by_world_z(pts_raw, pos_cam_w, quat_cam_w, z_lo, z_hi)
     n_raw = len(pts_raw)
     pts_filtered = filter_points(
         pts_raw, NO_CROP_BOUNDS, NO_CROP_BOUNDS, NO_CROP_BOUNDS,
@@ -89,7 +80,7 @@ def process_frame(depth, fx, fy, cx, cy, args, tracker, dt):
     return tracks, n_raw, n_filtered, pts_raw, pts_filtered
 
 
-def print_tracks(tracks, n_raw, n_filtered, frame_idx, true_xyz=None,
+def print_tracks(tracks, n_raw, n_filtered, frame_idx,
                   min_reliable_npts: int = 6, min_reliable_age: int = 3):
     """min_reliable_npts / min_reliable_age flag a track as likely sensor
     noise rather than a real obstacle: a thin cluster (few points) or a
@@ -132,22 +123,6 @@ def print_tracks(tracks, n_raw, n_filtered, frame_idx, true_xyz=None,
               f"  npts={npts:3d}  age={tr['seen']:3d}"
               f"  vel={np.linalg.norm(tr['vel']):.3f} m/s{flag}")
 
-    if true_xyz is not None:
-        if tracks:
-            # tracks' centroids may be (x,y) only (--xy_only); compare in
-            # whatever dimensionality the tracks actually have, so this
-            # never breaks with a (2,)-vs-(3,) shape mismatch.
-            dim = len(tracks[0][1]["centroid"])
-            true_cmp = true_xyz[:dim]
-            best = min(tracks, key=lambda t: np.linalg.norm(t[1]["centroid"] - true_cmp))
-            err = np.linalg.norm(best[1]["centroid"] - true_cmp)
-            print(f"  [synthetic check] true=({true_xyz[0]:+.3f},{true_xyz[1]:+.3f},"
-                  f"{true_xyz[2]:+.3f})  closest track error = {err:.3f} m"
-                  + ("  (xy-only comparison)" if dim < 3 else ""))
-        else:
-            print(f"  [synthetic check] true=({true_xyz[0]:+.3f},{true_xyz[1]:+.3f},"
-                  f"{true_xyz[2]:+.3f})  -- MISSED, no track detected")
-
 
 class LivePlot:
     """Live-updating scatter of the point cloud, in camera frame (origin =
@@ -163,13 +138,27 @@ class LivePlot:
 
     mode="3d"  -- single rotatable 3D scatter (original view).
     mode="2d"  -- single flat panel; see the `axes` param for which pair of
-                  camera axes is plotted."""
+                  camera axes is plotted.
+
+    Axis labels are CAMERA-frame letters (x=right, y=down, z=forward/depth),
+    NOT world-frame (CYLINDERS/corridor bounds use x=depth-down-the-corridor,
+    y=lateral -- the opposite of this file's x/y). Same letters, different
+    physical meanings; that mismatch is a real, repeated source of
+    confusion (see conversation) even when the underlying math was
+    correct, so keep it in mind when comparing a plotted (x,y,z) here
+    against a world-frame (x,y) elsewhere in this codebase. The vertical
+    axis in both plot modes is plotted as -y (camera-down negated), so
+    it's labelled "-Y (m)", not "Y (m)" -- the sign is real, not a typo."""
 
     def __init__(self, radius_limit: float | None, mode: str = "3d",
-                 axes: str = "xz", axis_limit: float = 3.0):
+                 axes: str = "topdown", axis_limit: float = 3.0):
+        # axis_limit is only the *fallback* used when radius_limit is None --
+        # callers should pass args.max_range so the view window actually
+        # covers everything --max_range let through the backprojection,
+        # instead of silently clipping anything beyond this default 3.0m.
         plt.ion()
         self.mode = mode
-        self.axes = axes  # only used when mode == "2d": "xz" or "xy"
+        self.axes = axes  # only used when mode == "2d": "topdown" or "frontal"
         self.axis_limit = radius_limit if radius_limit is not None else axis_limit
         if mode == "3d":
             self.fig = plt.figure(figsize=(7, 7))
@@ -179,86 +168,105 @@ class LivePlot:
         else:
             raise ValueError(f"unknown plot mode '{mode}', expected '3d' or '2d'")
 
-    def update(self, pts_raw, pts_filtered, tracks, frame_idx, true_xyz=None):
+    def update(self, pts_raw, pts_filtered, tracks, frame_idx):
         if self.mode == "3d":
-            self._update_3d(pts_raw, pts_filtered, tracks, frame_idx, true_xyz)
+            self._update_3d(pts_raw, pts_filtered, tracks, frame_idx)
         else:
-            self._update_2d(pts_raw, pts_filtered, tracks, frame_idx, true_xyz)
+            self._update_2d(pts_raw, pts_filtered, tracks, frame_idx)
 
-    def _update_3d(self, pts_raw, pts_filtered, tracks, frame_idx, true_xyz):
+    def _update_3d(self, pts_raw, pts_filtered, tracks, frame_idx):
+        # Point-cloud data is in camera/ROS convention: x=right, y=DOWN,
+        # z=forward/depth. matplotlib's 3D axes render their 3rd argument as
+        # the vertical/up axis on screen -- plotting data-z (forward) there
+        # made anything at a fixed depth look "up", and real vertical extent
+        # (data-y) come out along a horizontal-ish screen axis instead, so a
+        # flat, physically-horizontal structure rendered visibly tilted/
+        # rotated. Remap so screen-vertical = real up (-y), and the two
+        # screen-horizontal axes are right (x) and forward/depth (z) --
+        # matches the "topdown" 2d mode's convention, just with height added.
+        def _remap(pts):
+            return pts[:, 0], pts[:, 2], -pts[:, 1]
+
         ax = self.ax
         ax.cla()
 
         if len(pts_raw):
-            ax.scatter(pts_raw[:, 0], pts_raw[:, 1], pts_raw[:, 2],
-                       s=2, c="lightgray", alpha=0.35, label=f"raw ({len(pts_raw)})")
+            xs, ys, zs = _remap(pts_raw)
+            ax.scatter(xs, ys, zs, s=2, c="lightgray", alpha=0.35, label=f"raw ({len(pts_raw)})")
         if len(pts_filtered):
-            ax.scatter(pts_filtered[:, 0], pts_filtered[:, 1], pts_filtered[:, 2],
-                       s=8, c="tab:blue", label=f"filtered ({len(pts_filtered)})")
-
-        if true_xyz is not None:
-            ax.scatter([true_xyz[0]], [true_xyz[1]], [true_xyz[2]],
-                       s=140, marker="*", c="gold", edgecolors="black", label="ground truth", zorder=6)
+            xs, ys, zs = _remap(pts_filtered)
+            ax.scatter(xs, ys, zs, s=8, c="tab:blue", label=f"filtered ({len(pts_filtered)})")
 
         ax.scatter([0], [0], [0], s=60, c="black", marker="^")  # camera origin
 
         lim = self.axis_limit
         ax.set_xlim(-lim, lim)
-        ax.set_ylim(-lim, lim)
-        ax.set_zlim(-0.2, lim)
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
+        ax.set_ylim(-0.2, lim)   # forward/depth: camera can't see behind itself
+        ax.set_zlim(-lim, lim)  # up/down relative to the camera
+        ax.set_xlabel("Y (m)")
+        ax.set_ylabel("X (m)")
         ax.set_zlabel("Z (m)")
         ax.set_title(f"Frame {frame_idx}  |  tracks={len(tracks)}")
         ax.legend(loc="upper left", fontsize=8)
+        # Static 3D camera angle is a genuine tradeoff, not something with a
+        # single "correct" fixed value: matplotlib's default (elev=30,
+        # azim=-60) makes flat/level structure look like a tilted
+        # parallelogram (pure viewing-angle illusion, verified against a
+        # synthetic level grid). azim=-90 fixes that -- but at azim=-90 the
+        # camera looks almost straight down the depth axis, so near/far
+        # obstacles foreshorten together and depth becomes hard to read
+        # (verified: two known-different-depth pillar groups nearly
+        # overlapped at azim=-90). This is a middle ground, not a fix for
+        # either extreme -- for a geometrically UNAMBIGUOUS read of what's
+        # near vs far, use --plot_mode 2d --plot_axes topdown instead, which
+        # has no perspective ambiguity at all. Still click-drag rotatable in a
+        # real (non-Agg) window. ax.cla() above resets the view each frame,
+        # so this has to be set every call, not just once in __init__.
+        ax.view_init(elev=20, azim=-70)
         plt.pause(0.001)
 
-    def _update_2d(self, pts_raw, pts_filtered, tracks, frame_idx, true_xyz):
-        """axes="xz" (default, recommended): top-down / bird's-eye, X (right)
-        vs Z (forward/depth). Camera sits at the near edge since a camera
+    def _update_2d(self, pts_raw, pts_filtered, tracks, frame_idx):
+        """axes="topdown" (default, recommended): bird's-eye view, right vs
+        forward/depth. Camera sits at the near edge since a camera
         physically can't see behind itself -- the cloud only ever fans out
         ahead of it, never surrounding it.
 
-        axes="xy": front-on view, X (right) vs Y (down) -- depth is dropped,
-        so the camera marker sits in the MIDDLE with points on every side,
+        axes="frontal": front-on view, right vs up -- depth is dropped, so
+        the camera marker sits in the MIDDLE with points on every side,
         which looks like 360 deg coverage even though the sensor only sees
         a forward FOV cone. Two real points at different depths but similar
-        (x, y) will also overlap here. Useful only if you specifically want
-        to check lateral/vertical spread irrespective of distance -- for a
-        geometrically honest view, use axes="xz"."""
+        (right, up) will also overlap here. Useful only if you specifically
+        want to check lateral/vertical spread irrespective of distance --
+        for a geometrically honest view, use axes="topdown"."""
         ax = self.ax2d
         lim = self.axis_limit
 
-        if self.axes == "xz":
-            col_x, col_y = 0, 2
-            xlabel, ylabel = "X -- right (m)", "Z -- forward/depth (m)"
+        if self.axes == "topdown":
+            def _cols(pts):
+                return pts[:, 0], pts[:, 2]  # x (right), z (forward/depth), as-is
+            xlabel, ylabel = "Y (m)", "X (m)"
             xlim, ylim = (-lim, lim), (-0.2, lim)  # depth is forward-only
-            title_suffix = "top-down (X vs Z)"
-        elif self.axes == "xy":
-            col_x, col_y = 0, 1
-            xlabel, ylabel = "X -- right (m)", "Y -- down (m)"
+            title_suffix = "top-down"
+        elif self.axes == "frontal":
+            def _cols(pts):
+                return pts[:, 0], -pts[:, 1]  # x (right), -y (camera-y is down-positive, negate for up)
+            xlabel, ylabel = "Y (m)", "Z (m)"
             xlim, ylim = (-lim, lim), (-lim, lim)
-            title_suffix = "front-on (X vs Y)"
+            title_suffix = "front-on"
         else:
-            raise ValueError(f"unknown axes '{self.axes}', expected 'xz' or 'xy'")
+            raise ValueError(f"unknown axes '{self.axes}', expected 'topdown' or 'frontal'")
 
         ax.cla()
         if len(pts_raw):
-            ax.scatter(pts_raw[:, col_x], pts_raw[:, col_y],
-                       s=2, c="lightgray", alpha=0.35, label=f"raw ({len(pts_raw)})")
+            xs, ys = _cols(pts_raw)
+            ax.scatter(xs, ys, s=2, c="lightgray", alpha=0.35, label=f"raw ({len(pts_raw)})")
         if len(pts_filtered):
-            ax.scatter(pts_filtered[:, col_x], pts_filtered[:, col_y],
-                       s=8, c="tab:blue", label=f"filtered ({len(pts_filtered)})")
-        if true_xyz is not None:
-            ax.scatter([true_xyz[col_x]], [true_xyz[col_y]],
-                       s=140, marker="*", c="gold", edgecolors="black",
-                       label="ground truth", zorder=6)
+            xs, ys = _cols(pts_filtered)
+            ax.scatter(xs, ys, s=8, c="tab:blue", label=f"filtered ({len(pts_filtered)})")
         ax.scatter([0], [0], s=60, c="black", marker="^")  # camera origin
 
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
-        if self.axes == "xy":
-            ax.invert_yaxis()  # data Y is down-positive; flip so screen-up = real-up
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_aspect("equal", adjustable="box")
@@ -272,135 +280,6 @@ class LivePlot:
     def close(self):
         plt.ioff()
         plt.close(self.fig)
-
-
-# =============================================================================
-# Source: synthetic
-# =============================================================================
-
-def run_synthetic(args, tracker):
-    """One disc-shaped obstacle at a known distance in front of the camera,
-    optionally drifting sideways across frames to also exercise the
-    static/dynamic classifier. Background is a far plane (like an empty room)."""
-    W = H = 96
-    fx = fy = 24.0 * W / 20.955  # same intrinsics as the sim FPV camera, arbitrary otherwise
-    cx, cy = W / 2.0, H / 2.0
-    bg_depth = args.max_range * 0.9
-
-    plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes) if args.viz else None
-    prev_t = time.time()
-    for i in range(args.n_frames):
-        depth = np.full((H, W), bg_depth, dtype=np.float32)
-        # obstacle disc center drifts `synthetic_speed` px/frame to the right
-        u0 = W / 2 + args.synthetic_offset_px + i * args.synthetic_speed
-        v0 = H / 2.0
-        uu, vv = np.meshgrid(np.arange(W), np.arange(H))
-        mask = (uu - u0) ** 2 + (vv - v0) ** 2 <= args.synthetic_radius_px ** 2
-        depth[mask] = args.synthetic_dist
-
-        # ground truth: ray through the disc's center pixel * known distance
-        ray = np.array([(u0 - cx) / fx, (v0 - cy) / fy, 1.0])
-        ray /= np.linalg.norm(ray)
-        true_xyz = ray * args.synthetic_dist
-
-        now = time.time()
-        dt = now - prev_t if i > 0 else 1.0 / args.rate
-        prev_t = now
-        tracks, n_raw, n_filtered, pts_raw, pts_filtered = process_frame(
-            depth, fx, fy, cx, cy, args, tracker, dt)
-        print_tracks(tracks, n_raw, n_filtered, i, true_xyz=true_xyz)
-        if plot is not None:
-            plot.update(pts_raw, pts_filtered, tracks, i, true_xyz=true_xyz)
-        time.sleep(max(0.0, 1.0 / args.rate - (time.time() - now)))
-    if plot is not None:
-        plot.close()
-
-
-# =============================================================================
-# Source: zarr replay (real recorded depth frames, no live camera needed)
-# =============================================================================
-
-def run_zarr(args, tracker):
-    import zarr
-    z = zarr.open(args.zarr_path, mode="r")
-    episode_id = z["episode_id"][:]
-    idx = np.where(episode_id == args.episode)[0]
-    if len(idx) == 0:
-        print(f"[ERROR] no frames with episode_id == {args.episode} in {args.zarr_path}")
-        return
-    start, end = idx[0], idx[-1] + 1
-    print(f"[INFO] replaying episode {args.episode}: frames {start}:{end} "
-          f"({end - start} frames) from {args.zarr_path}")
-
-    from depth_obstacle_estimator import camera_intrinsics, FPV_WIDTH, FPV_HEIGHT, \
-        FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE
-    fx, fy, cx, cy = camera_intrinsics(FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH,
-                                        FPV_HORIZONTAL_APERTURE)
-
-    plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes) if args.viz else None
-    prev_t = time.time()
-    for i, frame_idx in enumerate(range(start, end, args.stride_frames)):
-        depth = z["depth"][frame_idx]
-        now = time.time()
-        dt = now - prev_t if i > 0 else 1.0 / args.rate
-        prev_t = now
-        tracks, n_raw, n_filtered, pts_raw, pts_filtered = process_frame(
-            depth, fx, fy, cx, cy, args, tracker, dt)
-        print_tracks(tracks, n_raw, n_filtered, frame_idx)
-        if plot is not None:
-            plot.update(pts_raw, pts_filtered, tracks, frame_idx)
-        time.sleep(max(0.0, 1.0 / args.rate - (time.time() - now)))
-    if plot is not None:
-        plot.close()
-
-
-# =============================================================================
-# Source: live RealSense (for when the camera is actually plugged in)
-# =============================================================================
-
-def run_realsense(args, tracker):
-    try:
-        import pyrealsense2 as rs
-    except ImportError:
-        print("[ERROR] pyrealsense2 not installed. Run: pip install pyrealsense2")
-        return
-
-    pipeline = rs.pipeline()
-    config = rs.config()
-    config.enable_stream(rs.stream.depth, args.rs_width, args.rs_height, rs.format.z16, args.rate_int)
-    profile = pipeline.start(config)
-    depth_sensor = profile.get_device().first_depth_sensor()
-    depth_scale = depth_sensor.get_depth_scale()
-    intr = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
-    print(f"[INFO] RealSense connected: {intr.width}x{intr.height}, "
-          f"fx={intr.fx:.1f} fy={intr.fy:.1f} cx={intr.ppx:.1f} cy={intr.ppy:.1f}, "
-          f"depth_scale={depth_scale}")
-
-    plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes) if args.viz else None
-    prev_t = time.time()
-    i = 0
-    try:
-        while True:
-            frames = pipeline.wait_for_frames()
-            depth_frame = frames.get_depth_frame()
-            if not depth_frame:
-                continue
-            depth = np.asanyarray(depth_frame.get_data()).astype(np.float32) * depth_scale
-            now = time.time()
-            dt = now - prev_t if i > 0 else 1.0 / args.rate
-            prev_t = now
-            tracks, n_raw, n_filtered, pts_raw, pts_filtered = process_frame(
-                depth, intr.fx, intr.fy, intr.ppx, intr.ppy, args, tracker, dt)
-            print_tracks(tracks, n_raw, n_filtered, i)
-            if plot is not None:
-                plot.update(pts_raw, pts_filtered, tracks, i)
-            i += 1
-    except KeyboardInterrupt:
-        pass
-    finally:
-        pipeline.stop()
-        if plot is not None:
-            plot.close()
 
 
 # =============================================================================
@@ -419,7 +298,7 @@ def run_ros2(args, tracker):
               "        source /opt/ros/humble/setup.bash")
         return
 
-    plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes) if args.viz else None
+    plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes, axis_limit=args.max_range) if args.viz else None
 
     class DepthObstacleNode(Node):
         """Caches the latest CameraInfo (for intrinsics) and runs the full
@@ -480,9 +359,110 @@ def run_ros2(args, tracker):
 
 
 # =============================================================================
+# Source: Isaac Sim (the drone's own FPV depth camera, live inside a running
+# IsaacLab episode -- same camera/physics/obstacle geometry
+# eval_crazieflie1.py --depth_obstacles uses, but held here at a fixed hover
+# setpoint instead of flown by a loaded policy, so this stays a
+# self-contained smoke test with no checkpoint required.
+# =============================================================================
+
+def run_isaac(args, tracker):
+    import importlib
+    os.environ["CRAZYFLIE_ENV_HEADLESS"] = "1"
+
+    cfg = importlib.import_module("config.avoiding-crazyflie")
+    cfg.USE_DEPTH = True  # must be set before crazyflie_env_cfg is first imported below
+
+    from isaac.scripts.crazyflie_env import Crazyflie, CrazyflieEnvCfg
+    from isaac.scripts.crazyflie_env_cfg import CEILING_HEIGHT  # real value, not a comment
+    from depth_obstacle_estimator import (
+        camera_intrinsics, camera_world_pose, quat_apply,
+        FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE,
+    )
+
+    fx, fy, cx, cy = camera_intrinsics(FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE)
+
+    env_cfg = CrazyflieEnvCfg(
+        num_envs=1,
+        device=args.isaac_device,
+        dt=args.isaac_dt,
+        dynamic_obstacles=args.isaac_dynamic_obstacles,
+    )
+    env = Crazyflie(env_cfg)
+    env.reset()
+
+    # fixed hover setpoint, held for the whole run -- not flown anywhere.
+    hover_xyz = np.array([args.isaac_hover_xy[0], args.isaac_hover_xy[1],
+                           args.isaac_altitude], dtype=np.float32)
+    step_dt = args.isaac_dt * getattr(env, "count", 100)
+
+    plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes, axis_limit=args.max_range) if args.viz else None
+    try:
+        for i in range(args.n_frames):
+            env.step(hover_xyz)
+
+            depth = env.get_depth()
+            root = env.robot.data.root_state_w[0].detach().cpu().numpy()
+            pos_body_w, quat_body_w = root[0:3], root[3:7]
+            pos_cam_w, quat_cam_w = camera_world_pose(pos_body_w, quat_body_w)
+
+            # Unlike the handheld-camera sources, we actually know this
+            # scene's geometry: floor at world z=0, ceiling at
+            # CEILING_HEIGHT (real value imported above -- NOT the stale
+            # "=1.0" comment in crazyflie_env_cfg.py, which is wrong since
+            # WALL_HEIGHT was bumped to 2.0). Crop both out (with a margin)
+            # before clustering, so a real floor/ceiling patch can't get
+            # DBSCAN'd into a fake "obstacle" track alongside the real
+            # cylinders.
+            world_crop = (pos_cam_w, quat_cam_w,
+                          args.isaac_surface_margin, CEILING_HEIGHT - args.isaac_surface_margin)
+            tracks, n_raw, n_filtered, pts_raw, pts_filtered = process_frame(
+                depth, fx, fy, cx, cy, args, tracker, step_dt, world_crop=world_crop)
+            print_tracks(tracks, n_raw, n_filtered, i)
+            # print_tracks' (x,y,z) is CAMERA frame (x=right, y=down,
+            # z=forward) -- do NOT compare that x against CYLINDERS' world
+            # x (distance down the corridor, ~2.0-2.5m here); those are
+            # different physical directions that just share the letter "x".
+            # A cylinder at world x=2 shows up as camera-frame z~=2, not x.
+            # This converts each track back to world frame (we have the
+            # real pose here, unlike the handheld-camera sources) so it's
+            # directly comparable to CYLINDERS without doing that mental
+            # translation by hand.
+            for tid, tr in tracks:
+                c = tr["centroid"]
+                if len(c) < 3:
+                    print(f"    world track {tid:>3}: unavailable -- --xy_only dropped "
+                          f"forward/depth (camera-z) before clustering, so there's no "
+                          f"z left to reconstruct a world position from.")
+                    continue
+                world_c = pos_cam_w + quat_apply(quat_cam_w, np.asarray(c, dtype=np.float32))
+                print(f"    world track {tid:>3}: (x,y,z)=({world_c[0]:+.3f},{world_c[1]:+.3f},"
+                      f"{world_c[2]:+.3f})m")
+            if len(pts_filtered):
+                # World-frame height of every detected point (post floor/
+                # ceiling crop above, so this should now mostly reflect
+                # real obstacles) -- settles floor (world z~=0) vs ceiling
+                # (world z~=CEILING_HEIGHT) vs real obstacle with a number,
+                # since eyeballing height off the oblique 3D plot isn't
+                # reliable (even the camera marker, truly at up=0, doesn't
+                # render at the "0" tick -- see conversation).
+                world_pts = pos_cam_w[None, :] + quat_apply(quat_cam_w, pts_filtered)
+                wz = world_pts[:, 2]
+                print(f"  [height check] world z: min={wz.min():.3f} max={wz.max():.3f} "
+                      f"mean={wz.mean():.3f}  (floor=0.0, ceiling={CEILING_HEIGHT:.2f}, "
+                      f"camera={pos_cam_w[2]:.3f})")
+            if plot is not None:
+                plot.update(pts_raw, pts_filtered, tracks, i)
+    finally:
+        if plot is not None:
+            plot.close()
+        env.close()
+
+
+# =============================================================================
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--source", choices=["synthetic", "zarr", "realsense", "ros2"], default="synthetic")
+    p.add_argument("--source", choices=["ros2", "isaac"], default="ros2")
 
     # shared pipeline params (same names/defaults as depth_obstacle_estimator.py's usage in eval_crazieflie1.py)
     p.add_argument("--max_range", type=float, default=5.0)
@@ -511,32 +491,14 @@ def main():
     p.add_argument("--plot_mode", choices=["3d", "2d"], default="3d",
                     help="'3d': single rotatable 3D scatter. '2d': single flat panel (see "
                          "--plot_axes for which pair). Only used with --viz.")
-    p.add_argument("--plot_axes", choices=["xz", "xy"], default="xz",
-                    help="Only used with --viz --plot_mode 2d. 'xz' (default, recommended): "
-                         "top-down/bird's-eye, X vs forward-depth Z -- camera sits at the near "
-                         "edge, geometrically honest since a camera can't see behind itself. "
-                         "'xy': front-on, X vs down-axis Y, depth dropped -- camera sits in the "
+    p.add_argument("--plot_axes", choices=["topdown", "frontal"], default="topdown",
+                    help="Only used with --viz --plot_mode 2d. 'topdown' (default, recommended): "
+                         "bird's-eye, right vs forward-depth -- camera sits at the near edge, "
+                         "geometrically honest since a camera can't see behind itself. "
+                         "'frontal': front-on, right vs up, depth dropped -- camera sits in the "
                          "middle with points on every side, which visually implies 360 deg "
                          "coverage the sensor doesn't actually have. Use only if you specifically "
                          "need lateral/vertical spread irrespective of distance.")
-
-    # synthetic source
-    p.add_argument("--n_frames", type=int, default=60)
-    p.add_argument("--synthetic_dist", type=float, default=1.5, help="true obstacle distance, metres")
-    p.add_argument("--synthetic_radius_px", type=float, default=8.0)
-    p.add_argument("--synthetic_offset_px", type=float, default=-15.0)
-    p.add_argument("--synthetic_speed", type=float, default=0.4, help="px/frame drift, to test dynamic classification")
-
-    # zarr source
-    p.add_argument("--zarr_path", type=str,
-                    default="isaac/dataset/avoiding_crazyflie/data/zarr/env_000.zarr")
-    p.add_argument("--episode", type=int, default=0)
-    p.add_argument("--stride_frames", type=int, default=1, help="skip frames to slow down replay")
-
-    # realsense source (direct pyrealsense2 connection)
-    p.add_argument("--rs_width", type=int, default=424)
-    p.add_argument("--rs_height", type=int, default=240)
-    p.add_argument("--rate_int", type=int, default=30, help="RealSense stream fps (integer)")
 
     # ros2 source (subscribes to an already-running publisher instead)
     p.add_argument("--ros2_depth_topic", type=str,
@@ -544,17 +506,31 @@ def main():
     p.add_argument("--ros2_camera_info_topic", type=str,
                     default="/camera/camera/aligned_depth_to_color/camera_info")
 
+    # isaac source (boots the real Crazyflie env)
+    p.add_argument("--n_frames", type=int, default=600, help="episode length, control steps")
+    p.add_argument("--isaac_device", type=str, default="cuda:0")
+    p.add_argument("--isaac_dt", type=float, default=0.005, help="sim physics dt (s)")
+    p.add_argument("--isaac_hover_xy", type=float, nargs=2, default=[0.0, 0.0], metavar=("X", "Y"),
+                    help="fixed (x, y) hover setpoint, world frame -- drone holds this position "
+                         "for the whole run rather than flying anywhere. Default (0,0) is the "
+                         "spawn point, facing the cylinder corridor along +x.")
+    p.add_argument("--isaac_altitude", type=float, default=0.5, help="fixed hover altitude (world z) in metres")
+    p.add_argument("--isaac_dynamic_obstacles", action="store_true", default=False,
+                    help="move all cylinders sinusoidally while hovering, instead of a static corridor "
+                         "-- exercises the static/dynamic classifier without the drone itself moving")
+    p.add_argument("--isaac_surface_margin", type=float, default=0.1,
+                    help="metres of world-z clearance cropped off both the floor (z=0) and the "
+                         "real ceiling (CEILING_HEIGHT, imported from crazyflie_env_cfg.py -- NOT "
+                         "a hardcoded guess) before clustering, so real floor/ceiling patches "
+                         "aren't DBSCAN'd into fake 'obstacle' tracks alongside the real cylinders.")
+
     args = p.parse_args()
     tracker = ObstacleTracker()
 
-    if args.source == "synthetic":
-        run_synthetic(args, tracker)
-    elif args.source == "zarr":
-        run_zarr(args, tracker)
-    elif args.source == "realsense":
-        run_realsense(args, tracker)
-    elif args.source == "ros2":
+    if args.source == "ros2":
         run_ros2(args, tracker)
+    elif args.source == "isaac":
+        run_isaac(args, tracker)
 
 
 if __name__ == "__main__":
