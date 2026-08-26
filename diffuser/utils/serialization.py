@@ -58,13 +58,21 @@ def load_diffusion(*loadpath, epoch='latest', device='cuda:0', seed=None):
 
     trainer_config._dict['results_folder'] = os.path.join(*loadpath)
 
-    dataset = dataset_config()
+    if epoch == 'latest':
+        epoch = get_latest_epoch(loadpath)
+
+    # If this dataset class supports a stats-only fallback (currently CrazyflieImageDataset),
+    # point it at the checkpoint we're about to load: it embeds action_min/action_max (see
+    # Trainer.save/save_best), so eval can rebuild the normalizer without needing the raw
+    # Zarr dataset on this machine.
+    stats_path = os.path.join(*loadpath, f'state_{epoch}.pt')
+    if os.path.isfile(stats_path):
+        dataset = dataset_config(stats_path=stats_path)
+    else:
+        dataset = dataset_config()
     model = model_config().to(device)
     diffusion = diffusion_config(model).to(device)
     trainer = trainer_config(diffusion_model=diffusion, dataset=dataset)
-
-    if epoch == 'latest':
-        epoch = get_latest_epoch(loadpath)
 
     # print(f'\n[ utils/serialization ] Loading model epoch: {epoch}\n')
 

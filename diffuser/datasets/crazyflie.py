@@ -59,6 +59,12 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
                                      # altitude delta, dyaw=wrapped heading change; needs
                                      # quaternion in states, e.g. data collected via
                                      # quadcopter_px4.py -- see data_subdir="data_px4")
+        stats_path=None,            # path to the state_*.pt checkpoint, which embeds
+                                     # action_min/action_max (see Trainer.save/save_best).
+                                     # Used as a fallback ONLY when the Zarr data_dir isn't
+                                     # found, so eval can run on a machine without the raw
+                                     # dataset. Also accepts a legacy normalizer_stats.npz
+                                     # sidecar for runs trained before stats were embedded.
     ):
         super().__init__()
         self.env = env
@@ -87,6 +93,35 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         # --- Find Zarr stores ---
         data_dir = project_path("isaac", "dataset", "avoiding_crazyflie", data_subdir, zarr_subdir)
         if not os.path.isdir(data_dir):
+            # No raw dataset on this machine (e.g. eval-only box): rebuild just the action
+            # normalizer, skip everything else. Prefer stats embedded in the checkpoint
+            # itself; fall back to a legacy normalizer_stats.npz sidecar for runs trained
+            # before stats were embedded (see Trainer.save/save_best).
+            mins = maxs = None
+            source = None
+            if stats_path is not None and os.path.isfile(stats_path):
+                ckpt = torch.load(stats_path, map_location="cpu")
+                if "action_min" in ckpt and "action_max" in ckpt:
+                    mins, maxs = np.asarray(ckpt["action_min"]), np.asarray(ckpt["action_max"])
+                    source = stats_path
+            if mins is None and stats_path is not None:
+                legacy_path = os.path.join(os.path.dirname(stats_path), "normalizer_stats.npz")
+                if os.path.isfile(legacy_path):
+                    legacy = np.load(legacy_path)
+                    mins, maxs = legacy["mins"], legacy["maxs"]
+                    source = legacy_path
+
+            if mins is not None:
+                X = np.stack([mins, maxs], axis=0).astype(np.float32)
+                self.action_normalizer = LimitsNormalizer(X)
+                self.action_dim = int(mins.shape[0])
+                self.observation_dim = 0
+                self.goal_dim = 0
+                self.groups = []
+                self.episodes = []
+                self.indices = []
+                print(f"[CrazyflieImageDataset] Zarr folder not found; loaded normalizer stats from: {source}")
+                return
             raise FileNotFoundError(f"Zarr folder not found: {data_dir}")
 
         zarr_paths = sorted(glob.glob(os.path.join(data_dir, "env_*.zarr")))

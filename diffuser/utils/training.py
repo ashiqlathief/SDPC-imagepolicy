@@ -70,7 +70,13 @@ class Trainer(object):
 
         self.dataset = dataset
         self.train_test_split = train_test_split
-        if train_test_split == 1:
+        if len(self.dataset) == 0:
+            # Eval-only dataset (e.g. CrazyflieImageDataset's stats-only fallback when the
+            # raw Zarr data isn't on this machine): nothing to train on, and eval only needs
+            # trainer.load() + dataset.action_normalizer, so skip building dataloaders.
+            self.train_dataloader = None
+            self.test_dataloader = None
+        elif train_test_split == 1:
             self.train_dataloader = cycle(torch.utils.data.DataLoader(
                 self.dataset, batch_size=train_batch_size, num_workers=2, shuffle=True, pin_memory=True
             ))
@@ -221,6 +227,12 @@ class Trainer(object):
             'model': self.model.state_dict(),
             'ema': self.ema_model.state_dict()
         }
+        normalizer = getattr(self.dataset, 'action_normalizer', None)
+        if normalizer is not None:
+            # Lets eval rebuild the normalizer from the checkpoint alone -- no need to
+            # re-open the raw dataset (e.g. Zarr) on an eval-only machine.
+            data['action_min'] = torch.as_tensor(normalizer.mins)
+            data['action_max'] = torch.as_tensor(normalizer.maxs)
         savepath = os.path.join(self.logdir, f'state_{epoch}.pt')
         torch.save(data, savepath)
         # print(f'Saved model to {savepath}', flush=True)
@@ -235,6 +247,10 @@ class Trainer(object):
             'model': self.model.state_dict(),
             'ema': self.ema_model.state_dict()
         }
+        normalizer = getattr(self.dataset, 'action_normalizer', None)
+        if normalizer is not None:
+            data['action_min'] = torch.as_tensor(normalizer.mins)
+            data['action_max'] = torch.as_tensor(normalizer.maxs)
         savepath = os.path.join(self.logdir, f'state_best.pt')
         torch.save(data, savepath)
         # print(f'Saved best model to {savepath}', flush=True)

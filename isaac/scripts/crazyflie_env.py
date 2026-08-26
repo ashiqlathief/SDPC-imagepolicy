@@ -10,7 +10,7 @@ _app_args, _ = _parser.parse_known_args()
 # Headless by default (every existing caller relies on this); set
 # CRAZYFLIE_ENV_HEADLESS=0 before importing this module to pop up the actual
 # Isaac Sim GUI instead -- see --source isaac in depth_camera_live_test.py.
-_app_args.headless = os.environ.get("CRAZYFLIE_ENV_HEADLESS", "1") != "0"
+_app_args.headless = os.environ.get("CRAZYFLIE_ENV_HEADLESS", "0") != "0"
 _app_args.enable_cameras = True
 app_launcher = AppLauncher(_app_args)
 simulation_app = app_launcher.app
