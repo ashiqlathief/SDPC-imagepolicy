@@ -62,10 +62,10 @@ projection_variants = [
   'sdpc-t',
   'sdpc-t-tightened',
   'diffuser',
-  'gradient',
-  'gradient-tightened',
-  'post_processing',
-  'post_processing-tightened',
+#   'gradient',
+#   'gradient-tightened',
+#   'post_processing',
+#   'post_processing-tightened',
 ]
 
 def variant_cfg(name: str):
@@ -682,11 +682,12 @@ def project_action_candidates_with_positions(projector, pos0, a_candidates_real,
 
 
 def main():
+    run_start_time = time.time()   # whole-run clock -- printed at the end, see env.close() below
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_dir", type=str, required=True)
     parser.add_argument("--seeds", type=int, nargs="+", default=[7,8])
     parser.add_argument("--max_steps", type=int, default=700)
-    parser.add_argument("--action_scale", type=float, default=5.0)
+    parser.add_argument("--action_scale", type=float, default=20.0)
     parser.add_argument("--dynamic_obstacles", type=str, nargs="*", default=None, metavar="IDX:AXIS",
                         help="Enable sinusoidal cylinder movement. Omit this flag entirely to disable. "
                              "Pass with no values to move ALL cylinders laterally (axis 'y'). "
@@ -726,7 +727,7 @@ def main():
                              "Independent of the loaded model's own use_depth -- the model can "
                              "still be an RGB-only checkpoint; this only changes what the "
                              "*projector* sees, not what the policy sees.")
-    parser.add_argument("--depth_obstacle_radius", type=float, default=0.01,
+    parser.add_argument("--depth_obstacle_radius", type=float, default=0.03,
                         help="Keep-out radius (m) around each detected surface point, on top "
                              "of drone_radius (--depth_obstacles only).")
     parser.add_argument("--depth_obstacle_max_range", type=float, default=4.0,
@@ -1353,6 +1354,8 @@ def main():
                 print(f"[INFO] Video saved -> {video_paths[cam_name]}")
 
             episode_wall_time_sec = time.time() - episode_start_time
+            print(f"[INFO] Episode '{variant_name}' (seed {seedmodel}) took "
+                  f"{episode_wall_time_sec / 60.0:.2f} minutes ({episode_wall_time_sec:.1f}s)")
 
             success = bool(info["success"][0])
             fell    = bool(info["fell"][0])
@@ -1383,6 +1386,7 @@ def main():
                 fell       = fell,
                 episode    = ep,
                 episode_wall_time_sec = float(episode_wall_time_sec),
+                episode_wall_time_min = float(episode_wall_time_sec) / 60.0,
                 boxes       = np.array(BOXES),           # (N, 2) box centers
                 cylinders   = np.array(CYLINDERS),       # (N, 2) cylinder centers
                 halfspaces  = np.array([[hs[0], hs[1]] for hs in active_halfspaces], dtype=object),
@@ -1624,6 +1628,10 @@ def main():
 
             env.reset()
         logger.save()
+
+    total_wall_time_sec = time.time() - run_start_time
+    print(f"[INFO] Total eval run time: {total_wall_time_sec / 60.0:.2f} minutes "
+          f"({total_wall_time_sec:.1f}s)")
 
     env.close()
     os._exit(0)

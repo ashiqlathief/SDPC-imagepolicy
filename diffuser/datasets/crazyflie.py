@@ -8,11 +8,6 @@ import zarr
 
 from diffuser.utils.path import project_path
 from .normalization import LimitsNormalizer
-
-# DEPTH_NEAR/DEPTH_FAR default from the single source of truth in
-# config/avoiding-crazyflie.py (importlib since that filename has a hyphen),
-# so the clip range used here matches what quadcopter.py clamps non-finite
-# depth pixels to at collection time.
 _scene_cfg_module = importlib.import_module("config.avoiding-crazyflie")
 _DEFAULT_DEPTH_NEAR = _scene_cfg_module.DEPTH_NEAR
 _DEFAULT_DEPTH_FAR = _scene_cfg_module.DEPTH_FAR
