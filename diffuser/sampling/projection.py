@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from scipy.optimize import minimize, Bounds
 
-# uses SLSQP optimization
+_POS_BOUND = 7.0
 
 
 def _build_slsqp_constraints(C, d, A, b, obstacle_specs, transition_dim, horizon):
@@ -45,7 +45,7 @@ def _solve_slsqp_candidate(x0, r_i, Q, C, d, A, b, obstacle_specs, transition_di
                     constraints=constraints,
                     method='SLSQP',
                     jac=jac_cost_fun,
-                    bounds=Bounds(-5 * np.ones_like(x0), 5 * np.ones_like(x0)),
+                    bounds=Bounds(-_POS_BOUND * np.ones_like(x0), _POS_BOUND * np.ones_like(x0)),
                     tol=1e-6,
                     options={'maxiter': 1000, 'disp': False})
     return res.x
@@ -241,7 +241,7 @@ class Projector:
                                 constraints=constraints,
                                 method='SLSQP',
                                 jac=jac_cost_fun,
-                                bounds=Bounds(-5 * np.ones_like(trajectory_np_double[i]), 5 * np.ones_like(trajectory_np_double[i])),
+                                bounds=Bounds(-_POS_BOUND * np.ones_like(trajectory_np_double[i]), _POS_BOUND * np.ones_like(trajectory_np_double[i])),
                                 tol=1e-6,
                                 options={'maxiter': 1000, 'disp': False})
                 sol_np[i] = res.x # Save the optimized trajectory vector.

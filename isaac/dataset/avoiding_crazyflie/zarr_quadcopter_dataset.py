@@ -19,17 +19,17 @@ parser.add_argument("--max-episodes", type=int, default=50,
 args = parser.parse_args()
 
 # ── corridor / scene constants (kept in sync with plotall.py) ─────────────
-CORRIDOR_END  = 4.1      # x position of the end wall / gate
-WALL_HEIGHT   = 1.0      # floor=0, ceiling=1 m
-X_LIM_XY     = (-0.2, 4.15)
-Y_LIM_XY     = (-1.05,  1.05)
-X_LIM_XZ     = (-0.2, 4.15)
+CORRIDOR_END  = 11   # x position of the end wall / gate
+WALL_HEIGHT   = 2.0      # floor=0, ceiling=1 m
+X_LIM_XY     = (-5.5, 5.5)
+Y_LIM_XY     = (-2.5,  2.5)
+X_LIM_XZ     = (-5.5, 5.5)
 Z_LIM_XZ     = (-0.05, 1.1)
 
 # subsamples every plot's timesteps (dt_collect=0.005s -> effective
 # STRIDE*0.005s spacing) so ~1734-step episodes don't turn into illegible
 # ink-blots once ~188 of them are overlaid on one axes.
-STRIDE = 10
+STRIDE = 1
 
 WALL_KW = dict(linewidth=1.5, edgecolor="#555555", facecolor="#cccccc",
                alpha=0.50, zorder=1)
@@ -49,9 +49,9 @@ CYLINDERS = [
 # ── scene geometry helpers (mirrors plotall.py) ───────────────────────────
 def add_corridor_xy(ax):
     """Draw top wall, bottom wall and end wall on an XY axes."""
-    ax.add_patch(Rectangle((0.0,  1.00), CORRIDOR_END, 0.10, **WALL_KW))
-    ax.add_patch(Rectangle((0.0, -1.10), CORRIDOR_END, 0.10, **WALL_KW))
-    ax.add_patch(Rectangle((CORRIDOR_END, -1.10), 0.10, 2.20, **WALL_KW))
+    ax.add_patch(Rectangle((-6.0,  2.5), CORRIDOR_END, 0.10, **WALL_KW))
+    ax.add_patch(Rectangle((-6.0, -2.5), CORRIDOR_END, 0.10, **WALL_KW))
+    ax.add_patch(Rectangle((5.0, -2.5), 0.10, 5.0, **WALL_KW))
 
 
 def add_corridor_xz(ax):
@@ -102,7 +102,7 @@ def add_obstacles(ax, boxes, cylinders, tighten=0.0,
 
 
 # ── load zarr dataset ─────────────────────────────────────────────────────
-path = sim_framework_path("isaac", "dataset", "avoiding_crazyflie", "data1", "zarr", "env_000.zarr")
+path = sim_framework_path("isaac", "dataset", "avoiding_crazyflie", "data", "zarr", "env_000.zarr")
 g = zarr.open_group(path, mode="r")
 
 print("arrays:", list(g.array_keys()))
@@ -123,22 +123,22 @@ print("min/mean/max:", lengths.min(), lengths.mean(), lengths.max())
 print("num episodes:", int((term == 1).sum()))
 print("first terminal indices:", np.where(term == 1)[0][:10])
 
-# ── exclude known data-collection artifacts ───────────────────────────────
-# episode 66 reaches the goal on schedule (~1735 steps, same as every other
-# episode) but its terminal flag doesn't fire until step 2452 -- it drifts
-# near the far corridor wall for ~700 extra steps instead of ending cleanly.
-# That's a collection artifact, not a genuine maneuver variant, so it's
-# excluded from every plot below.
-EXCLUDED_EPISODES = [66]
-keep = np.ones(len(starts), dtype=bool)
-keep[EXCLUDED_EPISODES] = False
-starts, ends, lengths = starts[keep], ends[keep], lengths[keep]
-print(f"[INFO] excluded episodes {EXCLUDED_EPISODES} -> {len(starts)} episodes remain")
+# # ── exclude known data-collection artifacts ───────────────────────────────
+# # episode 66 reaches the goal on schedule (~1735 steps, same as every other
+# # episode) but its terminal flag doesn't fire until step 2452 -- it drifts
+# # near the far corridor wall for ~700 extra steps instead of ending cleanly.
+# # That's a collection artifact, not a genuine maneuver variant, so it's
+# # excluded from every plot below.
+# EXCLUDED_EPISODES = [66]
+# keep = np.ones(len(starts), dtype=bool)
+# keep[EXCLUDED_EPISODES] = False
+# starts, ends, lengths = starts[keep], ends[keep], lengths[keep]
+# print(f"[INFO] excluded episodes {EXCLUDED_EPISODES} -> {len(starts)} episodes remain")
 
-# ── cap the number of episodes overlaid in each plot (CLI: --max-episodes) ─
-if args.max_episodes is not None and args.max_episodes < len(starts):
-    starts, ends, lengths = starts[:args.max_episodes], ends[:args.max_episodes], lengths[:args.max_episodes]
-    print(f"[INFO] limiting plots to first {args.max_episodes} episodes")
+# # ── cap the number of episodes overlaid in each plot (CLI: --max-episodes) ─
+# if args.max_episodes is not None and args.max_episodes < len(starts):
+#     starts, ends, lengths = starts[:args.max_episodes], ends[:args.max_episodes], lengths[:args.max_episodes]
+#     print(f"[INFO] limiting plots to first {args.max_episodes} episodes")
 
 
 
@@ -176,30 +176,6 @@ def plot_episode_frames(zarr_path, episode_idx=0, num_frames=12):
         frame = g["rgb"][ep_start + i].astype(np.float32) / 255.0
         print(f"  t={i:03d}: mean={frame.mean():.4f}  min={frame.min():.4f}  max={frame.max():.4f}")
 
-# run it
-# plot_episode_frames(sim_framework_path("isaac", "dataset", "avoiding_crazyflie", "data", "zarr", "env_000.zarr"), episode_idx=0, num_frames=30)
-
-
-fig_xz, ax_xz_solo = plt.subplots(figsize=(10, 4))
-cmap = plt.cm.viridis
-n_ep = len(starts)
-for i, (s, e) in enumerate(zip(starts, ends)):
-    xz = pos[s:e+1:STRIDE, ::2]   # columns 0 (x) and 2 (z)
-    color = cmap(i / max(n_ep - 1, 1))
-    ax_xz_solo.scatter(xz[:, 0], xz[:, 1], color=color, s=10, alpha=0.65, linewidths=0)
-add_corridor_xz(ax_xz_solo)
-# add_goal_line(ax_xz_solo, plane="xz")
-ax_xz_solo.set_xlabel("X Position (m)", fontsize=14, fontweight="bold")
-ax_xz_solo.set_ylabel("Z Position (m)", fontsize=14, fontweight="bold")
-ax_xz_solo.set_xlim(*X_LIM_XZ)
-ax_xz_solo.set_ylim(*Z_LIM_XZ)
-ax_xz_solo.grid(True, alpha=0.25)
-fig_xz.tight_layout()
-z_path = "plots/datasetxz.pdf"
-fig_xz.savefig(z_path, dpi=150, bbox_inches="tight")
-fig_xz.savefig("plots/datasetxz.png", dpi=150, bbox_inches="tight")
-plt.show()
-
 fig, ax_xy = plt.subplots(figsize=(7, 5))
 cmap = plt.cm.viridis
 n_ep = len(starts)
@@ -221,17 +197,17 @@ add_corridor_xy(ax_xy)
 # --- obstacles (uncomment when obstacles are active at collection time) ---
 # add_obstacles(ax_xy, BOXES, CYLINDERS)
 
-# --- labels & limits ---
-ax_xy.set_xlabel("X Position (m)", fontsize=14, fontweight="bold")
-ax_xy.set_ylabel("Y Position (m)", fontsize=14, fontweight="bold")
-ax_xy.set_xlim(*X_LIM_XY);  ax_xy.set_ylim(*Y_LIM_XY)
-ax_xy.set_aspect("equal", adjustable="box")
-ax_xy.legend(fontsize=8, loc="upper left")
-ax_xy.grid(True, alpha=0.25)
-fig.tight_layout()
-fig.savefig("plots/dataset.pdf", dpi=150, bbox_inches="tight")
-fig.savefig("plots/dataset.png", dpi=150, bbox_inches="tight")
-plt.show()
+# # --- labels & limits ---
+# ax_xy.set_xlabel("X Position (m)", fontsize=14, fontweight="bold")
+# ax_xy.set_ylabel("Y Position (m)", fontsize=14, fontweight="bold")
+# ax_xy.set_xlim(*X_LIM_XY);  ax_xy.set_ylim(*Y_LIM_XY)
+# ax_xy.set_aspect("equal", adjustable="box")
+# ax_xy.legend(fontsize=8, loc="upper left")
+# ax_xy.grid(True, alpha=0.25)
+# fig.tight_layout()
+# fig.savefig("plots/dataset.pdf", dpi=150, bbox_inches="tight")
+# fig.savefig("plots/dataset.png", dpi=150, bbox_inches="tight")
+# plt.show()
 
 
 # 3D trajectory view (x, y, z)
@@ -247,7 +223,7 @@ for i, (s, e) in enumerate(zip(starts, ends)):
                  color=color, s=10, alpha=0.75, linewidths=0)
 
 # corridor floor outline (z=0 rectangle)
-cx = [0, CORRIDOR_END, CORRIDOR_END, 0, 0]
+cx = [-5.5, CORRIDOR_END, CORRIDOR_END, 0, 0]
 cy = [-1.0, -1.0, 1.0, 1.0, -1.0]
 cz = [0, 0, 0, 0, 0]
 ax3d.plot(cx, cy, cz, color="#555555", linewidth=1.0, linestyle="--", alpha=0.4)
@@ -288,11 +264,7 @@ fig3d.savefig("plots/dataset3d.pdf", dpi=150)
 fig3d.savefig("plots/dataset3d.png", dpi=150)
 plt.show()
 
-# ── per-axis action (delta-position) profile, all episodes overlaid ──────
-# Uses viridis (full hue range) rather than the single-hue Blues used in
-# the spatial plots above -- with ~188 overlapping lines, Blues shades
-# become too similar to tell individual episodes apart; viridis's wider
-# perceptual range keeps them distinguishable. STRIDE is set at the top.
+
 fig_vel, axes_vel = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 cmap = plt.cm.viridis
 n_ep = len(starts)
@@ -314,31 +286,4 @@ axes_vel[-1].set_xlabel("Timestep", fontsize=14, fontweight="bold")
 fig_vel.tight_layout()
 fig_vel.savefig("plots/dataset_velocity.pdf", dpi=150, bbox_inches="tight")
 fig_vel.savefig("plots/dataset_velocity.png", dpi=150, bbox_inches="tight")
-plt.show()
-
-# ── altitude (z) over time, all episodes overlaid ─────────────────────────
-fig_z, ax_z = plt.subplots(figsize=(10, 5))
-for i, (s, e) in enumerate(zip(starts, ends)):
-    z = pos[s:e + 1, 2][::STRIDE]
-    t = np.arange(len(z)) * STRIDE
-    color = cmap(i / max(n_ep - 1, 1))
-    ax_z.scatter(t, z, color=color, s=10, alpha=0.5, linewidths=0)
-
-ax_z.scatter([0] * n_ep, [pos[s, 2] for s in starts],
-             s=8, color="#2ecc71", zorder=5, label="Start")
-ax_z.scatter([ends[i] - starts[i] for i in range(n_ep)],
-             [pos[e, 2] for e in ends],
-             s=8, color="#e74c3c", zorder=5, label="End")
-ax_z.axhline(0.0, color="#555555", linewidth=1.2, linestyle="--", alpha=0.55,
-             label="Floor / ceiling")
-ax_z.axhline(WALL_HEIGHT, color="#555555", linewidth=1.2, linestyle="--", alpha=0.55)
-ax_z.set_xlabel("Timestep", fontsize=14, fontweight="bold")
-ax_z.set_ylabel("Z Position (m)", fontsize=14, fontweight="bold")
-ax_z.set_ylim(-0.05, 1.05)
-ax_z.grid(True, alpha=0.25)
-# ax_z.legend(fontsize=8, loc="upper left")
-# ax_z.set_title("Altitude over time across all episodes")
-fig_z.tight_layout()
-fig_z.savefig("plots/dataset_z_time.pdf", dpi=150, bbox_inches="tight")
-fig_z.savefig("plots/dataset_z_time.png", dpi=150, bbox_inches="tight")
 plt.show()

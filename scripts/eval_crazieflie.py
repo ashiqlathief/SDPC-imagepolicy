@@ -22,8 +22,6 @@ from metrics_logger import MetricsLogger
 cfg = importlib.import_module("config.avoiding-crazyflie")
 BOXES = cfg.BOXES
 CYLINDERS = cfg.CYLINDERS
-SPHERES = getattr(cfg, 'SPHERES', [])
-SPHERE_RADIUS = getattr(cfg, 'SPHERE_RADIUS', 0.10)
 corridor_halfspaces = cfg.CORRIDOR_HALFSPACES
 DEPTH_NEAR = cfg.DEPTH_NEAR
 DEPTH_FAR = cfg.DEPTH_FAR
@@ -384,11 +382,11 @@ def integrate_candidates_xyz(pos0_xyz, a_candidates_real):
     traj_xyz[:, 1:, :] = pos0_xyz[:3][None, None, :] + np.cumsum(a_candidates_real[:, :, :3], axis=1)
     return traj_xyz
 
-def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None,
+def build_obstacle_constraint_list(boxes, cylinders, x_bounds=None,
                                     y_bounds=None, z_bounds=None,
                                     corridor_halfspaces=None, z_halfspaces=None, tighten=0.0,
                                     cyl_extra_radius=0.0, drone_radius=0.0,
-                                    sphere_radius=0.0, dynamic_cylinder_predictions=None):
+                                    dynamic_cylinder_predictions=None):
     """
     dynamic_cylinder_predictions: optional {cylinder_index: [(x,y), ...]} — one
     predicted (x,y) per horizon step (in order), from env.predict_cylinder_positions().
@@ -430,14 +428,6 @@ def build_obstacle_constraint_list(boxes, cylinders, spheres=None, x_bounds=None
         else:
             center = [float(x), float(y)]
             constraint_list.append(("sphere_outside", [0, 1], center, radius))
-
-    # 3D sphere constraints (floating obstacles)
-    if spheres:
-        _sr = float(sphere_radius)
-        for (x, y, z) in spheres:
-            constraint_list.append(("sphere_outside", [0, 1, 2],
-                                     [float(x), float(y), float(z)],
-                                     _sr + _dr + float(tighten)))
 
     # ---------------- halfspaces in XY ----------------
     if corridor_halfspaces:
@@ -517,9 +507,9 @@ def verify_projection(pos0, a_candidates_proj_real, which,
         print(f"{prefix} OK — all bounds satisfied in projected traj")
 
 
-def build_position_projector(horizon_H, gradient, device, boxes, cylinders, spheres=None,
+def build_position_projector(horizon_H, gradient, device, boxes, cylinders,
                              normalizer=None, tighten=0.0, dt=0.1, use_dynamics=True,
-                             obs_amplitude=0.0, drone_radius=0.0, sphere_radius=0.0,
+                             obs_amplitude=0.0, drone_radius=0.0,
                              active_halfspaces=None, dynamic_cylinder_predictions=None):
     # We project POSITIONS, so we need horizon = H+1
     Hp1 = horizon_H + 1
@@ -531,7 +521,6 @@ def build_position_projector(horizon_H, gradient, device, boxes, cylinders, sphe
     constraint_list = build_obstacle_constraint_list(
         boxes=boxes,
         cylinders=cylinders,
-        spheres=spheres,
         x_bounds=x_bounds,
         y_bounds=y_bounds,
         z_bounds=z_bounds,
@@ -540,7 +529,6 @@ def build_position_projector(horizon_H, gradient, device, boxes, cylinders, sphe
         tighten=tighten,
         cyl_extra_radius=obs_amplitude,
         drone_radius=drone_radius,
-        sphere_radius=sphere_radius,
         dynamic_cylinder_predictions=dynamic_cylinder_predictions,
     )
 
@@ -606,9 +594,6 @@ def main():
                              "Pass with no values to move ALL cylinders laterally (axis 'y'). "
                              "Or give 'idx:axis' tokens (axis is 'x', 'y', or 'xy'; ':axis' optional, "
                              "defaults to 'y'), e.g. --dynamic_obstacles 0:y 2:x 4:xy")
-    parser.add_argument("--floating_spheres", action="store_true", default=False,
-                        help="Enable floating 3D sphere obstacles (planet mode). "
-                             "Spheres move with independent x/y/z sinusoidal motion.")
     parser.add_argument("--dt", type=float, default=None)
     parser.add_argument("--num_candidates", type=int, default=4,
                         help="Override K (number of sampled candidates) for variants that select among multiple candidates")
@@ -639,8 +624,6 @@ def main():
     drone_radius   = 0.08
     obs_amplitude  = 0.35
     obs_frequency  = 0.45
-    sphere_amplitude = 0.20
-    sphere_frequency = 0.20
 
     # ── active halfspaces: from config only when --use_halfspaces is set ─────────
     active_halfspaces = corridor_halfspaces if args.use_halfspaces else []
@@ -751,9 +734,6 @@ def main():
                 obs_frequency=obs_frequency,
                 dynamic_cyl_indices=args.dynamic_cyl_indices,
                 obs_axes=args.obs_axes,
-                floating_spheres=args.floating_spheres,
-                sphere_amplitude=sphere_amplitude,
-                sphere_frequency=sphere_frequency,
                 dt=eval_dt,
                 drone_radius=drone_radius,
             )
@@ -836,16 +816,13 @@ def main():
                 proj_dt = 0.1
                 # All cylinders (static and dynamic) use the same base radius.
                 # Dynamic ones get their actual positions via --dynamic_obstacles (see below).
-                _init_spheres = SPHERES if args.floating_spheres else None
                 _proj_cyls    = CYLINDERS
                 pos_projector = build_position_projector(
                     horizon_H=horizon, gradient=gradient, device=device,
                     boxes=BOXES, cylinders=_proj_cyls,
-                    spheres=_init_spheres,
                     normalizer=None, tighten=vcfg["tighten"], dt=proj_dt,
                     use_dynamics=vcfg.get("use_dynamics", True),
                     drone_radius=drone_radius,
-                    sphere_radius=SPHERE_RADIUS if args.floating_spheres else 0.0,
                     active_halfspaces=active_halfspaces,
                 )
                 if vcfg["projection_mode"] == "sdpc":
@@ -961,12 +938,11 @@ def main():
                 # get_cylinder_positions() returns the same rest positions every step, so
                 # rebuilding the projector (full constraint-matrix reconstruction) would be
                 # a no-op — skip it and keep reusing the projector built once above.
-                _need_rebuild = (args.dynamic_obstacles_enabled or args.floating_spheres)
+                _need_rebuild = args.dynamic_obstacles_enabled
                 if _need_rebuild and vcfg["use_projection"]:
                     # get_cylinder_positions() returns current positions for ALL cylinders
                     # (static ones at rest, dynamic ones at actual current position)
                     cyl_now = env.get_cylinder_positions()
-                    sph_now = env.get_sphere_positions() if args.floating_spheres else None
                     # Predict each dynamic cylinder's exact future (x,y) at every planned
                     # horizon step (t = now + k*proj_dt), using the sim's own closed-form
                     # sinusoid — so the projector avoids where the obstacle WILL be, not
@@ -978,12 +954,10 @@ def main():
                     pos_projector = build_position_projector(
                         horizon_H=horizon, gradient=gradient, device=device,
                         boxes=BOXES, cylinders=cyl_now,
-                        spheres=sph_now,
                         normalizer=None, tighten=vcfg["tighten"], dt=proj_dt,
                         use_dynamics=vcfg.get("use_dynamics", True),
                         obs_amplitude=0.0,  # exact positions — no extra radius needed
                         drone_radius=drone_radius,
-                        sphere_radius=SPHERE_RADIUS if args.floating_spheres else 0.0,
                         active_halfspaces=active_halfspaces,
                         dynamic_cylinder_predictions=dyn_cyl_preds,
                     )
@@ -1083,7 +1057,6 @@ def main():
                     "traj_xy_plain": cand_xyz_plain,
                     "chosen": int(which),
                     "cyl_xy":  env.get_cylinder_positions() if args.dynamic_obstacles_enabled else None,
-                    "sph_xyz": env.get_sphere_positions()   if args.floating_spheres          else None,
                 })
 
                 if done:
@@ -1153,19 +1126,6 @@ def main():
                     dtype="U2",
                 ),
                 dynamic_obstacles = bool(args.dynamic_obstacles_enabled),
-
-                # ── floating sphere metadata + per-step positions ──
-                floating_spheres  = bool(args.floating_spheres),
-                sphere_positions  = np.array(SPHERES, dtype=np.float32) if SPHERES
-                                    else np.zeros((0, 3), dtype=np.float32),
-                sphere_radius     = float(SPHERE_RADIUS),
-                sphere_amplitude  = float(sphere_amplitude),
-                sphere_frequency  = float(sphere_frequency),
-                sph_xyz_traj = np.array(
-                    [s["sph_xyz"] for s in cand_snapshots if s.get("sph_xyz") is not None],
-                    dtype=np.float32,
-                ) if any(s.get("sph_xyz") is not None for s in cand_snapshots)
-                  else np.zeros((0, max(len(SPHERES), 1), 3), dtype=np.float32),
             )
             print(f"[TRAJ] saved: {traj_path}")
 
@@ -1176,14 +1136,6 @@ def main():
                 # Z vs t
                 plt.figure(figsize=(7, 4))
                 plt.plot(traj_xyz_np[:, 2])
-                if args.floating_spheres and SPHERES:
-                    _sr  = SPHERE_RADIUS
-                    _amp = sphere_amplitude
-                    for (_, _, _sz) in SPHERES:
-                        plt.axhspan(_sz - _sr - _amp, _sz + _sr + _amp,
-                                    color="#4a9de0", alpha=0.12)
-                        plt.axhspan(_sz - _sr, _sz + _sr,
-                                    color="#4a9de0", alpha=0.22)
                 plt.ylim(-0.05, 1.15)   # fix to flight envelope [0, 1] with small padding
                 plt.axhline(0.0, color="#888888", linewidth=0.8, linestyle=":")   # floor
                 plt.axhline(1.0, color="#888888", linewidth=0.8, linestyle=":")   # ceiling
@@ -1225,22 +1177,6 @@ def main():
                 else:
                     add_obstacles_xy(ax, [], CYLINDERS, box_size_xy=0.20, cyl_radius=0.06)
 
-                # Sphere obstacles overlay
-                if args.floating_spheres and SPHERES:
-                    from matplotlib.patches import Circle as _Circle
-                    _sr  = SPHERE_RADIUS
-                    _amp = sphere_amplitude
-                    for (sx, sy, _sz) in SPHERES:
-                        ax.add_patch(_Circle(
-                            (sx, sy), _sr,
-                            linewidth=0.8, edgecolor="#1f6fbf", facecolor="#4a9de0",
-                            alpha=0.40, zorder=2,
-                        ))
-                        ax.add_patch(_Circle(
-                            (sx, sy), _sr + _amp,
-                            linewidth=0.8, edgecolor="#4a9de0", facecolor="none",
-                            linestyle=":", alpha=0.30, zorder=1,
-                        ))
                 ax.set_xlim(-0.5, 4.5)
                 ax.set_ylim(-1.0, 1.0)
                 if active_halfspaces:

@@ -93,9 +93,9 @@ def quat_to_euler_xyzw(q):
     return roll, pitch, yaw
 
 def sample_targets(num_envs: int, device, env_origins,
-                   x_min=4.0, x_max=4.0,
-                   y_min=-0.9, y_max=0.9, #y_min=-0.94, y_max=-0.6, y_min=0.94, y_max=0.6,
-                   z_min=0.65, z_max=0.65):
+                   x_min=4.5, x_max=4.5,
+                   y_min=-2.0, y_max=2.0, #y_min=-0.94, y_max=-0.6, y_min=0.94, y_max=0.6,
+                   z_min=1.0, z_max=1.0):
     """
     Sample one random target position per environment.
     Returns a tensor of shape (num_envs, 3).
@@ -115,8 +115,11 @@ def save_dataset_for_all_envs(episodes_states,
                               num_envs,
                               data_dir,zarr_writer=None,
                               episodes_depths=None,
-                              curr_depths=None):
+                              curr_depths=None,
+                              episodes_targets=None,
+                              curr_targets=None):
     use_depth = curr_depths is not None
+    use_targets = curr_targets is not None
 
     # 1) Flush the current (possibly partial) episode into episodes_*
     if len(curr_states) > 0:
@@ -134,6 +137,11 @@ def save_dataset_for_all_envs(episodes_states,
             episodes_depths.append(ep_depths)
             curr_depths.clear()
 
+        if use_targets:
+            ep_targets = np.stack(curr_targets, axis=0)  # (T, N, target_dim)
+            episodes_targets.append(ep_targets)
+            curr_targets.clear()
+
     if len(episodes_states) == 0:
         print("[INFO] No data recorded, nothing to save.")
         return
@@ -145,6 +153,7 @@ def save_dataset_for_all_envs(episodes_states,
         env_states_list  = []
         env_images_list = []
         env_depths_list = []
+        env_targets_list = []
 
         prefix = f"env_{env_id:03d}_"
         existing = [f for f in os.listdir(data_dir)
@@ -164,11 +173,16 @@ def save_dataset_for_all_envs(episodes_states,
         if use_depth:
             for ep_d in episodes_depths:
                 env_depths_list.append(ep_d[:, env_id, ...])  # (T_i, H, W)
+        if use_targets:
+            for ep_t in episodes_targets:
+                env_targets_list.append(ep_t[:, env_id, :])  # (T_i, target_dim)
 
         dataset_env = {
             "states": env_states_list,
             "images_file": images_filename,
         }
+        if use_targets:
+            dataset_env["targets"] = env_targets_list
 
         with open(save_path, "wb") as f:
             pickle.dump(dataset_env, f)
@@ -187,13 +201,17 @@ def save_dataset_for_all_envs(episodes_states,
 
     # append to zarr
     assert zarr_writer is not None
+    for i in range(len(episodes_states)):
+        kwargs = {}
+        if use_depth:
+            kwargs["ep_depths"] = episodes_depths[i]
+        if use_targets:
+            kwargs["ep_targets"] = episodes_targets[i]
+        zarr_writer.append_episode(episodes_states[i], episodes_images[i], **kwargs)
     if use_depth:
-        for ep_s, ep_img, ep_d in zip(episodes_states, episodes_images, episodes_depths):
-            zarr_writer.append_episode(ep_s, ep_img, ep_depths=ep_d)
         episodes_depths.clear()
-    else:
-        for ep_s, ep_img in zip(episodes_states, episodes_images):
-            zarr_writer.append_episode(ep_s, ep_img)
+    if use_targets:
+        episodes_targets.clear()
 
     episodes_images.clear()
     episodes_states.clear()
@@ -380,13 +398,15 @@ def controller_motor_forces(
 
 class ZarrEpisodeWriter:
     def __init__(self, root_dir: str, num_envs: int, img_h: int, img_w: int,
-                 state_dim: int, chunk_t: int = 256, use_depth: bool = False):
+                 state_dim: int, chunk_t: int = 256, use_depth: bool = False,
+                 target_dim: int | None = None):
         self.root_dir = root_dir
         self.num_envs = num_envs
         self.img_h = img_h
         self.img_w = img_w
         self.state_dim = state_dim
         self.use_depth = use_depth
+        self.target_dim = target_dim
 
         os.makedirs(root_dir, exist_ok=True)
 
@@ -415,7 +435,16 @@ class ZarrEpisodeWriter:
                     dtype="float32",
                     # compressor=[compressor],
                 )
+            if self.target_dim is not None and "targets" not in g:
+                g.create_array(
+                    "targets",
+                    shape=(0, self.target_dim),
+                    chunks=(chunk_t, self.target_dim),
+                    dtype="float32",
+                    # compressor=[compressor],
+                )
             g.attrs["use_depth"] = self.use_depth
+            g.attrs["has_targets"] = self.target_dim is not None
             if "states" not in g:
                 g.create_array(
                     "states",
@@ -445,16 +474,19 @@ class ZarrEpisodeWriter:
 
         self._episode_counter = [0 for _ in range(num_envs)]
 
-    def append_episode(self, ep_states, ep_images, ep_depths=None):
+    def append_episode(self, ep_states, ep_images, ep_depths=None, ep_targets=None):
         """
         ep_states:  (T, N, state_dim)
         ep_images:  (T, N, H, W, 3) uint8
         ep_depths:  (T, N, H, W) float32, required if self.use_depth
+        ep_targets: (T, N, target_dim) float32, required if self.target_dim is set
         """
         T, N, _ = ep_states.shape
         assert N == self.num_envs
         if self.use_depth:
             assert ep_depths is not None, "use_depth=True but no depth data was provided"
+        if self.target_dim is not None:
+            assert ep_targets is not None, "target_dim is set but no target data was provided"
 
         terminals = np.zeros((T,), dtype=np.uint8)
         terminals[-1] = 1
@@ -472,6 +504,9 @@ class ZarrEpisodeWriter:
             if self.use_depth:
                 depth = ep_depths[:, env_id, ...]    # (T, H, W)
                 g["depth"].append(depth.astype(np.float32))
+            if self.target_dim is not None:
+                tgt = ep_targets[:, env_id, :]       # (T, target_dim)
+                g["targets"].append(tgt.astype(np.float32))
             g["states"].append(st.astype(np.float32))
             g["terminals"].append(terminals)
             g["episode_id"].append(ep_ids)
@@ -480,7 +515,7 @@ class ZarrEpisodeWriter:
 
 
 def main():
-    sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
+    sim_cfg = sim_utils.SimulationCfg(dt=1.0 / 30.0, device=args_cli.device)  # 30Hz physics/control step
     sim = SimulationContext(sim_cfg)
 
     sim.set_camera_view(eye=[2.0, 2.0, 2.0], target=[0.0, 0.0, 0.5]) # Set main camera
@@ -488,7 +523,7 @@ def main():
 
     frame_marker_cfg = FRAME_MARKER_CFG.copy()
     frame_marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
-    goal_marker = VisualizationMarkers(frame_marker_cfg.replace(prim_path="/Visuals/ee_goal"))
+    # goal_marker = VisualizationMarkers(frame_marker_cfg.replace(prim_path="/Visuals/ee_goal"))
     
     robot = scene["crazyflie"]
 
@@ -511,7 +546,7 @@ def main():
     gravity = torch.tensor(sim.cfg.gravity, device=sim.device).norm()
 
     target_pos = sample_targets(num_envs, sim.device, env_origins)
-    goal_marker.visualize(target_pos, None)
+    # goal_marker.visualize(target_pos, None)
 
     # Now we are ready!
     print("[INFO]: Setup complete...")
@@ -522,15 +557,19 @@ def main():
     count = 0
     warmup_steps = 0
     WARMUP_FRAMES = 5
+    IMG_STRIDE = 10  # record every Nth physics step (1 = every step, no skipping).
+                     # e.g. IMG_STRIDE=10 at a 200Hz physics dt -> ~20Hz recording.
 
     # --------- Trajectory logging buffers ---------
     episodes_states = []   # list of np arrays, one per episode
     episodes_images = []
     episodes_depths = [] if args_cli.use_depth else None
+    episodes_targets = []  # list of (T, num_envs, target_dim), one per episode
 
     curr_images = []
     curr_states = []       # list of (num_envs, state_dim)
     curr_depths = [] if args_cli.use_depth else None
+    curr_targets = []      # list of (num_envs, target_dim)
 
     # Simulate physics
     while simulation_app.is_running():
@@ -551,6 +590,8 @@ def main():
                     data_dir,zarr_writer=zarr_writer,
                     episodes_depths=episodes_depths,
                     curr_depths=curr_depths,
+                    episodes_targets=episodes_targets,
+                    curr_targets=curr_targets,
                 )
 
         if reset:
@@ -573,7 +614,7 @@ def main():
             robot.write_root_velocity_to_sim(zero_root_vel)
 
             target_pos = sample_targets(robot.num_instances, sim.device, env_origins)
-            goal_marker.visualize(target_pos, None)
+            # goal_marker.visualize(target_pos, None)
             robot.reset()
 
             if hasattr(controller_motor_forces, "vel_int"):
@@ -601,6 +642,8 @@ def main():
             episodes_images.clear()
             curr_images.clear()
             curr_states.clear()
+            episodes_targets.clear()
+            curr_targets.clear()
             if args_cli.use_depth:
                 episodes_depths.clear()
                 curr_depths.clear()
@@ -685,20 +728,17 @@ def main():
                 img_w=img_w,
                 state_dim=state_dim,
                 use_depth=args_cli.use_depth,
+                target_dim=target_pos.shape[-1],
             )
 
         if warmup_steps > 0:
             warmup_steps -= 1
-        else:
+        elif count % IMG_STRIDE == 0:
             curr_states.append(state_np)
             curr_images.append(rgb_np)
+            curr_targets.append(target_pos.detach().cpu().numpy())
             if args_cli.use_depth:
                 curr_depths.append(depth_np)
-        
-        # curr_states.append(state_np)
-        # # IMG_STRIDE = 10  # e.g., save at 20 Hz instead of 200 Hz
-        # # if count % IMG_STRIDE == 0:
-        # curr_images.append(rgb_np)
 
         # --- Auto-save + reset when target reached ---
         target_local1 = target_pos - env_origins 
@@ -723,6 +763,8 @@ def main():
                 data_dir,zarr_writer=zarr_writer,
                 episodes_depths=episodes_depths,
                 curr_depths=curr_depths,
+                episodes_targets=episodes_targets,
+                curr_targets=curr_targets,
             )
 
             # Reset sim to initial pose (your reset block already does this) 
@@ -731,7 +773,7 @@ def main():
             
             # Sample a new target + visualize it 
             target_pos = sample_targets(num_envs, sim.device, env_origins)
-            goal_marker.visualize(target_pos, None)
+            # goal_marker.visualize(target_pos, None)
             # restart the discretized segment for the new goal
             if hasattr(controller_motor_forces, "start_pos"):
                 controller_motor_forces.start_pos = robot.data.root_state_w[:, 0:3].clone()

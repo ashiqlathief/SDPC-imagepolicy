@@ -19,16 +19,18 @@ SPHERE_RADIUS = getattr(cfg, 'SPHERE_RADIUS', 0.10)
 USE_DEPTH = cfg.USE_DEPTH
 DEPTH_NEAR = cfg.DEPTH_NEAR
 DEPTH_FAR = cfg.DEPTH_FAR
-CORRIDOR_LENGTH = 4.5     # x direction
-CORRIDOR_WIDTH = 2.0       # y direction (clearance between walls)
+CORRIDOR_LENGTH = 11     # x direction
+CORRIDOR_WIDTH = 5.0       # y direction (clearance between walls)
 WALL_THICKNESS = 0.10
 WALL_HEIGHT = 2.0
 CEILING_HEIGHT  = WALL_HEIGHT          # = 1.0  (flush with obstacle tops)
 CEILING_Z_CENTER = CEILING_HEIGHT + WALL_THICKNESS / 2.0   # centre of roof slab
-BOXES = [(x, y, 1.0 / 2.0) for (x, y) in _BOXES_XY]
-CYLINDERS = [(x, y, 1.0 / 2.0) for (x, y) in _CYLINDERS_XY]
+CORRIDOR_X_OFFSET = -CORRIDOR_LENGTH / 2.0
+
+BOXES = [(x , y, 1.0 / 2.0) for (x, y) in _BOXES_XY]
+CYLINDERS = [(x , y, 1.0 / 2.0) for (x, y) in _CYLINDERS_XY]
+SPHERES_XYZ = [(x, y, z) for (x, y, z) in _SPHERES_XYZ]
 RED_MAT   = PreviewSurfaceCfg(diffuse_color=(0.85, 0.10, 0.10))
-GREEN_MAT = PreviewSurfaceCfg(diffuse_color=(0.10, 0.85, 0.10))
 BLUE_MAT  = PreviewSurfaceCfg(diffuse_color=(0.10, 0.30, 0.90))
 
 CRAZYFLIE = ArticulationCfg(
@@ -81,12 +83,12 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
     # -------------------------
     crazyflie = CRAZYFLIE.replace(
         prim_path="/World/envs/env_.*/Crazyflie",
-        init_state=CRAZYFLIE.init_state.replace(pos=(0.0, 0.0, 0.5))#0.45219916 -0.2618473   0.12736732
+        init_state=CRAZYFLIE.init_state.replace(pos=(CORRIDOR_X_OFFSET, 0.0, 0.5))
     )
 
     FPV_CAMERA_CFG = CameraCfg(
         prim_path="/World/envs/env_.*/Crazyflie/body/fpv",
-        update_period=0.005,       # update every physics step (matches sim dt)
+        update_period=1.0 / 10.0,       # update every physics step (matches sim dt)
         height=96,
         width=96,
         data_types=["rgb", "distance_to_camera"] if USE_DEPTH else ["rgb"],
@@ -103,62 +105,6 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
             convention="ros",
         ),
     )
-
-    CHASE_CAMERA_CFG = CameraCfg(
-        prim_path="/World/envs/env_.*/Crazyflie/body/chasecam",
-        update_period=0.0,        # render only when explicitly queried
-        height=480,
-        width=854,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=12.0,            # wider FOV than the FPV (24.0)
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.1, 1000.0),
-        ),
-        offset=CameraCfg.OffsetCfg(
-            pos=(-0.6, 0.0, 0.35),    # behind and above the drone body
-            rot=(0.5, -0.5, 0.5, -0.5),   # same forward-facing orientation as FPV
-            convention="ros",
-        ),
-    )
-
-    SPECTATOR_CAMERA_CFG = CameraCfg(
-        prim_path="/World/envs/env_.*/SpectatorCam",
-        update_period=0.0,
-        height=540,
-        width=960,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=10.0,            # wide FOV to fit the whole corridor
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.1, 1000.0),
-        ),
-        offset=CameraCfg.OffsetCfg(
-            pos=(2.5, 0.0, 3.5),
-            rot=(0.0, 1.0, 0.0, 0.0),
-            convention="ros",
-        ),
-    )
-    #SPECTATOR_CAMERA_CFG = CameraCfg(
-    #     prim_path="/World/envs/env_.*/SpectatorCam",
-    #     update_period=0.0,
-    #     height=540,
-    #     width=960,
-    #     data_types=["rgb"],
-    #     spawn=sim_utils.PinholeCameraCfg(
-    #         focal_length=10.0,            # wide FOV to fit the whole corridor
-    #         focus_distance=400.0,
-    #         horizontal_aperture=20.955,
-    #         clipping_range=(0.1, 1000.0),
-    #     ),
-    #     offset=CameraCfg.OffsetCfg(
-    #         pos=(-1.0, 0.0, 3.5),
-    #         rot=(0.2549804, -0.6595339, 0.6595339, -0.2549804),
-    #         convention="ros",
-    #     ),
-    # )
 
     # -------------------------
     # Environment geometry
@@ -177,7 +123,7 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH / 2.0, +(CORRIDOR_WIDTH / 2.0 + WALL_THICKNESS / 2.0), WALL_HEIGHT / 2.0), #2.5, 1.05
+            pos=(CORRIDOR_LENGTH / 2.0 + CORRIDOR_X_OFFSET, +(CORRIDOR_WIDTH / 2.0 + WALL_THICKNESS / 2.0), WALL_HEIGHT / 2.0), #2.5, 1.05
         ),
     )
 
@@ -189,7 +135,7 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH / 2.0, -(CORRIDOR_WIDTH / 2.0 + WALL_THICKNESS / 2.0), WALL_HEIGHT / 2.0),  #2.5,
+            pos=(CORRIDOR_LENGTH / 2.0 + CORRIDOR_X_OFFSET, -(CORRIDOR_WIDTH / 2.0 + WALL_THICKNESS / 2.0), WALL_HEIGHT / 2.0),  #2.5,
         ),
     )
 
@@ -197,39 +143,13 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
     wall_end = AssetBaseCfg(
         prim_path="/World/envs/env_.*/WallEnd",
         spawn=sim_utils.CuboidCfg(
-            visual_material=GREEN_MAT,
             size=(WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, WALL_HEIGHT),
             collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH + WALL_THICKNESS / 2.0, 0.0, WALL_HEIGHT / 2.0),
+            pos=(CORRIDOR_LENGTH + WALL_THICKNESS / 2.0 + CORRIDOR_X_OFFSET, 0.0, WALL_HEIGHT / 2.0),
         ),
     )
-
-    # Ceiling: closes the corridor top so the FPV depth camera doesn't see
-    # through to open space above the walls (was returning inf depth there).
-    ceiling = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/Ceiling",
-        spawn=sim_utils.CuboidCfg(
-            size=(CORRIDOR_LENGTH + WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, WALL_THICKNESS),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH / 2.0, 0.0, CEILING_Z_CENTER),
-        ),
-    )
-
-    # goal = AssetBaseCfg(
-    #     prim_path="/World/envs/env_.*/Goal",
-    #     spawn=sim_utils.CuboidCfg(
-    #         visual_material=GREEN_MAT,
-    #         size=(WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, 0.1),
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #     ),
-    #     init_state=AssetBaseCfg.InitialStateCfg(
-    #         pos=(4.0, 0.0, 0.05),
-    #     ),
-    # )
 
     ceiling_light = AssetBaseCfg(
         prim_path="/World/CeilingLight",
@@ -238,8 +158,8 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
             color=(1.0, 0.95, 0.85),      # warm white
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH / 2.0, 0.0, 1.0),   # above corridor centre
-            rot=(0.966, -0.259, 0.0, 0.0),            # angled slightly forward
+            pos=(CORRIDOR_LENGTH / 2.0 + CORRIDOR_X_OFFSET, 0.0, WALL_HEIGHT - 0.05),  # just under the ceiling
+            rot=(0.0, 0.0, 0.0, 0.0),  # rotate cylinder's local Z axis to align with the corridor's x-axis
         ),
     )
 
@@ -248,27 +168,12 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
             prim_path=f"/World/envs/env_.*/Cyl{_i:02d}",
             spawn=sim_utils.CylinderCfg(
                 visual_material=RED_MAT,
-                radius=0.06,
-                height=1.0,
+                radius=0.15,
+                height=2.0,
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(pos=_pos, rot=(1, 0, 0, 0)),
         )
     if CYLINDERS:
-        del _i, _pos
-
-    # ── Floating sphere obstacles (planet mode) ────────────────────────────────
-    for _i, _pos in enumerate(_SPHERES_XYZ):
-        vars()[f"sph_{_i:02d}"] = RigidObjectCfg(
-            prim_path=f"/World/envs/env_.*/Sph{_i:02d}",
-            spawn=sim_utils.SphereCfg(
-                visual_material=RED_MAT,
-                radius=SPHERE_RADIUS,
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
-            ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=_pos, rot=(1, 0, 0, 0)),
-        )
-    if _SPHERES_XYZ:
         del _i, _pos

@@ -341,8 +341,8 @@ def make_gif(
     else:                          # "xy" — default top-down
         h_idx, v_idx = 0, 1
         h_label, v_label = "x (m)", "y (m)"
-        h_lim = (-0.2, 4.2)
-        v_lim = (-1.2, 1.2)
+        h_lim = (-6.0, 4.5)
+        v_lim = (-2.25, 2.25)
 
     corridor_end = 4.1
     wall_kw = dict(linewidth=1.5, edgecolor="#555555", facecolor="#cccccc",
@@ -627,7 +627,7 @@ def main():
         description="Animate drone trajectory from a saved .npz file.")
     parser.add_argument("npz", nargs="+",
                         help=".npz file(s) or directories containing .npz files")
-    parser.add_argument("--fps",     type=int,   default=20)
+    parser.add_argument("--fps",     type=int,   default=10)
     parser.add_argument("--dpi",     type=int,   default=100)
     parser.add_argument("--figsize", type=float, nargs=2, default=[9, 4],
                         metavar=("W", "H"))

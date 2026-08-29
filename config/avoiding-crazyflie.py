@@ -9,59 +9,20 @@ BOXES = [
 ]
 
 CYLINDERS = [
-    # #experiment1
-    # (2.5, -0.4),
-    # (2.3,  0.3),
-    # (1.7,  0.4),
-    # (3.0,  0.4),
-    # (1.5,  0.4),
-    # (2.0,  0.3),
-    # (3.0,  0.2),
-    # (2.0, -0.2),
-    # (1.1,  0.2),
-    # (3.2, -0.3),
-    # (2.3, -0.2),
-    # (1.6, -0.3),
-
     (2, 0.7),
     (2.5, 0.4),
     (2, 0.0),
     (2.5, -0.4),
     (2, -0.8),
-
-    # (3, 0.7),
-    # (3.5, 0.4),
-    # (3, 0.0),
-    # (3.5, -0.4),
-    # (3, -0.7),
+    (0, 0.7),
+    (0.5, 0.4),
+    (0, 0.0),
+    (0.5, -0.4),
+    (0, -0.8),
 ]
-SPHERE_RADIUS = 0.10   # physical radius (m); Minkowski exclusion = SPHERE_RADIUS + drone_radius
-SPHERES = [
-    # # x     y      z     spread along corridor, varied height & lateral position
-    # (0.5,  0.35,  0.70),
-    # (0.9, -0.30,  0.35),
-    # (1.3,  0.10,  0.65),
-    # (1.6, -0.45,  0.50),
-    # (2.0,  0.40,  0.30),
-    # (2.3, -0.10,  0.75),
-    # (2.6,  0.25,  0.45),
-    # (2.9, -0.40,  0.65),
-    # (3.2,  0.00,  0.30),
-    # (3.5, -0.20,  0.70),
-    # (3.8,  0.35,  0.50),
-    # (4.0, -0.05,  0.40),
-    # (2.5, -0.4, 0.4),
-    # (2.3,  0.3, 0.8),
-    # (1.7,  0.4, 0.6),
-    # (3.0,  0.4, 0.5),
-    # (1.5,  0.4, 0.7),
-    # (2.0,  0.3, 0.9),
-    # (3.0,  0.2, 0.8),
-    # (2.0, -0.2, 0.6),
-    # (1.1,  0.2, 0.4),
-    # (3.2, -0.3, 0.5),
-    # (2.3, -0.2, 0.7),
-    # (1.6, -0.3, 0.6),
+
+KEEPOUT_ZONES = [
+    # (-2.0, 0.0, 0.3),
 ]
 
 CORRIDOR_HALFSPACES = [
@@ -71,11 +32,11 @@ CORRIDOR_HALFSPACES = [
     # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)
     # [np.array([0.0, -0.75]), np.array([4.0, 0.15]), 'above'],
 
-    # # both
-    # upper diagonal: y <= -0.1*x + 0.75  (ceiling slopes down toward the goal end)
-    [np.array([0.0, 0.75]), np.array([4.0, 0.15]), 'below'],
-    # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)
-    [np.array([0.0, -0.75]), np.array([4.0, -0.15]), 'above'],
+    # # # both
+    # # upper diagonal: y <= -0.1*x + 0.75  (ceiling slopes down toward the goal end)
+    # [np.array([0.0, 0.75]), np.array([4.0, 0.15]), 'below'],
+    # # lower diagonal: y >= 0.1*x - 0.75   (floor slopes up toward the goal end)
+    # [np.array([0.0, -0.75]), np.array([4.0, -0.15]), 'above'],
 ]
 
 #------------------------ base ------------------------#
@@ -88,10 +49,8 @@ args_to_watch = [
     ('horizon', 'H'),
     ('n_diffusion_steps', 'K'),
     ('model', 'D'),
-    ('action_mode', 'A'),
     ('encoder_type', 'E'),
     ('image_cond_dim', 'L'),
-    ('stride', 'DT'),
     ('use_depth', 'DEPTH'),
 ]
 
@@ -100,11 +59,11 @@ logbase = 'isaac/logs'
 base = {
     'diffusion': {
         ## model
-        'model': 'models.ImageCondUNet1DTemporalCondModel', #ImageCondTransformer1DModel, ImageCondUNet1DTemporalCondModel
+        'model': 'models.ImageCondTransformer1DModel', #ImageCondTransformer1DModel, ImageCondUNet1DTemporalCondModel
         'diffusion': 'models.GaussianDiffusion',
-        'encoder_type': 'vitp',   # "vit", "vitp", or "cnn" or "raw_pixels"
+        'encoder_type': 'raw_pixels',   # "vit", "vitp", or "cnn" or "raw_pixels"
         'use_depth': USE_DEPTH,   # RGBD switch: set True only if the zarr dataset was collected with quadcopter.py --use_depth
-        'horizon': 16,
+        'horizon': 8,
         'n_obs_steps': 2,
         'image_cond_dim': 384,   # 96*96*3 for raw pixels (96*96*4 if use_depth=True) 27648 for vit, 512 for vitp
         'n_diffusion_steps': 20,
@@ -138,8 +97,6 @@ base = {
 
         ## dataset
         'loader': 'datasets.CrazyflieImageDataset',
-        'stride': 2,
-        'dt': 0.005,
         'normalizer': 'LimitsNormalizer',
         'preprocess_fns': [],
         'clip_denoised': False,
@@ -148,8 +105,7 @@ base = {
         'include_returns': False,
         'returns_scale': 400,   # Determined using rewards from the dataset
         'discount': 0.99,
-        'action_mode': 'xz_yaw',  #xz_yaw xyz
-        
+
 
         ## serialization
         'logbase': logbase,
@@ -185,7 +141,7 @@ base = {
 
         ## diffusion model
         'diffusion': 'models.GaussianDiffusion',
-        'horizon': 16,
+        'horizon': 8,
         'n_obs_steps': 2,
         'n_diffusion_steps': 20,
         'returns_condition': False,

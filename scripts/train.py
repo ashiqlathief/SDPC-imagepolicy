@@ -6,7 +6,7 @@ import diffuser.utils as utils
 
 exp = 'avoiding-crazyflie'
 
-seeds = [7,8,9,10] 
+seeds = [8,9,10] 
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -50,8 +50,6 @@ for seed in seeds:
         include_returns=args.include_returns,
         returns_scale=args.max_path_length,               # Because the reward is <= 1 in each timestep
         discount=args.discount,
-        stride=getattr(args, 'stride', 1),
-        dt=getattr(args, 'dt', 0.005),
         use_depth=getattr(args, 'use_depth', False),
     )
 
