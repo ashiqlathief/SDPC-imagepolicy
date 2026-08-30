@@ -39,6 +39,7 @@ class EpisodeResult:
     final_x:            float   # x position at episode end
     max_x_reached:      float   # furthest x point ever reached
     x_progress_pct:     float   # max_x / 4.0 * 100
+    wall_time_sec:      float   # real (wall-clock) seconds the episode took to run
 
     # lateral behaviour
     mean_y_deviation:   float   # mean |y| — how much drone drifts sideways
@@ -139,13 +140,16 @@ class MetricsLogger:
             action=np.array(action, dtype=np.float32),
         ))
 
-    def end_episode(self, success: bool, fell: bool):
-        """Call at the end of each episode."""
+    def end_episode(self, success: bool, fell: bool, wall_time_sec: float = 0.0):
+        """Call at the end of each episode.
+        wall_time_sec: real elapsed time the episode took to run (e.g.
+        time.time() - episode_start_time in the caller), for reporting only —
+        not used in any pass/fail or safety metric."""
         if not self._active:
             print("[MetricsLogger] WARNING: end_episode called without begin_episode.")
             return
 
-        result = self._compute_metrics(success, fell)
+        result = self._compute_metrics(success, fell, wall_time_sec)
         self.results.append(result)
         self._active = False
 
@@ -163,13 +167,13 @@ class MetricsLogger:
 
     # ── Metric computation ───────────────────────────────────────────────────
 
-    def _compute_metrics(self, success: bool, fell: bool) -> EpisodeResult:
+    def _compute_metrics(self, success: bool, fell: bool, wall_time_sec: float = 0.0) -> EpisodeResult:
         steps = self._steps
         n = len(steps)
 
         if n == 0:
             # empty episode — return zeros
-            return self._zero_result(success, fell)
+            return self._zero_result(success, fell, wall_time_sec)
 
         positions = np.stack([s.pos    for s in steps], axis=0)  # (N, 3)
         actions   = np.stack([s.action for s in steps], axis=0)  # (N, 3)
@@ -260,6 +264,7 @@ class MetricsLogger:
             final_x             = final_x,
             max_x_reached       = max_x,
             x_progress_pct      = x_pct,
+            wall_time_sec       = float(wall_time_sec),
 
             mean_y_deviation    = mean_y_dev,
             max_y_deviation     = max_y_dev,
@@ -276,7 +281,7 @@ class MetricsLogger:
             obstacle_violations  = obstacle_violations,
         )
 
-    def _zero_result(self, success: bool, fell: bool) -> EpisodeResult:
+    def _zero_result(self, success: bool, fell: bool, wall_time_sec: float = 0.0) -> EpisodeResult:
         return EpisodeResult(
             encoder_type=self.encoder_type, latent_dim=self.latent_dim,
             horizon=self.horizon, n_diffusion_steps=self.n_diffusion_steps,
@@ -285,6 +290,7 @@ class MetricsLogger:
             timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
             success=success, fell=fell, steps_taken=0,
             final_x=0.0, max_x_reached=0.0, x_progress_pct=0.0,
+            wall_time_sec=float(wall_time_sec),
             mean_y_deviation=0.0, max_y_deviation=0.0,
             mean_z=0.0, std_z=0.0,
             path_length=0.0, mean_smoothness=0.0,
@@ -335,6 +341,8 @@ class MetricsLogger:
                 "mean_max_x":               mean("max_x_reached"),
                 "std_max_x":                std("max_x_reached"),
                 "mean_x_progress_%":        mean("x_progress_pct"),
+                "mean_wall_time_sec":       mean("wall_time_sec"),
+                "total_wall_time_sec":      float(np.sum([e.wall_time_sec for e in episodes])),
                 "mean_y_deviation":         mean("mean_y_deviation"),
                 "mean_corridor_violations":  mean("corridor_violations"),
                 "mean_wall_violations":       mean("wall_violations"),
@@ -372,7 +380,8 @@ class MetricsLogger:
                   f"fell={stats['collision_rate_%']:5.1f}%  "
                   f"max_x={stats['mean_max_x']:.3f}  "
                   f"progress={stats['mean_x_progress_%']:.1f}%  "
-                  f"violations={stats['mean_corridor_violations']:.1f}")
+                  f"violations={stats['mean_corridor_violations']:.1f}  "
+                  f"time={stats['mean_wall_time_sec']:.1f}s")
         print("─────────────────────────────────────────────────────\n")
 
     def print_live_summary(self):

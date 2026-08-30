@@ -244,8 +244,7 @@ class CrazyflieEnvCfg:
                                    # None = all "y" (legacy lateral-only behaviour).
                                    # Must match length of dynamic_cyl_indices (or len(CYLINDERS) if that's None).
 
-    goal_y = 1.0
-    goal_z = 1.0
+    goal_y = 2.0
     
 class Crazyflie(gym.Env):
     metadata = {"render_modes": ["human", "none"]}
@@ -334,7 +333,7 @@ class Crazyflie(gym.Env):
                 )
             self._obs_axes = axes
             # Keep oscillation within the playable corridor regardless of axis.
-            self._x_clamp = (0.3 + CORRIDOR_X_OFFSET, CORRIDOR_LENGTH - 0.3 + CORRIDOR_X_OFFSET)
+            self._x_clamp = (0.3 , CORRIDOR_LENGTH - 0.3 )
             self._y_clamp = (-0.85, 0.85)
         self._obs_t = 0.0
 

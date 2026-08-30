@@ -34,23 +34,29 @@ corridor_halfspaces = cfg.CORRIDOR_HALFSPACES
 DEPTH_NEAR = cfg.DEPTH_NEAR
 DEPTH_FAR = cfg.DEPTH_FAR
 
+CYL_RADIUS = 0.20
+CYL_RADIUS_PROJECTOR_PAD = 0.01
+
+FLIGHT_Z_MIN = 0.0   # floor
+FLIGHT_Z_MAX = 2.5   # ceiling
+
 z_halfspaces = [
-    ([0.0, 0.0,  1.0], 2.0),   # z <=  2.0 m :drone cannot fly above wall/ceiling
-    ([0.0, 0.0, -1.0], 0.0),           # z >= 0.0 m  :drone cannot go underground
+    ([0.0, 0.0,  1.0], 1.5),   # z <= FLIGHT_Z_MAX :drone cannot fly above wall/ceiling
+    ([0.0, 0.0, -1.0], FLIGHT_Z_MIN),   # z >= FLIGHT_Z_MIN :drone cannot go underground
 ]
 
 projection_variants = [
   'sdpc-r',
 #   'sdpc-r-tightened',
   'sdpc-c',
-#   'sdpc-c-tightened',
+# #   'sdpc-c-tightened',
   'sdpc-t',
 #   'sdpc-t-tightened',
   'diffuser',
   'gradient',
   'gradient-tightened',
   'post_processing',
-#   'post_processing-tightened',
+  'post_processing-tightened',
 ]
 
 def variant_cfg(name: str):
@@ -104,7 +110,7 @@ def plot_constraint_overlay(ax, cylinders, tighten=0.03, drone_radius=0.0,
     Overlays safety margins as blue-shaded regions on an existing XY axes.
     Shows the actual exclusion zone the projector enforces.
     """
-    cyl_r = 0.06 + drone_radius + tighten
+    cyl_r = CYL_RADIUS + drone_radius + tighten
 
     # - obstacle margins (blue circles) -
     for (x, y) in cylinders:
@@ -172,7 +178,7 @@ def plot_halfspace_constraints_xy(ax, halfspaces, xlim, ylim, alpha=0.10):
             # 'above': fill from line up to ymax
             ax.fill_between(xs, ys, ymax, alpha=alpha)
 
-def add_obstacles_xy(ax, cylinders, cyl_radius=0.06):
+def add_obstacles_xy(ax, cylinders, cyl_radius=CYL_RADIUS):
     # Cylinders as circles in XY
     for x, y in cylinders:
         ax.add_patch(
@@ -187,7 +193,7 @@ def add_obstacles_xy(ax, cylinders, cyl_radius=0.06):
         )
 
 def add_dynamic_cylinders_xy(ax, cyl_rest, cyl_axes, cand_snapshots, obs_amplitude,
-                              cyl_radius=0.06, drone_radius=0.0,
+                              cyl_radius=CYL_RADIUS, drone_radius=0.0,
                               x_clamp=(0.3, 4.7), y_clamp=(-0.85, 0.85)):
     """
     Draw dynamic cylinder visualisation on an XY axes:
@@ -403,7 +409,7 @@ def build_obstacle_constraint_list(cylinders, x_bounds=None,
     # constraint ||p_drone - p_obs|| >= r_obs + drone_radius is exact.
     _dr = float(drone_radius)
     for i, (x, y) in enumerate(cylinders):
-        radius = 0.07 + _dr + float(tighten) + float(cyl_extra_radius)
+        radius = CYL_RADIUS + CYL_RADIUS_PROJECTOR_PAD + _dr + float(tighten) + float(cyl_extra_radius)
         if dynamic_cylinder_predictions is not None and i in dynamic_cylinder_predictions:
             centers_per_t = [[float(cx), float(cy)] for cx, cy in dynamic_cylinder_predictions[i]]
             constraint_list.append(("sphere_outside_dynamic", [0, 1], centers_per_t, radius))
@@ -444,7 +450,7 @@ def build_position_projector(horizon_H, gradient, device, cylinders,
                              normalizer=None, tighten=0.0, dt=0.1, use_dynamics=True,
                              obs_amplitude=0.0, drone_radius=0.0,
                              active_halfspaces=None, dynamic_cylinder_predictions=None,
-                             keepout_zones=None):
+                             keepout_zones=None, goal_pull_weight=0.0):
     # We project POSITIONS, so we need horizon = H+1
     Hp1 = horizon_H + 1
     x_bounds = (-6.5, 4.5)
@@ -482,6 +488,7 @@ def build_position_projector(horizon_H, gradient, device, cylinders,
         device=str(device),
         solver="scipy",           # your file uses scipy SLSQP path
         parallelize=True,         # candidates solve independently:run them concurrently
+        goal_pull_weight=goal_pull_weight,
     )
 
     return projector
@@ -505,7 +512,8 @@ def build_position_projector_from_points(horizon_H, gradient, device,
                                           static_points, dynamic_predictions, point_radius,
                                           normalizer=None, tighten=0.0, dt=0.1,
                                           use_dynamics=True, drone_radius=0.0,
-                                          active_halfspaces=None, keepout_zones=None):
+                                          active_halfspaces=None, keepout_zones=None,
+                                          goal_pull_weight=0.0):
     """depth_obstacles counterpart to build_position_projector(): identical
     bounds/halfspace setup (reuses build_obstacle_constraint_list
     unchanged, with cylinders=[] so no ground-truth cylinder constraints get
@@ -550,6 +558,7 @@ def build_position_projector_from_points(horizon_H, gradient, device,
         device=str(device),
         solver="scipy",
         parallelize=True,
+        goal_pull_weight=goal_pull_weight,
     )
     return projector
 
@@ -587,7 +596,8 @@ def _rebuild_depth_projector(current_pos, env, args, eval_dt,
                               depth_fx, depth_fy, depth_cx, depth_cy,
                               depth_tracker, depth_static_accum, depth_dynamic_accum,
                               horizon, proj_dt, gradient, device, vcfg,
-                              drone_radius, active_halfspaces, dataset):
+                              drone_radius, active_halfspaces, dataset,
+                              goal_pull_weight=0.0):
     """depth_obstacles: capture a depth frame, back-project -> filter ->
     cluster -> track (see depth_obstacle_estimator.py), and build the
     point-based projector from that instead of ground-truth cylinder
@@ -620,9 +630,20 @@ def _rebuild_depth_projector(current_pos, env, args, eval_dt,
         pts_cam = keep_nearest_along_z(pts_cam, xy_bin_size=0.05)
     pts = pos_cam_w[None, :] + quat_apply(quat_cam_w, pts_cam)  # -> world frame
 
+    # z-crop is centered on the drone's CURRENT altitude (not a fixed
+    # floor-to-ceiling band) -- narrows how many candidate points reach
+    # filter_points/cluster_points/tracking each step, since a real depth
+    # sensor's filtering cost scales with point count and this matters on
+    # hardware. Trade-off: only obstacle segments within +/-z_band of the
+    # drone's current height are seen at all (see --depth_obstacle_z_band
+    # help). Clamped to the real flight envelope so the band never extends
+    # below the floor or above the ceiling.
+    _z_band = args.depth_obstacle_z_band
+    _z_lo = max(FLIGHT_Z_MIN, pos_body_w[2] - _z_band)
+    _z_hi = min(FLIGHT_Z_MAX, pos_body_w[2] + _z_band)
     pts = filter_points(
-        pts, x_bounds=(-6.5, 4.5), y_bounds=(-2.0, 2.0), z_bounds=(0.0, 1.0),
-        voxel_size=args.depth_obstacle_voxel,
+        pts, x_bounds=(-6.5, 4.5), y_bounds=(-2.0, 2.0), z_bounds=(_z_lo, _z_hi),
+        voxel_size=args.depth_obstacle_voxel, output_2d=True,
     )
     clusters = cluster_points(pts)
     # One outer eval `step()` call  and therefore one call to this
@@ -663,6 +684,7 @@ def _rebuild_depth_projector(current_pos, env, args, eval_dt,
         use_dynamics=vcfg.get("use_dynamics", True),
         drone_radius=drone_radius,
         active_halfspaces=active_halfspaces,
+        goal_pull_weight=goal_pull_weight,
     )
     if vcfg["projection_mode"] == "sdpc":
         projector.inloop_slsqp = True
@@ -676,7 +698,7 @@ def main():
     parser.add_argument("--run_dir", type=str, required=True)
     parser.add_argument("--seeds", type=int, nargs="+", default=[7])
     parser.add_argument("--max_steps", type=int, default=700)
-    parser.add_argument("--action_scale", type=float, default=20.0)
+    parser.add_argument("--action_scale", type=float, default=1.0)
     parser.add_argument("--dynamic_obstacles", type=str, nargs="*", default=None, metavar="IDX:AXIS",
                         help="Enable sinusoidal cylinder movement. Omit this flag entirely to disable. "
                              "Pass with no values to move ALL cylinders laterally (axis 'y'). "
@@ -688,7 +710,7 @@ def main():
                         help="Enforce corridor halfspace constraints (from CORRIDOR_HALFSPACES "
                              "in config) in the projector and show them in XY plots.")
     parser.add_argument("--depth_obstacles", action="store_true", default=False)
-    parser.add_argument("--depth_obstacle_radius", type=float, default=0.1,
+    parser.add_argument("--depth_obstacle_radius", type=float, default=0.2,
                         help="Keep-out radius (m) around each detected surface point, on top "
                              "of drone_radius (depth_obstacles only).")
     parser.add_argument("--depth_obstacle_max_range", type=float, default=1.0,
@@ -700,13 +722,18 @@ def main():
     parser.add_argument("--depth_obstacle_max_points", type=int, default=12,
                         help="Cap on keep-out points passed to the projector per tracked obstacle "
                              "(bounds the SLSQP solve's constraint count).")
+    parser.add_argument("--depth_obstacle_z_band", type=float, default=0.1)
     parser.add_argument("--save_frames", action="store_true", default=False)
     args, _unknown = parser.parse_known_args()
 
     device         = torch.device("cuda:0")
-    drone_radius   = 0.08
+    drone_radius   = 0.1
     obs_amplitude  = 0.35
-    obs_frequency  = 0.45
+    obs_frequency  = 0.25
+    # Applied to every SLSQP-projected variant uniformly (see Projector.
+    # goal_pull_weight) -- 0.05 is a first guess, not tuned. Set to 0.0 to
+    # reproduce the exact pre-goal-pull nearest-point-only projection.
+    goal_pull_weight = 0.05
 
     depth_fx, depth_fy, depth_cx, depth_cy = camera_intrinsics(
         FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE
@@ -873,6 +900,7 @@ def main():
                     use_dynamics=vcfg.get("use_dynamics", True),
                     drone_radius=drone_radius,
                     active_halfspaces=active_halfspaces,
+                    goal_pull_weight=goal_pull_weight,
                 )
                 if vcfg["projection_mode"] == "sdpc":
                     # Enable proper in-loop SLSQP with obstacle constraints.
@@ -904,6 +932,7 @@ def main():
                     depth_tracker, depth_static_accum, depth_dynamic_accum,
                     horizon, proj_dt, gradient, device, vcfg,
                     drone_radius, active_halfspaces, dataset,
+                    goal_pull_weight=goal_pull_weight,
                 )
                 depth_static_pts_latest, depth_dyn_preds_latest = _init_static_pts, _init_dyn_preds
                 print(f"[INFO] depth_obstacles: initial projector built from "
@@ -929,6 +958,7 @@ def main():
             for step in range(args.max_steps):
                 # current position (for logging/command conversion)
                 pos = env._pos_world().detach().cpu().numpy()[0]  # [x,y,z]
+                _elapsed = time.strftime('%M:%S', time.gmtime(time.time() - episode_start_time))
 
                 # ── diffusion path ────────────────────────────────────────────
                 # build condition
@@ -978,6 +1008,7 @@ def main():
                         depth_tracker, depth_static_accum, depth_dynamic_accum,
                         horizon, proj_dt, gradient, device, vcfg,
                         drone_radius, active_halfspaces, dataset,
+                        goal_pull_weight=goal_pull_weight,
                     )
                     depth_static_pts_latest, depth_dyn_preds_latest = _static_pts_dbg, _dyn_preds_dbg
 
@@ -1003,6 +1034,7 @@ def main():
                         drone_radius=drone_radius,
                         active_halfspaces=active_halfspaces,
                         dynamic_cylinder_predictions=dyn_cyl_preds,
+                        goal_pull_weight=goal_pull_weight,
                     )
                     if vcfg["projection_mode"] == "sdpc":
                         pos_projector.inloop_slsqp = True
@@ -1035,8 +1067,7 @@ def main():
                 cmd_xyz = pos.copy()
                 cmd_xyz[:action_dim] = cmd_xyz[:action_dim] + a0_real[:action_dim]
                 # cmd_xyz[2] = 0.3 # If you want fixed altitude, uncomment:
-                _elapsed = time.strftime('%M:%S', time.gmtime(time.time() - episode_start_time))
-                print(f"{_elapsed} [MODEL OUTPUT] which={which} a0_real={a0_real}" f" cmd_xyz={cmd_xyz[:3]}")
+                print(f"[MODEL OUTPUT] which={which} a0_real={a0_real}" f" cmd_xyz={cmd_xyz[:3]}")
                 obs_next, _rew, done_vec, info = env.step(cmd_xyz)
 
                 # update rgb(d) history after step
@@ -1053,7 +1084,6 @@ def main():
                 logger.step(pos=pos, action=a0_real)
 
                 done = bool(done_vec[0]) if isinstance(done_vec, (list, tuple, np.ndarray, torch.Tensor)) else bool(done_vec)
-                _elapsed = time.strftime('%M:%S', time.gmtime(time.time() - episode_start_time))
                 print(f"{_elapsed} step {step:04d} pos={pos2} done={done}")
 
                 #"step": the step index (int) in this episode.
@@ -1104,7 +1134,7 @@ def main():
 
             success = bool(info["success"][0])
             fell    = bool(info["fell"][0])
-            logger.end_episode(success=success, fell=fell)
+            logger.end_episode(success=success, fell=fell, wall_time_sec=episode_wall_time_sec)
             if (ep + 1) % 5 == 0:
                 logger.print_live_summary()
         
@@ -1217,7 +1247,7 @@ def main():
                     # Ground truth shown faint/dashed for reference only  the
                     # projector never saw this, it is NOT what was enforced.
                     for (gx, gy) in CYLINDERS:
-                        ax.add_patch(Circle((gx, gy), 0.06, linewidth=1.0, linestyle="--",
+                        ax.add_patch(Circle((gx, gy), CYL_RADIUS, linewidth=1.0, linestyle="--",
                                              edgecolor="gray", facecolor="none", alpha=0.4, zorder=2))
                     # Every point detected this episode (voxel-deduped accumulator,
                     # see depth_static_accum/depth_dynamic_accum above)  NOT just
@@ -1241,14 +1271,14 @@ def main():
                     dyn_set = set(dyn_idx)
                     static_cyls = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i not in dyn_set]
                     dyn_cyls    = [CYLINDERS[i] for i in dyn_idx]
-                    add_obstacles_xy(ax, static_cyls, cyl_radius=0.06)
+                    add_obstacles_xy(ax, static_cyls, cyl_radius=CYL_RADIUS)
                     add_dynamic_cylinders_xy(
                         ax, dyn_cyls, dyn_axes_resolved, cand_snapshots,
-                        obs_amplitude=obs_amplitude, cyl_radius=0.06,
+                        obs_amplitude=obs_amplitude, cyl_radius=CYL_RADIUS,
                         drone_radius=drone_radius,
                     )
                 else:
-                    add_obstacles_xy(ax, CYLINDERS, cyl_radius=0.06)
+                    add_obstacles_xy(ax, CYLINDERS, cyl_radius=CYL_RADIUS)
 
                 # Keep-out zones overlay (virtual, planner-only  see KEEPOUT_ZONES
                 # in config/avoiding-crazyflie.py)

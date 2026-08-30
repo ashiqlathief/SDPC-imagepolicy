@@ -18,6 +18,7 @@ from isaaclab.sim import SimulationContext
 from isaaclab.scene import InteractiveScene
 
 from crazyflie_env_cfg import CrazyflieSceneCfg
+# from env_cfg import CrazyflieSceneCfg
 
 _capture_count = 0
 

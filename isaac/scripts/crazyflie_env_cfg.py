@@ -9,6 +9,7 @@ from isaaclab.assets import AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors.camera import CameraCfg
 from isaaclab.sim.spawners.materials import PreviewSurfaceCfg
+from isaaclab.sim.spawners.materials import MdlFileCfg
 
 cfg = importlib.import_module("config.avoiding-crazyflie")
 
@@ -32,6 +33,51 @@ CYLINDERS = [(x , y, 1.0 / 2.0) for (x, y) in _CYLINDERS_XY]
 SPHERES_XYZ = [(x, y, z) for (x, y, z) in _SPHERES_XYZ]
 RED_MAT   = PreviewSurfaceCfg(diffuse_color=(0.85, 0.10, 0.10))
 BLUE_MAT  = PreviewSurfaceCfg(diffuse_color=(0.10, 0.30, 0.90))
+_WH_MAT_DIR = "Environments/Simple_Warehouse/Materials"
+WALL_MAT    = MdlFileCfg(mdl_path=f"{ISAAC_NUCLEUS_DIR}/{_WH_MAT_DIR}/MI_WallA_01.mdl", project_uvw=True)
+GROUND_MAT  = MdlFileCfg(mdl_path=f"{ISAAC_NUCLEUS_DIR}/{_WH_MAT_DIR}/MI_Floor_01.mdl", project_uvw=True)
+CEILING_MAT = MdlFileCfg(mdl_path=f"{ISAAC_NUCLEUS_DIR}/{_WH_MAT_DIR}/MI_CeilingA_06b.mdl", project_uvw=True)
+WAREHOUSE_PROPS = [
+    # (usd path relative to ISAAC_NUCLEUS_DIR, x, y, z, yaw quat (w,x,y,z))
+    ("Environments/Simple_Warehouse/Props/SM_CardBoxA_01.usd",    1.0,  1.6, 0.0, (1.0, 0.0, 0.0, 0.0)),
+    ("Props/Pallet/pallet.usd",                                   3.0, -1.6, 0.0, (0.92, 0.0, 0.0, 0.38)),
+    ("Environments/Simple_Warehouse/Props/SM_BarelPlastic_A_01.usd", -2.0, 1.7, 0.0, (1.0, 0.0, 0.0, 0.0)),
+    # ("Environments/Simple_Warehouse/Props/SM_RackShelf_01.usd",  -4.5,  0.0, 0.0, (0.707, 0.0, 0.0, 0.707)),
+
+]
+
+_WALL_ASSET_DIR    = "Environments/Simple_Warehouse/Props"
+_WALL_6M           = f"{_WALL_ASSET_DIR}/SM_WallA_6M.usd"
+_WALL_3M           = f"{_WALL_ASSET_DIR}/SM_WallA_3M.usd"
+_WALL_CORNER       = f"{_WALL_ASSET_DIR}/SM_WallA_InnerCorner.usd"
+_WALL_NATIVE_HEIGHT = 3.1
+_WALL_Z_SCALE      = WALL_HEIGHT / _WALL_NATIVE_HEIGHT   # squash 3.1 m -> WALL_HEIGHT
+
+_ROT_YAW_P90 = (0.7071, 0.0, 0.0,  0.7071)   # +90 deg about Z: local +X -> world +Y
+_ROT_YAW_N90 = (0.7071, 0.0, 0.0, -0.7071)   # -90 deg about Z: local +X -> world -Y
+_ROT_YAW_180 = (0.0,    0.0, 0.0,  1.0)      # 180 deg about Z
+
+_CORR_X0 = CORRIDOR_X_OFFSET                       # open end of the corridor
+_CORR_X1 = CORRIDOR_LENGTH + CORRIDOR_X_OFFSET      # closed end / corner vertex x
+_CORR_Y  = CORRIDOR_WIDTH / 2.0                     # inner-face y of each side wall
+_SEG_6M_LEN       = 6.0
+_SEG_FILL_LEN     = CORRIDOR_LENGTH - 3.0 - _SEG_6M_LEN   # = 2.0 for CORRIDOR_LENGTH = 11
+_SEG_FILL_SCALE_Y = _SEG_FILL_LEN / 3.0
+
+# (usd, x, y, z, yaw quat (w,x,y,z), scale (sx,sy,sz))
+WALLS_MODULAR = [
+    # ---- left wall (y = +CORR_Y, outward = +Y) ----
+    (_WALL_6M,     _CORR_X0 + _SEG_6M_LEN / 2.0,                -_CORR_Y, 0.0, _ROT_YAW_P90, (1.0, 1.0, _WALL_Z_SCALE)),
+    (_WALL_3M,     _CORR_X0 + _SEG_6M_LEN + _SEG_FILL_LEN / 2.0,-_CORR_Y, 0.0, _ROT_YAW_P90, (1.0, _SEG_FILL_SCALE_Y, _WALL_Z_SCALE)),
+    # mirrored (scale_y = -1) so its Y-leg points toward the corridor centreline, not outward
+    (_WALL_CORNER, _CORR_X1,                                    _CORR_Y, 0.0, _ROT_YAW_180, (1.0, -1.0, _WALL_Z_SCALE)),
+
+    # ---- right wall (y = -CORR_Y, outward = -Y) ----
+    (_WALL_6M,     _CORR_X0 + _SEG_6M_LEN / 2.0,                _CORR_Y, 0.0, _ROT_YAW_N90, (1.0, 1.0, _WALL_Z_SCALE)),
+    (_WALL_3M,     _CORR_X0 + _SEG_6M_LEN + _SEG_FILL_LEN / 2.0,_CORR_Y, 0.0, _ROT_YAW_N90, (1.0, _SEG_FILL_SCALE_Y, _WALL_Z_SCALE)),
+    (_WALL_CORNER, _CORR_X1,                                    -_CORR_Y, 0.0, _ROT_YAW_180, (1.0, 1.0, _WALL_Z_SCALE)),
+
+]
 
 CRAZYFLIE = ArticulationCfg(
         spawn=sim_utils.MultiUsdFileCfg(
@@ -110,44 +156,28 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
     # Environment geometry
     # -------------------------
     ground = AssetBaseCfg(
-        prim_path="/World/defaultGroundPlane",
-        spawn=sim_utils.GroundPlaneCfg(),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
-    )
-
-    # Left wall
-    wall_left = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/WallLeft",
+        prim_path="/World/envs/env_.*/GroundPlane",
         spawn=sim_utils.CuboidCfg(
-            size=(CORRIDOR_LENGTH, WALL_THICKNESS, WALL_HEIGHT),
+            size=(CORRIDOR_LENGTH + 2 * WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, WALL_THICKNESS),
+            visual_material=GROUND_MAT,
             collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH / 2.0 + CORRIDOR_X_OFFSET, +(CORRIDOR_WIDTH / 2.0 + WALL_THICKNESS / 2.0), WALL_HEIGHT / 2.0), #2.5, 1.05
+            pos=(CORRIDOR_LENGTH / 2.0 + CORRIDOR_X_OFFSET, 0.0, -WALL_THICKNESS / 2.0),  # top face at z=0
         ),
     )
 
-    # Right wall
-    wall_right = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/WallRight",
-        spawn=sim_utils.CuboidCfg(
-            size=(CORRIDOR_LENGTH, WALL_THICKNESS, WALL_HEIGHT),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH / 2.0 + CORRIDOR_X_OFFSET, -(CORRIDOR_WIDTH / 2.0 + WALL_THICKNESS / 2.0), WALL_HEIGHT / 2.0),  #2.5,
-        ),
-    )
+    # Left/right/end walls: see the WALLS_MODULAR spawn loop below.
 
-    # End wall (optional, like the closed end in your screenshot)
-    wall_end = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/WallEnd",
+    ceiling = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/Ceiling",
         spawn=sim_utils.CuboidCfg(
-            size=(WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, WALL_HEIGHT),
+            size=(CORRIDOR_LENGTH + 2 * WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, WALL_THICKNESS),
+            visual_material=CEILING_MAT,
             collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH + WALL_THICKNESS / 2.0 + CORRIDOR_X_OFFSET, 0.0, WALL_HEIGHT / 2.0),
+            pos=(CORRIDOR_LENGTH / 2.0 + CORRIDOR_X_OFFSET, 0.0, CEILING_Z_CENTER),
         ),
     )
 
@@ -177,3 +207,27 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         )
     if CYLINDERS:
         del _i, _pos
+
+    for _wi, (_usd, _wx, _wy, _wz, _wrot) in enumerate(WAREHOUSE_PROPS):
+        vars()[f"warehouse_prop_{_wi:02d}"] = AssetBaseCfg(
+            prim_path=f"/World/envs/env_.*/WarehouseProp{_wi:02d}",
+            spawn=sim_utils.UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/{_usd}",
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(_wx, _wy, _wz), rot=_wrot),
+        )
+    if WAREHOUSE_PROPS:
+        del _wi, _usd, _wx, _wy, _wz, _wrot
+
+    for _mi, (_usd, _mx, _my, _mz, _mrot, _mscale) in enumerate(WALLS_MODULAR):
+        vars()[f"wall_modular_{_mi:02d}"] = AssetBaseCfg(
+            prim_path=f"/World/envs/env_.*/WallModular{_mi:02d}",
+            spawn=sim_utils.UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/{_usd}",
+                scale=_mscale,
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(_mx, _my, _mz), rot=_mrot),
+        )
+    if WALLS_MODULAR:
+        del _mi, _usd, _mx, _my, _mz, _mrot, _mscale

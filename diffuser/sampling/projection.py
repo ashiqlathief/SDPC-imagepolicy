@@ -55,10 +55,10 @@ class Projector:
     # Projects sampled trajectories onto a feasible set (safety, dynamics, obstacles).
     # Used inside SDPC during denoising to enforce constraints.
 
-    def __init__(self, horizon, transition_dim, action_dim=0, goal_dim=0, constraint_list=[], normalizer=None, variant='states', 
+    def __init__(self, horizon, transition_dim, action_dim=0, goal_dim=0, constraint_list=[], normalizer=None, variant='states',
                  dt=0.1, cost_dims=None, skip_initial_state=True, diffusion_timestep_threshold=0.5, gradient=False, gradient_weights=None,
-                 device='cuda', solver='proxsuite', parallelize=False):
-        
+                 device='cuda', solver='proxsuite', parallelize=False, goal_pull_weight=0.0, goal_pull_dim_idx=0):
+
         self.horizon = horizon # Store horizon length H (number of time steps in a planned snippet).
         self.transition_dim = transition_dim # Dimension of each step’s vector (usually state dim, or [state;action] dim).
         self.dt = torch.tensor(dt, device=device) # Sampling time used by dynamic constraints (as a torch scalar on correct device).
@@ -100,6 +100,27 @@ class Projector:
             self.Q = torch.diag(torch.tile(costs, (self.horizon, )))
         else:
             self.Q = torch.eye(transition_dim * horizon, device=self.device) # This creates a cost matrix Q of size (transition_dim * horizon) × (transition_dim * horizon).
+
+        # -------------------------
+        # Optional goal-pull term: shifts the SLSQP cost from a pure
+        # "stay close to the original proposed trajectory z0" objective
+        # (0.5||z-z0||^2_Q) toward one that also prefers, among otherwise
+        # equally-close-to-z0 feasible points, the one that makes more
+        # progress along goal_pull_dim_idx (e.g. +x toward the goal gate).
+        # Implemented as an extra additive term in r (see project()):
+        # cost = 0.5 z^T Q z + r^T z, so subtracting goal_pull_weight at
+        # every timestep's goal_pull_dim_idx entry of r contributes
+        # -goal_pull_weight * sum_t z[t, goal_pull_dim_idx] to the cost --
+        # i.e. lower cost (preferred) for larger progress along that dim.
+        # goal_pull_weight=0.0 (default) reproduces the exact previous
+        # behavior -- this is opt-in only, existing variants are unaffected.
+        self.goal_pull_weight = float(goal_pull_weight)
+        self.goal_pull_dim_idx = int(goal_pull_dim_idx)
+        goal_pull_vec = torch.zeros(transition_dim * horizon, device=self.device)
+        if self.goal_pull_weight != 0.0:
+            idx = torch.arange(horizon, device=self.device) * transition_dim + self.goal_pull_dim_idx
+            goal_pull_vec[idx] = self.goal_pull_weight
+        self.goal_pull_vec = goal_pull_vec
 
         # Initialize linear constraint matrices (will be concatenated later).
         self.A = torch.empty((0, self.transition_dim * self.horizon), device=self.device)   # Equality constraints: A z = b, it’s a tensor with zero rows and transition_dim * horizon columns
@@ -170,6 +191,9 @@ class Projector:
         # Linear term r encodes “pull toward original trajectory” via r = -z0^T Q
         # which penalizes how far the optimized trajectory z deviates from the original trajectory_reshaped.
         r = - trajectory_reshaped @ self.Q
+        if self.goal_pull_weight != 0.0:
+            # Same r for every candidate in the batch -> broadcast-subtract once.
+            r = r - self.goal_pull_vec.unsqueeze(0)
         # Convert everything to NumPy arrays (and double precision) because the solver (scipy.optimize.minimize) expects NumPy input.
         r_np = r.cpu().numpy()
         Q = self.Q_np.astype('double')

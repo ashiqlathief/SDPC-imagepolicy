@@ -302,7 +302,7 @@ class ObstacleTracker:
     """
 
     def __init__(self, match_dist: float = 0.25, dynamic_speed_thresh: float = 0.05,
-                 dynamic_confirm_frames: int = 3, max_missed_static: int = 700,
+                 dynamic_confirm_frames: int = 3, max_missed_static: int = 50,
                  max_missed_dynamic: int = 10):
         self.match_dist = match_dist
         self.dynamic_speed_thresh = dynamic_speed_thresh
