@@ -202,3 +202,73 @@ class Transformer1DDenoisingModel(nn.Module):
 
         noise_pred = self.action_out(tok)                # (B, H, action_dim)
         return noise_pred
+
+
+class PoseCondTransformer1DDenoisingModel(Transformer1DDenoisingModel):
+    """
+    Same as Transformer1DDenoisingModel, plus current-pose + target-pose conditioning.
+
+    cond must additionally contain:
+        "pose_now":    (B, 3) normalized current position at the last observed frame
+        "pose_target": (B, 3) normalized episode goal position
+    (see CrazyflieImageDataset(use_pose_cond=True)).
+
+    Pose is folded in the same two places time/image already are:
+      - as a second cross-attention context token (so pose_encoder projects to
+        image_cond_dim, matching DiTBlock.cross_attn's kdim/vdim)
+      - as an extra additive term in the AdaLN conditioning vector `c`
+    Only self.encoder is attached externally (by ImagePoseCondTransformer1DModel);
+    everything else (blocks, action_proj, etc.) is inherited unchanged.
+    """
+
+    def __init__(self, *args, pose_dim: int = 3, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pose_dim = pose_dim
+
+        self.pose_encoder = nn.Sequential(
+            nn.Linear(2 * pose_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, self.image_cond_dim),
+        )
+        self.pose_proj = nn.Sequential(
+            nn.Linear(self.image_cond_dim, self.d_model),
+            nn.SiLU(),
+        )
+
+    def forward(self, x, cond, time, returns=None, use_dropout=True, force_dropout=False):
+
+        if not isinstance(cond, dict) or "obs_rgb" not in cond:
+            raise ValueError("cond must be dict with key 'obs_rgb'")
+        if "pose_now" not in cond or "pose_target" not in cond:
+            raise ValueError("cond must contain keys 'pose_now' and 'pose_target'")
+
+        B, H, _ = x.shape
+
+        # ── 1. Encode image + pose ─────────────────────────────────────
+        image_z = self.encoder(cond["obs_rgb"])          # (B, image_cond_dim)
+        pose_in = torch.cat([cond["pose_now"], cond["pose_target"]], dim=-1)  # (B, 2*pose_dim)
+        pose_z = self.pose_encoder(pose_in)               # (B, image_cond_dim)
+
+        # Both tokens feed cross-attention as separate context entries
+        context = torch.stack([image_z, pose_z], dim=1)  # (B, 2, image_cond_dim)
+
+        # ── 2. Build combined conditioning vector c ───────────────────
+        t_emb = self.time_mlp(time)                      # (B, d_model)
+        z_emb = self.image_proj(image_z)                 # (B, d_model)
+        p_emb = self.pose_proj(pose_z)                    # (B, d_model)
+        c = t_emb + z_emb + p_emb                         # (B, d_model)
+
+        # ── 3. Tokenize actions ───────────────────────────────────────
+        tok = self.action_proj(x)                        # (B, H, d_model)
+        tok = tok + self.pos_embed
+
+        # ── 4. DiT blocks ─────────────────────────────────────────────
+        for block in self.blocks:
+            tok = block(tok, c, context)
+
+        # ── 5. Output ─────────────────────────────────────────────────
+        shift, scale = self.final_modulation(c).chunk(2, dim=-1)
+        tok = modulate(self.norm_out(tok), shift, scale)
+
+        noise_pred = self.action_out(tok)
+        return noise_pred

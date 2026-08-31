@@ -1,6 +1,6 @@
 from .unet1d_temporal_cond import UNet1DTemporalCondModel, TemporalValue, MLPnet
 from .diffusion import GaussianDiffusion
 from .image_encoder import ImageObsEncoder
-from .image_cond_unet import ImageCondUNet1DTemporalCondModel
+from .image_cond_unet import ImageCondUNet1DTemporalCondModel, ImagePoseCondUNet1DTemporalCondModel
 from .vit_obs_encoder import ViTObsEncoder
-from .image_cond_transformer import ImageCondTransformer1DModel
+from .image_cond_transformer import ImageCondTransformer1DModel, ImagePoseCondTransformer1DModel

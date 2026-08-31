@@ -4,6 +4,19 @@ from diffuser.utils import watch
 USE_DEPTH = False
 DEPTH_NEAR = 0.1   # metres
 DEPTH_FAR = 10.0    # metres
+MODEL = 'models.ImagePoseCondUNet1DTemporalCondModel'
+# other options: models.ImageCondTransformer1DModel, models.ImageCondUNet1DTemporalCondModel,
+#                models.ImagePoseCondTransformer1DModel, models.ImagePoseCondUNet1DTemporalCondModel
+
+_UNET_MODELS = {
+    'models.ImageCondUNet1DTemporalCondModel',
+    'models.ImagePoseCondUNet1DTemporalCondModel',
+}
+_IS_UNET = MODEL in _UNET_MODELS
+
+VIT_IMG_SIZE = 96
+ENCODER_TYPE = 'vitp' if _IS_UNET else 'raw_pixels'
+IMAGE_COND_DIM = 384 if _IS_UNET else (4 if USE_DEPTH else 3) * VIT_IMG_SIZE * VIT_IMG_SIZE
 
 BOXES = [
 ]
@@ -59,13 +72,14 @@ logbase = 'isaac/logs'
 base = {
     'diffusion': {
         ## model
-        'model': 'models.ImageCondTransformer1DModel', #ImageCondTransformer1DModel, ImageCondUNet1DTemporalCondModel
+        'model': MODEL,
         'diffusion': 'models.GaussianDiffusion',
-        'encoder_type': 'raw_pixels',   # "vit", "vitp", or "cnn" or "raw_pixels"
+        'encoder_type': ENCODER_TYPE,   # derived from MODEL above -- see comment there
         'use_depth': USE_DEPTH,   # RGBD switch: set True only if the zarr dataset was collected with quadcopter.py --use_depth
         'horizon': 8,
         'n_obs_steps': 2,
-        'image_cond_dim': 384,   # 96*96*3 for raw pixels (96*96*4 if use_depth=True) 27648 for vit, 512 for vitp
+        'image_cond_dim': IMAGE_COND_DIM,   # derived from MODEL above -- see comment there
+        'pose_cond_dim': 64,
         'n_diffusion_steps': 20,
         'loss_type': 'l2',
         'loss_discount': 1.0,
@@ -79,7 +93,7 @@ base = {
         'test_ret': 0.9,
                 
         # ── ViT knobs (these must live here so read_config sets them on args) ──
-        'vit_img_size': 96,
+        'vit_img_size': VIT_IMG_SIZE,
         'vit_patch_size': 8,
         'vit_width': 512,
         'vit_depth': 6,

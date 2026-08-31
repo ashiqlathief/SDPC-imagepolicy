@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from .image_encoder import ImageObsEncoder
 from .vit_obs_encoder import ViTObsEncoder
-from .transformer_denoiserDIT import Transformer1DDenoisingModel
+from .transformer_denoiserDIT import Transformer1DDenoisingModel, PoseCondTransformer1DDenoisingModel
 from .image_encoder import ImageObsEncoder
 from .vit_obs_encoder import ViTObsEncoder, ViTObsEncoderPretrained
 
@@ -121,6 +121,107 @@ class ImageCondTransformer1DModel(nn.Module):
             condition_dropout=condition_dropout,
         )
         # Share the encoder with core so forward() can call self.encoder
+        self.core.encoder = self.encoder
+
+        if device:
+            self.to(device)
+
+    def forward(self, x, cond, time, returns=None, use_dropout=True, force_dropout=False):
+        return self.core(x, cond, time, returns, use_dropout, force_dropout)
+
+
+class ImagePoseCondTransformer1DModel(nn.Module):
+    """
+    Same as ImageCondTransformer1DModel, plus current-pose + target-pose conditioning.
+    Encoder setup is identical. Only the denoiser core differs: it's the pose-aware
+    PoseCondTransformer1DDenoisingModel instead of Transformer1DDenoisingModel.
+    """
+
+    def __init__(
+        self,
+        horizon: int,
+        action_dim: int,
+        image_cond_dim: int = 256,
+        pose_dim: int = 3,
+        d_model: int = 256,
+        n_heads: int = 8,
+        depth: int = 6,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.1,
+        encoder_type: str = "vit",
+        vit_img_size: int = 96,
+        vit_patch_size: int = 8,
+        vit_width: int = 256,
+        vit_depth: int = 6,
+        vit_heads: int = 8,
+        vit_mlp_ratio: float = 4.0,
+        vit_dropout: float = 0.1,
+        vit_attn_dropout: float = 0.0,
+        returns_condition: bool = False,
+        condition_dropout: float = 0.1,
+        device=None,
+        use_depth: bool = False,
+        **kwargs,
+    ):
+        super().__init__()
+        self.horizon = horizon
+        self.action_dim = action_dim
+        self.encoder_type = encoder_type.lower()
+        self.image_cond_dim = image_cond_dim
+        self.use_depth = use_depth
+        self.in_chans = 4 if use_depth else 3
+
+        if self.encoder_type == "vitp":
+            self.encoder = ViTObsEncoderPretrained(
+                image_size=vit_img_size,
+                patch_size=vit_patch_size,
+                cond_dim=image_cond_dim,
+                pretrained=True,
+                in_chans=self.in_chans,
+            )
+        elif self.encoder_type == "vit":
+            self.encoder = ViTObsEncoder(
+                image_size=vit_img_size,
+                patch_size=vit_patch_size,
+                cond_dim=image_cond_dim,
+                embed_dim=vit_width,
+                depth=vit_depth,
+                num_heads=vit_heads,
+                mlp_ratio=vit_mlp_ratio,
+                dropout=vit_dropout,
+                attn_dropout=vit_attn_dropout,
+                in_chans=self.in_chans,
+            )
+        elif self.encoder_type == "raw_pixels":
+            self.encoder = RawPixelEncoder(in_chans=self.in_chans, img_size=vit_img_size)
+            self.image_cond_dim = self.encoder.out_dim
+        elif self.encoder_type == "cnn":
+            self.encoder = ImageObsEncoder(
+                cond_dim=image_cond_dim,
+                pretrained=True,
+                in_chans=self.in_chans,
+            )
+        else:
+            raise ValueError(f"Unsupported encoder_type: {encoder_type}")
+
+        assert self.encoder.in_chans == self.in_chans, (
+            f"Encoder in_chans mismatch: encoder built with {self.encoder.in_chans}, "
+            f"model expected {self.in_chans} (use_depth={use_depth})"
+        )
+
+        self.core = PoseCondTransformer1DDenoisingModel(
+            horizon=horizon,
+            action_dim=action_dim,
+            image_cond_dim=self.image_cond_dim,
+            pose_dim=pose_dim,
+            d_model=d_model,
+            n_heads=n_heads,
+            depth=depth,
+            mlp_ratio=mlp_ratio,
+            dropout=dropout,
+            returns_condition=returns_condition,
+            condition_dropout=condition_dropout,
+        )
         self.core.encoder = self.encoder
 
         if device:

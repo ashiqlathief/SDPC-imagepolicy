@@ -53,6 +53,12 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
                                      # found, so eval can run on a machine without the raw
                                      # dataset. Also accepts a legacy normalizer_stats.npz
                                      # sidecar for runs trained before stats were embedded.
+        use_pose_cond=False,        # also expose "pose_now" (current position at the last
+                                     # observed frame) and "pose_target" (that episode's
+                                     # fixed goal, from the zarr "targets" array) in
+                                     # conditions, normalized via self.pose_normalizer.
+                                     # Off by default: existing image-only models never see
+                                     # these extra keys.
         **_legacy_kwargs,           # swallow stride/dt/action_mode etc. from a
                                      # dataset_config.pkl pickled before those params were
                                      # removed -- Config.__call__ forwards every key it has
@@ -73,6 +79,8 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         self.in_chans = 4 if self.use_depth else 3
         self.depth_near = float(depth_near) if depth_near is not None else _DEFAULT_DEPTH_NEAR
         self.depth_far = float(depth_far) if depth_far is not None else _DEFAULT_DEPTH_FAR
+        self.use_pose_cond = bool(use_pose_cond)
+        self.pose_normalizer = None
 
         if preprocess_fns is None:
             preprocess_fns = []
@@ -107,6 +115,13 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
                 self.groups = []
                 self.episodes = []
                 self.indices = []
+                if self.use_pose_cond and stats_path is not None and os.path.isfile(stats_path):
+                    ckpt = torch.load(stats_path, map_location="cpu")
+                    if "pose_min" in ckpt and "pose_max" in ckpt:
+                        pX = np.stack(
+                            [np.asarray(ckpt["pose_min"]), np.asarray(ckpt["pose_max"])], axis=0
+                        ).astype(np.float32)
+                        self.pose_normalizer = LimitsNormalizer(pX)
                 print(f"[CrazyflieImageDataset] Zarr folder not found; loaded normalizer stats from: {source}")
                 return
             raise FileNotFoundError(f"Zarr folder not found: {data_dir}")
@@ -123,6 +138,14 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
                     raise ValueError(
                         f"use_depth=True but zarr store has no depth data: {p}. "
                         "Re-collect with `quadcopter.py --use_depth`, or set use_depth=False."
+                    )
+
+        if self.use_pose_cond:
+            for p, g in zip(zarr_paths, self.groups):
+                if not bool(g.attrs.get("has_targets", False)) or "targets" not in g:
+                    raise ValueError(
+                        f"use_pose_cond=True but zarr store has no target data: {p}. "
+                        "Re-collect with a target-recording run, or set use_pose_cond=False."
                     )
 
         # --- Sanity / dims from first store ---
@@ -205,6 +228,33 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         X = np.stack([a_mins, a_maxs], axis=0).astype(np.float32)
         self.action_normalizer = LimitsNormalizer(X)
 
+        # --- Build pose normalizer (LimitsNormalizer) over current + target positions ---
+        # Shared scale for both "pose_now" (drone position) and "pose_target" (episode goal),
+        # since both live in the same world-frame coordinates.
+        if self.use_pose_cond:
+            p_mins = None
+            p_maxs = None
+            for gi, g in enumerate(self.groups):
+                pos_all = g["states"][:, self.pos_slice]
+                targets_all = g["targets"][:]
+
+                for (ep_gi, ep_start, ep_end) in self.episodes:
+                    if ep_gi != gi:
+                        continue
+
+                    pos_ep = pos_all[ep_start : ep_end + 1]
+                    tgt_ep = targets_all[ep_start : ep_end + 1]
+                    combined = np.concatenate([pos_ep, tgt_ep], axis=0)
+
+                    cmin = combined.min(axis=0)
+                    cmax = combined.max(axis=0)
+
+                    p_mins = cmin if p_mins is None else np.minimum(p_mins, cmin)
+                    p_maxs = cmax if p_maxs is None else np.maximum(p_maxs, cmax)
+
+            pX = np.stack([p_mins, p_maxs], axis=0).astype(np.float32)
+            self.pose_normalizer = LimitsNormalizer(pX)
+
     def __len__(self):
         return len(self.indices)
 
@@ -244,6 +294,12 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
 
         actions = self.action_normalizer.normalize(actions.astype(np.float32))
         conditions = {"obs_rgb": rgb}
+
+        if self.use_pose_cond:
+            pose_now = states[0, self.pos_slice]                  # (3,) position at t_start
+            pose_target = g["targets"][t_start].astype(np.float32)  # (3,) this episode's goal
+            conditions["pose_now"] = self.pose_normalizer.normalize(pose_now)
+            conditions["pose_target"] = self.pose_normalizer.normalize(pose_target)
 
         if self.include_returns:
             returns = np.array([0.0 / self.returns_scale], dtype=np.float32)

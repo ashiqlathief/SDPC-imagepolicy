@@ -876,7 +876,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_dir", type=str, required=True)
     parser.add_argument("--max_steps", type=int, default=700)
-    parser.add_argument("--action_scale", type=float, default=10.0)
+    parser.add_argument("--action_scale", type=float, default=1.0)
     parser.add_argument("--num_candidates", type=int, default=4,
                         help="Override K (number of sampled candidates) for variants that select among multiple candidates")
     parser.add_argument("--use_halfspaces", action="store_true", default=False,

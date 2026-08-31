@@ -41,7 +41,7 @@ FLIGHT_Z_MIN = 0.0   # floor
 FLIGHT_Z_MAX = 2.5   # ceiling
 
 z_halfspaces = [
-    ([0.0, 0.0,  1.0], 1.5),   # z <= FLIGHT_Z_MAX :drone cannot fly above wall/ceiling
+    ([0.0, 0.0,  1.0], FLIGHT_Z_MAX),   # z <= FLIGHT_Z_MAX :drone cannot fly above wall/ceiling
     ([0.0, 0.0, -1.0], FLIGHT_Z_MIN),   # z >= FLIGHT_Z_MIN :drone cannot go underground
 ]
 
@@ -328,6 +328,9 @@ def sample_action_candidates(diffusion, cond, horizon, action_dim, num_candidate
     # Repeat condition across batch to get K samples
     obs_rgb = cond["obs_rgb"]  # (1,To,3,H,W)
     cond_k = {"obs_rgb": obs_rgb.repeat(num_candidates, 1, 1, 1, 1)}  # (K,To,3,H,W)
+    if "pose_now" in cond:
+        cond_k["pose_now"] = cond["pose_now"].repeat(num_candidates, 1)        # (K,3)
+        cond_k["pose_target"] = cond["pose_target"].repeat(num_candidates, 1)  # (K,3)
 
     with torch.no_grad():
         x, infos = diffusion.conditional_sample(cond_k, horizon=horizon,projector=projector)  # x: (K,H,D)
@@ -724,6 +727,10 @@ def main():
                              "(bounds the SLSQP solve's constraint count).")
     parser.add_argument("--depth_obstacle_z_band", type=float, default=0.1)
     parser.add_argument("--save_frames", action="store_true", default=False)
+    parser.add_argument("--target_y", type=float, default=0.75,
+                         help="y-coordinate of the fixed goal fed to pose-conditioned models "
+                              "as pose_target=(env.cfg.gate_x_max, target_y, 1.0). Ignored for "
+                              "image-only models (dataset.use_pose_cond=False).")
     args, _unknown = parser.parse_known_args()
 
     device         = torch.device("cuda:0")
@@ -837,6 +844,14 @@ def main():
         action_dim = int(getattr(diffusion, "action_dim", 3))
         To = int(getattr(dataset, "n_obs_steps", 2)) if hasattr(dataset, "n_obs_steps") else 2
         print(f"[INFO] Online eval started. To={To}, H={horizon}, action_dim={action_dim}")
+
+        use_pose_cond = bool(getattr(dataset, "use_pose_cond", False))
+        pose_target_world = None
+        if use_pose_cond:
+            pose_target_world = np.array(
+                [env.cfg.gate_x_max, args.target_y, 1.0], dtype=np.float32
+            )
+            print(f"[INFO] Pose-conditioned model: fixed goal for this run = {pose_target_world.tolist()}")
         logger = MetricsLogger(
             save_dir=os.path.join(run_dir, "results"),                               
             encoder_type=encoder_type,
@@ -964,6 +979,12 @@ def main():
                 # build condition
                 obs_rgb_t = preprocess_obs_stack(rgb_hist, use_depth).to(device)  # (1,To,3or4,H,W)
                 cond = {"obs_rgb": obs_rgb_t}
+
+                if use_pose_cond:
+                    pose_now_norm = dataset.pose_normalizer.normalize(pos[:3].astype(np.float32))
+                    pose_target_norm = dataset.pose_normalizer.normalize(pose_target_world)
+                    cond["pose_now"] = torch.from_numpy(pose_now_norm).float().unsqueeze(0).to(device)
+                    cond["pose_target"] = torch.from_numpy(pose_target_norm).float().unsqueeze(0).to(device)
 
                 # -------------------------------------------------
                 # Sample K candidate chunks (normalized action space)

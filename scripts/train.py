@@ -23,6 +23,11 @@ class Parser(utils.Parser):
     dataset: str = exp
     config: str = 'config.' + exp
 
+_POSE_COND_MODELS = {
+    'models.ImagePoseCondTransformer1DModel',
+    'models.ImagePoseCondUNet1DTemporalCondModel',
+}
+
 for seed in seeds:
     args = Parser().parse_args(experiment='diffusion', seed=seed)
 
@@ -51,6 +56,7 @@ for seed in seeds:
         returns_scale=args.max_path_length,               # Because the reward is <= 1 in each timestep
         discount=args.discount,
         use_depth=getattr(args, 'use_depth', False),
+        use_pose_cond=args.model in _POSE_COND_MODELS,
     )
 
     dataset = dataset_config() # <class 'diffuser.datasets.sequence.SequenceDataset'>
@@ -72,7 +78,10 @@ for seed in seeds:
     # -----------------------------------------------------------------------------#
     # ------------------------------ model ----------------------------------------#
     # -----------------------------------------------------------------------------#
-    if args.model == 'models.ImageCondTransformer1DModel':
+    if args.model in ('models.ImageCondTransformer1DModel', 'models.ImagePoseCondTransformer1DModel'):
+        pose_kwargs = {}
+        if args.model == 'models.ImagePoseCondTransformer1DModel':
+            pose_kwargs['pose_dim'] = getattr(args, 'pose_dim', 3)
         model_config = utils.Config(
             args.model,
             savepath=(args.savepath, 'model_config.pkl'),
@@ -98,9 +107,14 @@ for seed in seeds:
             condition_dropout=args.condition_dropout,
             device=args.device,
             use_depth=getattr(args, 'use_depth', False),
+            **pose_kwargs,
         )
         print("Using Transformer denoiser model.")
     else:
+        pose_kwargs = {}
+        if args.model == 'models.ImagePoseCondUNet1DTemporalCondModel':
+            pose_kwargs['pose_dim'] = getattr(args, 'pose_dim', 3)
+            pose_kwargs['pose_cond_dim'] = getattr(args, 'pose_cond_dim', 64)
         model_config = utils.Config(
             args.model,
             savepath=(args.savepath, 'model_config.pkl'),
@@ -124,6 +138,7 @@ for seed in seeds:
             vit_attn_dropout=args.vit_attn_dropout,
             device=args.device,
             use_depth=getattr(args, 'use_depth', False),
+            **pose_kwargs,
         )
         print("Using image-conditioned Unet model")
     # -----------------------------------------------------------------------------#

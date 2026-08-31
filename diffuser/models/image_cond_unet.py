@@ -159,3 +159,145 @@ class ImageCondUNet1DTemporalCondModel(nn.Module):
         # Return only the action part (diffusion target is action noise)
         eps_action = eps_full[..., : self.action_dim]
         return eps_action
+
+
+class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
+    """
+    Same as ImageCondUNet1DTemporalCondModel, plus current-pose + target-pose conditioning.
+
+    cond must additionally contain:
+        "pose_now":    (B, 3) normalized current position at the last observed frame
+        "pose_target": (B, 3) normalized episode goal position
+    (see CrazyflieImageDataset(use_pose_cond=True)).
+
+    The two 3-vectors are concatenated and passed through a small MLP to get a
+    pose_cond_dim embedding, which is concatenated with the image embedding before
+    being widened across the horizon -- everything downstream (the UNet core) is
+    identical to the image-only model, just with a wider transition_dim.
+    """
+
+    def __init__(
+        self,
+        horizon: int,
+        action_dim: int,
+        image_cond_dim: int = 256,
+        pose_dim: int = 3,
+        pose_cond_dim: int = 64,
+        dim: int = 64,
+        dim_mults=(1, 2, 4, 8),
+        returns_condition: bool = False,
+        condition_dropout: float = 0.1,
+        encoder_type: str = "vit",
+        vit_img_size: int = 96,
+        vit_patch_size: int = 8,
+        vit_width: int = 256,
+        vit_depth: int = 6,
+        vit_heads: int = 8,
+        vit_mlp_ratio: float = 4.0,
+        vit_dropout: float = 0.1,
+        vit_attn_dropout: float = 0.0,
+        device: str = None,
+        use_depth: bool = False,
+        **kwargs,
+    ):
+        super().__init__()
+        self.horizon = horizon
+        self.action_dim = action_dim
+        self.image_cond_dim = image_cond_dim
+        self.pose_dim = pose_dim
+        self.pose_cond_dim = pose_cond_dim
+        self.encoder_type = encoder_type.lower()
+        self.use_depth = use_depth
+        self.in_chans = 4 if use_depth else 3
+
+        if self.encoder_type == "vitp":
+            self.encoder = ViTObsEncoderPretrained(
+                image_size=vit_img_size,
+                patch_size=vit_patch_size,
+                cond_dim=image_cond_dim,
+                pretrained=True,
+                in_chans=self.in_chans,
+            )
+        elif self.encoder_type == "vit":
+            self.encoder = ViTObsEncoder(
+                image_size=vit_img_size,
+                patch_size=vit_patch_size,
+                cond_dim=image_cond_dim,
+                embed_dim=image_cond_dim,
+                depth=vit_depth,
+                num_heads=vit_heads,
+                mlp_ratio=vit_mlp_ratio,
+                dropout=vit_dropout,
+                attn_dropout=vit_attn_dropout,
+                in_chans=self.in_chans,
+            )
+        elif self.encoder_type == "raw_pixels":
+            self.encoder = RawPixelEncoder(in_chans=self.in_chans, img_size=vit_img_size)
+            self.image_cond_dim = self.encoder.out_dim
+        elif self.encoder_type == "cnn":
+            self.encoder = ImageObsEncoder(
+                cond_dim=image_cond_dim,
+                pretrained=True,
+                in_chans=self.in_chans,
+            )
+        else:
+            raise ValueError(f"Unsupported encoder_type: {encoder_type}")
+
+        assert self.encoder.in_chans == self.in_chans, (
+            f"Encoder in_chans mismatch: encoder built with {self.encoder.in_chans}, "
+            f"model expected {self.in_chans} (use_depth={use_depth})"
+        )
+
+        self.pose_encoder = nn.Sequential(
+            nn.Linear(2 * pose_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, pose_cond_dim),
+        )
+
+        self.core = UNet1DTemporalCondModel(
+            horizon=horizon,
+            transition_dim=action_dim + self.image_cond_dim + pose_cond_dim,
+            cond_dim=0,  # image + pose cond is concatenated, not passed as a separate "state condition"
+            dim=dim,
+            dim_mults=dim_mults,
+            returns_condition=returns_condition,
+            condition_dropout=condition_dropout,
+            **kwargs,
+        )
+
+        if device is not None:
+            self.to(device)
+
+    def forward(self, x, cond, time, returns=None, use_dropout=True, force_dropout=False):
+        if not isinstance(cond, dict):
+            raise TypeError(f"Expected cond to be dict, got {type(cond)}")
+        if "obs_rgb" not in cond:
+            raise KeyError("cond must contain key 'obs_rgb'")
+        if "pose_now" not in cond or "pose_target" not in cond:
+            raise KeyError("cond must contain keys 'pose_now' and 'pose_target'")
+
+        rgb = cond["obs_rgb"]
+        B, H, A = x.shape
+        if A != self.action_dim:
+            raise ValueError(f"x action dim mismatch: got {A}, expected {self.action_dim}")
+        if H != self.horizon:
+            raise ValueError(f"x horizon mismatch: got {H}, expected {self.horizon}")
+
+        image_z = self.encoder(rgb)  # (B, image_cond_dim)
+        pose_in = torch.cat([cond["pose_now"], cond["pose_target"]], dim=-1)  # (B, 2*pose_dim)
+        pose_z = self.pose_encoder(pose_in)  # (B, pose_cond_dim)
+
+        cond_vec = torch.cat([image_z, pose_z], dim=-1)  # (B, image_cond_dim+pose_cond_dim)
+        cond_seq = cond_vec.unsqueeze(1).expand(B, H, cond_vec.shape[-1])
+
+        x_in = torch.cat([x, cond_seq], dim=-1)
+
+        eps_full = self.core(
+            x_in,
+            cond=None,
+            time=time,
+            returns=returns,
+            use_dropout=use_dropout,
+            force_dropout=force_dropout,
+        )
+        return eps_full[..., : self.action_dim]

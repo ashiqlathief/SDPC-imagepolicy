@@ -27,7 +27,7 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.scene import InteractiveScene
 
 
-from .crazyflie_env_cfg import (CrazyflieSceneCfg, CYLINDERS, CORRIDOR_LENGTH, CORRIDOR_X_OFFSET,
+from .crazyflie_env_cfg1 import (CrazyflieSceneCfg, CYLINDERS, CORRIDOR_LENGTH, CORRIDOR_X_OFFSET,
                                 DEPTH_FAR)
 
 def quat_to_yaw(quat_xyzw: torch.Tensor) -> torch.Tensor:

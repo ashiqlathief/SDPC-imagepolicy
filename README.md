@@ -76,6 +76,22 @@ pip install -r requirement.txt
 # Make the project importable
 export PYTHONPATH=$PWD:$PYTHONPATH
 ```
+
+**3. (Optional) Enable ROS2 for `scripts/depth_camera_live_test.py`:**
+
+ROS2 (Humble) isn't installed system-wide (there is no `/opt/ros/humble`) — it ships bundled inside the `isaacsim-ros2` pip package already installed in `env_isaaclab`, built against this env's Python 3.11. Point the env at it with a one-time conda activation hook so `import rclpy` works whenever `env_isaaclab` is active:
+
+```bash
+mkdir -p $CONDA_PREFIX/etc/conda/activate.d
+cat > $CONDA_PREFIX/etc/conda/activate.d/ros2_humble.sh <<'EOF'
+export ISAAC_ROS2_HUMBLE="$CONDA_PREFIX/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/humble"
+export PYTHONPATH="$ISAAC_ROS2_HUMBLE/rclpy:$PYTHONPATH"
+export LD_LIBRARY_PATH="$ISAAC_ROS2_HUMBLE/lib:$LD_LIBRARY_PATH"
+EOF
+
+# Re-activate to pick it up in the current shell
+conda deactivate && conda activate env_isaaclab
+```
 ---
 
 ## Data Collection

@@ -380,8 +380,12 @@ def run_ros2(args, tracker):
         from rclpy.node import Node
         from sensor_msgs.msg import Image, CameraInfo
     except ImportError:
-        print("[ERROR] rclpy/sensor_msgs not importable. Source your ROS2 install first, e.g.:\n"
-              "        source /opt/ros/humble/setup.bash")
+        print("[ERROR] rclpy/sensor_msgs not importable. This env's ROS2 (Humble) ships bundled\n"
+              "        inside isaacsim-ros2, not as a system /opt/ros/humble install. If the\n"
+              "        env_isaaclab conda activation hook isn't set up, export these first:\n"
+              "        export ISAAC_ROS2_HUMBLE=\"$CONDA_PREFIX/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/humble\"\n"
+              "        export PYTHONPATH=\"$ISAAC_ROS2_HUMBLE/rclpy:$PYTHONPATH\"\n"
+              "        export LD_LIBRARY_PATH=\"$ISAAC_ROS2_HUMBLE/lib:$LD_LIBRARY_PATH\"")
         return
 
     plot = LivePlot(args.radius_limit, mode=args.plot_mode, axes=args.plot_axes, axis_limit=args.max_range) if args.viz else None
