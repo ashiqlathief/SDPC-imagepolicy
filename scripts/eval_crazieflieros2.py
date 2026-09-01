@@ -589,21 +589,22 @@ class Ros2HardwareRunner(Node):
         depth = self._decode_image(msg, IMAGE_SPECS["depth"])
         if depth is not None:
             depth = depth.astype(np.float32) * 0.001  # RealSense: raw mm -> metres
-            self.cam_state["depth"] = self._center_crop(depth)
+            # No crop: depth here only feeds obstacle backprojection
+            # (_rebuild_depth_projector), not the policy's image input, so there's
+            # no need to match the sim FPV camera's 96x96 -- cropping to that just
+            # threw away most of the sensor's real field of view/range. If a
+            # future checkpoint has use_depth=True (RGBD policy conditioning),
+            # depth must again match the cropped RGB frame's resolution -- add a
+            # resize/crop back in for that path specifically.
+            self.cam_state["depth"] = depth
 
     def _depth_info_cb(self, msg):
         """Real depth-sensor intrinsics (fx/fy/cx/cy from K), NOT the simulated
-        FPV camera's -- backprojection needs the actual calibration. cx/cy are
-        corrected for _center_crop's offset (fx/fy are untouched by cropping,
-        only the principal point shifts); offset is derived from THIS message's
-        own width/height, matching whatever _center_crop computes for the
-        depth image at runtime, rather than hardcoding today's specific sensor
-        resolution."""
-        x0 = (msg.width - FPV_WIDTH) // 2
-        y0 = (msg.height - FPV_HEIGHT) // 2
+        FPV camera's -- backprojection needs the actual calibration. Depth is
+        no longer cropped (see _depth_cb), so cx/cy are used as-is, uncorrected."""
         self.depth_fx, self.depth_fy = float(msg.k[0]), float(msg.k[4])
-        self.depth_cx = float(msg.k[2]) - x0
-        self.depth_cy = float(msg.k[5]) - y0
+        self.depth_cx = float(msg.k[2])
+        self.depth_cy = float(msg.k[5])
         self._depth_intrinsics_ready = True
 
     def _pose_cb(self, msg):
@@ -625,10 +626,21 @@ class Ros2HardwareRunner(Node):
         return self.cam_state["color"], self.cam_state["depth"]
 
     def _publish_stop(self):
-        if rclpy.ok():
-            stop = TwistStamped()
-            stop.header.stamp = self.get_clock().now().to_msg()
-            self.cmd_pub.publish(stop)
+        """Hold the drone's last known position -- NOT a TwistStamped zero
+        (cmd_pub is a PoseStamped publisher; publishing a TwistStamped on it
+        raises a TypeError) and NOT an all-zero pose (that would command a
+        flight to the origin instead of stopping in place)."""
+        if not rclpy.ok():
+            return
+        pos = self.state.get("pos")
+        if pos is None:
+            return  # never got a pose fix -- nothing safe to hold to
+        stop = PoseStamped()
+        stop.header.stamp = self.get_clock().now().to_msg()
+        stop.pose.position.x = float(pos[0])
+        stop.pose.position.y = float(pos[1])
+        stop.pose.position.z = float(pos[2])
+        self.cmd_pub.publish(stop)
 
     def _rebuild_depth_projector(self):
         """--depth_obstacles: capture the current depth frame, back-project ->
@@ -811,9 +823,11 @@ class Ros2HardwareRunner(Node):
         self._prev_actions_real = a_candidates_proj_real[which:which + 1]
 
         # delta-position -> velocity setpoint
+        # a0_real already has action_scale applied (via a_candidates_real above) --
+        # don't re-multiply here, or ACTION_SCALE != 1.0 gets squared.
         pos_cmd = np.zeros(3, dtype=np.float32)
 
-        inc_action = a0_real[:self.action_dim] * args.action_scale
+        inc_action = a0_real[:self.action_dim]
         inc_action = np.clip(inc_action, [-0.5, -0.5, -0.1], [0.5, 0.5, 0.1])
 
         pos_cmd[:self.action_dim] = pos + inc_action
