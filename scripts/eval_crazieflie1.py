@@ -46,17 +46,17 @@ z_halfspaces = [
 ]
 
 projection_variants = [
-  'sdpc-r',
-#   'sdpc-r-tightened',
-  'sdpc-c',
-# #   'sdpc-c-tightened',
-  'sdpc-t',
-#   'sdpc-t-tightened',
+#   'sdpc-r',
+# #   'sdpc-r-tightened',
+#   'sdpc-c',
+# # #   'sdpc-c-tightened',
+#   'sdpc-t',
+# #   'sdpc-t-tightened',
   'diffuser',
-  'gradient',
-  'gradient-tightened',
-  'post_processing',
-  'post_processing-tightened',
+#   'gradient',
+#   'gradient-tightened',
+#   'post_processing',
+#   'post_processing-tightened',
 ]
 
 def variant_cfg(name: str):

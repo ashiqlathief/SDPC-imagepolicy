@@ -10,7 +10,7 @@ _app_args, _ = _parser.parse_known_args()
 # Headless by default (every existing caller relies on this); set
 # CRAZYFLIE_ENV_HEADLESS=0 before importing this module to pop up the actual
 # Isaac Sim GUI instead -- see --source isaac in depth_camera_live_test.py.
-_app_args.headless = os.environ.get("CRAZYFLIE_ENV_HEADLESS", "1") != "0"
+_app_args.headless = os.environ.get("CRAZYFLIE_ENV_HEADLESS", "0") != "0"
 _app_args.enable_cameras = True
 app_launcher = AppLauncher(_app_args)
 simulation_app = app_launcher.app
@@ -150,9 +150,31 @@ def controller_motor_forces(
     # ---------------------------------------------------
     # 1) Outer loop: Position → desired velocity
     # ---------------------------------------------------
+    MAX_SPEED = 1.5  # m/s, must match the cruise cap used during dataset collection
+                      # (see MAX_SPEED in quadcopter.py); a lower cap here makes the
+                      # drone unable to track the policy's commanded speed, so it
+                      # flies far slower than the trajectories it was trained on.
+
+    # One outer env.step() call runs `self.count` physics substeps at sim_dt each
+    # (see Crazyflie.step() below), and target_cmd is held fixed across all of them
+    # -- so target_cmd is reached (a0_real fully applied) by the end of exactly this
+    # many seconds. `target_cmd` here is a nearby action-chunk waypoint (~tens of cm
+    # away), not a far-off goal like quadcopter.py's, so Kp_pos*pos_err alone is too
+    # small to reach MAX_SPEED (it only saturates the clamp below when pos_err is
+    # large, e.g. far from a distant goal). Feed forward the velocity pos_err itself
+    # implies over this interval so the commanded speed is tracked, and let the P/D
+    # terms only correct for drift instead of being the sole source of vel_des.
+    CONTROL_INTERVAL = 10 * (1.0 / 30.0)  # self.count * sim_dt
+
     pos_err = target_cmd - pos
-    vel_des = Kp_pos * pos_err - Kd_pos * linvel
-    vel_des = torch.clamp(vel_des, -0.5, 0.5)
+    vel_ff  = pos_err / CONTROL_INTERVAL
+    vel_des = vel_ff + Kp_pos * pos_err - Kd_pos * linvel
+    # clamp the *magnitude* (not per-axis), matching quadcopter.py, so diagonal
+    # motion still caps at MAX_SPEED instead of allowing up to
+    # sqrt(2)*MAX_SPEED combined in xy.
+    speed = torch.linalg.norm(vel_des, dim=-1, keepdim=True)
+    scale = torch.clamp(MAX_SPEED / speed.clamp_min(1e-6), max=1.0)
+    vel_des = vel_des * scale
 
     # ---------------------------------------------------
     # 2) Inner loop: Velocity PID → desired acc / attitude

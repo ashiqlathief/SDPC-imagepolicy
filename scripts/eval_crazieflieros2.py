@@ -1,9 +1,6 @@
-import argparse
 import importlib
-import os
-import re
 from collections import deque
-from pathlib import Path
+from types import SimpleNamespace
 import time
 import numpy as np
 import torch
@@ -18,9 +15,10 @@ from depth_obstacle_estimator import (
     FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE,
 )
 import rclpy
+from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import PoseStamped, TwistStamped
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
 cfg = importlib.import_module("config.avoiding-crazyflie")
 CYLINDERS = cfg.CYLINDERS
 KEEPOUT_ZONES = getattr(cfg, 'KEEPOUT_ZONES', [])   # (x, y, radius) world-frame, planner-only  see config/avoiding-crazyflie.py
@@ -401,16 +399,72 @@ def project_action_candidates_with_positions(projector, pos0, a_candidates_real,
 
     return a_proj_real, proj_costs
 
-class Ros2HardwareRunner:
+IMAGE_SPECS = {
+    # topic (see COLOR_TOPIC/DEPTH_TOPIC below): sensor_msgs/msg/Image
+    "color": dict(encoding="rgb8",  dtype=np.uint8,  channels=3),   # /camera/camera/color/image_raw
+    "depth": dict(encoding="16UC1", dtype=np.uint16, channels=1),   # /camera/camera/depth/image_rect_raw (raw mm)
+}
 
-    def __init__(self, args, run_dir, device, drone_radius, active_halfspaces, goal_pull_weight=0.0):
+class Ros2HardwareRunner(Node):
 
-        # stash the rclpy/message modules so the callbacks and run() can use them
-        self.rclpy = rclpy
-        self.PoseStamped = PoseStamped
-        self.TwistStamped = TwistStamped
+    RUN_DIR = None  # <-- REQUIRED: set to your trained run's checkpoint dir before running.
+    ACTION_SCALE = 1.0
+    NUM_CANDIDATES = 2
+    USE_HALFSPACES = False
+    VARIANT = "diffuser"  # one of projection_variants -- single projection variant to fly (no sweep on real hardware)
+    POSE_TOPIC = "/mavros/local_position/pose"
+    CMD_VEL_TOPIC = "/mpc/set_pose"
+    COLOR_TOPIC = "camera/camera/color/image_raw"
+    DEPTH_TOPIC = "/camera/camera/depth/image_raw"
+    DEPTH_CAMERA_INFO_TOPIC = "/camera/camera/depth/camera_info"
+    START_DELAY = 5.0  # seconds to wait for the first pose/camera message before giving up
+    TARGET_X = 4.0
+    TARGET_Y = 0.75
 
-        self.args = args
+    DEPTH_OBSTACLES = False
+    DEPTH_OBSTACLE_RADIUS = 0.2      # keep-out radius (m) around each detected surface point, on top of drone_radius
+    DEPTH_OBSTACLE_MAX_RANGE = 10.0   # drop depth points farther than this from the camera (m)
+    DEPTH_OBSTACLE_STRIDE = 2        # pixel stride when back-projecting the depth image (speed/density trade-off)
+    DEPTH_OBSTACLE_VOXEL = 0.05      # voxel size (m) for downsampling the back-projected point cloud
+    DEPTH_OBSTACLE_MAX_POINTS = 12   # cap on keep-out points passed to the projector per tracked obstacle
+    DEPTH_OBSTACLE_Z_BAND = 0.1      # half-height (m) of the z-band around the drone's current altitude
+    DEVICE = "cuda:0"
+    DRONE_RADIUS = 0.1
+    GOAL_PULL_WEIGHT = 0.05
+    CONTROL_HZ = 30
+
+    def __init__(self):
+        super().__init__("diffusion_policy_hardware")
+
+        if self.RUN_DIR is None:
+            raise ValueError("Set Ros2HardwareRunner.RUN_DIR to your trained run's checkpoint dir before running.")
+        if self.VARIANT not in projection_variants:
+            raise ValueError(f"VARIANT={self.VARIANT!r} must be one of {projection_variants}")
+
+        active_halfspaces = corridor_halfspaces if self.USE_HALFSPACES else []
+        if self.USE_HALFSPACES:
+            self.get_logger().info(f"Halfspace constraints enabled ({len(active_halfspaces)} halfspaces)")
+
+        # Kept as a SimpleNamespace (not scattered self.xxx reads) purely so
+        # every method below that already reads self.args.xxx / args.xxx needed
+        # no further changes when CLI args were replaced by class attributes.
+        self.args = SimpleNamespace(
+            run_dir=self.RUN_DIR, action_scale=self.ACTION_SCALE, num_candidates=self.NUM_CANDIDATES,
+            use_halfspaces=self.USE_HALFSPACES, variant=self.VARIANT, pose_topic=self.POSE_TOPIC,
+            cmd_vel_topic=self.CMD_VEL_TOPIC, color_topic=self.COLOR_TOPIC,
+            depth_topic=self.DEPTH_TOPIC, depth_camera_info_topic=self.DEPTH_CAMERA_INFO_TOPIC,
+            start_delay=self.START_DELAY, target_x=self.TARGET_X, target_y=self.TARGET_Y,
+            depth_obstacles=self.DEPTH_OBSTACLES, depth_obstacle_radius=self.DEPTH_OBSTACLE_RADIUS,
+            depth_obstacle_max_range=self.DEPTH_OBSTACLE_MAX_RANGE, depth_obstacle_stride=self.DEPTH_OBSTACLE_STRIDE,
+            depth_obstacle_voxel=self.DEPTH_OBSTACLE_VOXEL, depth_obstacle_max_points=self.DEPTH_OBSTACLE_MAX_POINTS,
+            depth_obstacle_z_band=self.DEPTH_OBSTACLE_Z_BAND,
+        )
+        args = self.args
+        run_dir = self.RUN_DIR
+        device = torch.device(self.DEVICE)
+        drone_radius = self.DRONE_RADIUS
+        goal_pull_weight = self.GOAL_PULL_WEIGHT
+
         self.run_dir = run_dir
         self.drone_radius = drone_radius
         self.active_halfspaces = active_halfspaces
@@ -423,14 +477,6 @@ class Ros2HardwareRunner:
         self.diffusion = diff_exp.diffusion.to(device)
         self.diffusion.eval()
         self.device = device
-
-        # encoder_type/latent_dim: same folder-naming convention as eval_crazieflie1.py
-        # (e.g. ".../H16_K20_ENCvit_LAT256/9"), just for labeling the saved .npz.
-        run_name = Path(run_dir).parent.name
-        enc_match = re.search(r'E([^_]+)', run_name)
-        lat_match = re.search(r'L(\d+)', run_name)
-        self.encoder_type = enc_match.group(1) if enc_match else "unknown"
-        self.latent_dim = int(lat_match.group(1)) if lat_match else 256
 
         self.use_depth = bool(getattr(self.diffusion.model, "use_depth", False))
         self.horizon = int(getattr(self.diffusion, "horizon", 16))
@@ -448,10 +494,6 @@ class Ros2HardwareRunner:
             )
             print(f"[INFO] Pose-conditioned model: fixed goal for this run = {self.pose_target_world.tolist()}")
 
-        # ------------------ Optional static obstacle projector (ground-truth
-        # CYLINDERS/KEEPOUT_ZONES from config.avoiding-crazyflie.py -- assumes
-        # the real corridor matches that layout) or --depth_obstacles (built
-        # from the live depth stream instead, see _rebuild_depth_projector) ---
         self.vcfg = variant_cfg(args.variant)
         if args.num_candidates is not None and self.vcfg["selection"] != "first":
             self.vcfg["num_candidates"] = args.num_candidates
@@ -462,9 +504,11 @@ class Ros2HardwareRunner:
         self._last_depth_rebuild_time = None  # set on first _rebuild_depth_projector() call
         # latest detection, kept only so it's available if you want to log/inspect it
         self.depth_static_pts_latest, self.depth_dyn_preds_latest = [], {}
+        
         self.depth_fx, self.depth_fy, self.depth_cx, self.depth_cy = camera_intrinsics(
             FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE
         )
+        self._depth_intrinsics_ready = False
         if self.vcfg["use_projection"] and not args.depth_obstacles:
             self.pos_projector = build_position_projector(
                 horizon_H=self.horizon, gradient=self.gradient, device=device,
@@ -479,38 +523,36 @@ class Ros2HardwareRunner:
                 self.pos_projector.inloop_slsqp = True
                 self.pos_projector.action_normalizer = self.dataset.action_normalizer
                 self.pos_projector.pos0 = None
-        # --depth_obstacles: pos_projector is left None here -- run() builds it
-        # from the first depth frame once the camera is ready, then rebuilds it
-        # every step (see _rebuild_depth_projector).
+
         print(f"[INFO] Variant: {args.variant} (projection={self.vcfg['use_projection']}, "
               f"mode={self.vcfg['projection_mode']}, depth_obstacles={args.depth_obstacles})")
 
-        if not args.live:
-            print("[WARN] --live not set: DRY RUN. Velocity commands will be computed "
-                  "and printed but NOT published. Pass --live to actually fly.")
-
-        # ------------------ ROS2 node (must exist before any Subscription/Publisher) ------
-        rclpy.init()
-        self.node = rclpy.create_node("diffusion_policy_hardware")
+        # ------------------ Subscriptions/publisher (self IS the node -- rclpy.init()
+        # + node construction happen in main(), before this class exists) ------------
         self.cam_state = {"color": None, "depth": None}
-        # need a depth frame if the model itself consumes it as an input channel
-        # OR --depth_obstacles wants it for obstacle detection (independent of
-        # what the model needs -- an RGB-only model can still fly with
-        # depth_obstacles on, same as eval_crazieflie1.py's cfg.USE_DEPTH = use_depth or args.depth_obstacles)
         self.need_depth_frame = self.use_depth or args.depth_obstacles
-        self.node.create_subscription(Image, args.color_topic, self._color_cb, qos_profile_sensor_data)
+        self.create_subscription(Image, args.color_topic, self._color_cb, qos_profile_sensor_data)
         if self.need_depth_frame:
-            self.node.create_subscription(Image, args.depth_topic, self._depth_cb, qos_profile_sensor_data)
+            self.create_subscription(Image, args.depth_topic, self._depth_cb, qos_profile_sensor_data)
+        if args.depth_obstacles:
+            self.create_subscription(
+                CameraInfo, args.depth_camera_info_topic, self._depth_info_cb, qos_profile_sensor_data
+            )
 
-        # ------------------ pose in, velocity setpoint out (mirrors flight_test.py's
-        # /mavros/local_position/pose -> /mavros/setpoint_velocity/cmd_vel) ------------
-        # "pos" starts as None (not a placeholder zero) so run()'s "wait for first
-        # pose" loop below actually waits instead of falling through instantly --
-        # a fixed bug: this used to be immediately overwritten with zeros right
-        # after being set to None, which made that wait a no-op.
         self.state = {"pos": None, "quat": _IDENTITY_QUAT.copy()}
-        self.node.create_subscription(PoseStamped, args.pose_topic, self._pose_cb, qos_profile_sensor_data)
-        self.cmd_pub = self.node.create_publisher(PoseStamped, args.cmd_vel_topic, 1)
+        self.create_subscription(PoseStamped, args.pose_topic, self._pose_cb, qos_profile_sensor_data)
+        self.cmd_pub = self.create_publisher(PoseStamped, args.cmd_vel_topic, 1)
+
+        self._t0 = time.time()
+        self._rgb_hist = None   # still None == warmup; set once by _enter_running()
+        self._prev_actions_real = None
+        self._step = 0
+        self._cam_topics_desc = args.color_topic + (f" + {args.depth_topic}" if self.need_depth_frame else "")
+        if args.depth_obstacles:
+            self._cam_topics_desc += f" + {args.depth_camera_info_topic}"
+        print(f"[INFO] Waiting up to {args.start_delay}s for pose ({args.pose_topic}) "
+              f"and camera ({self._cam_topics_desc}) ...")
+        self.timer = self.create_timer(1.0 / self.CONTROL_HZ, self._tick)
 
     # ------------------ ROS2 subscription callbacks ------------------
     def _center_crop(self, img):
@@ -525,44 +567,57 @@ class Ros2HardwareRunner:
         x0 = (w - FPV_WIDTH) // 2
         return img[y0:y0 + FPV_HEIGHT, x0:x0 + FPV_WIDTH]
 
-    def _color_cb(self, msg):
-        if msg.encoding not in ("rgb8", "bgr8"):
-            self.node.get_logger().warning(
-                f"unsupported color encoding '{msg.encoding}', skipping frame",
+    def _decode_image(self, msg, spec):
+        """Shared decode for _color_cb/_depth_cb, driven by IMAGE_SPECS instead
+        of an if/elif per possible encoding -- returns None (after logging) if
+        this message doesn't match the one real encoding that topic ever sends."""
+        if msg.encoding != spec["encoding"]:
+            self.get_logger().warning(
+                f"expected '{spec['encoding']}' encoding, got '{msg.encoding}', skipping frame",
                 throttle_duration_sec=5.0
             )
-            return
-        frame = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
-        if msg.encoding == "bgr8":
-            frame = frame[:, :, ::-1]
-        self.cam_state["color"] = self._center_crop(frame)
+            return None
+        shape = (msg.height, msg.width, spec["channels"]) if spec["channels"] > 1 else (msg.height, msg.width)
+        return np.frombuffer(msg.data, dtype=spec["dtype"]).reshape(shape)
+
+    def _color_cb(self, msg):
+        frame = self._decode_image(msg, IMAGE_SPECS["color"])
+        if frame is not None:
+            self.cam_state["color"] = self._center_crop(frame)
 
     def _depth_cb(self, msg):
-        if msg.encoding == "16UC1":
-            depth = np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.width)
+        depth = self._decode_image(msg, IMAGE_SPECS["depth"])
+        if depth is not None:
             depth = depth.astype(np.float32) * 0.001  # RealSense: raw mm -> metres
-        elif msg.encoding == "32FC1":
-            depth = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
-        else:
-            self.node.get_logger().warning(
-                f"unsupported depth encoding '{msg.encoding}', skipping frame",
-                throttle_duration_sec=5.0
-            )
-            return
-        self.cam_state["depth"] = self._center_crop(depth)
+            self.cam_state["depth"] = self._center_crop(depth)
+
+    def _depth_info_cb(self, msg):
+        """Real depth-sensor intrinsics (fx/fy/cx/cy from K), NOT the simulated
+        FPV camera's -- backprojection needs the actual calibration. cx/cy are
+        corrected for _center_crop's offset (fx/fy are untouched by cropping,
+        only the principal point shifts); offset is derived from THIS message's
+        own width/height, matching whatever _center_crop computes for the
+        depth image at runtime, rather than hardcoding today's specific sensor
+        resolution."""
+        x0 = (msg.width - FPV_WIDTH) // 2
+        y0 = (msg.height - FPV_HEIGHT) // 2
+        self.depth_fx, self.depth_fy = float(msg.k[0]), float(msg.k[4])
+        self.depth_cx = float(msg.k[2]) - x0
+        self.depth_cy = float(msg.k[5]) - y0
+        self._depth_intrinsics_ready = True
 
     def _pose_cb(self, msg):
         p = msg.pose.position
         o = msg.pose.orientation
-        print('pos:', p)
+        print('pos:', p) 
         self.state["pos"] = np.array([p.x, p.y, p.z], dtype=np.float32)
-        # ROS quaternion fields are (x,y,z,w); depth_obstacle_estimator.py's
-        # quat_apply/camera_world_pose expect (w,x,y,z) (Isaac's convention).
         self.state["quat"] = np.array([o.w, o.x, o.y, o.z], dtype=np.float32)
 
     # ------------------ small helpers ------------------
     def _cam_ready(self):
-        return self.cam_state["color"] is not None and (not self.need_depth_frame or self.cam_state["depth"] is not None)
+        depth_ok = not self.need_depth_frame or self.cam_state["depth"] is not None
+        intrinsics_ok = not self.args.depth_obstacles or self._depth_intrinsics_ready
+        return self.cam_state["color"] is not None and depth_ok and intrinsics_ok
 
     def _grab_frame(self):
         if not self.use_depth:
@@ -570,9 +625,9 @@ class Ros2HardwareRunner:
         return self.cam_state["color"], self.cam_state["depth"]
 
     def _publish_stop(self):
-        if self.rclpy.ok():
-            stop = self.TwistStamped()
-            stop.header.stamp = self.node.get_clock().now().to_msg()
+        if rclpy.ok():
+            stop = TwistStamped()
+            stop.header.stamp = self.get_clock().now().to_msg()
             self.cmd_pub.publish(stop)
 
     def _rebuild_depth_projector(self):
@@ -643,34 +698,49 @@ class Ros2HardwareRunner:
             projector.pos0 = pos_body_w
         self.pos_projector = projector
 
-    def run(self):
+    # ------------------ timer-driven state machine (replaces run()) ------------------
+    def _tick(self):
+        """The one and only recurring callback -- serviced by main()'s single
+        rclpy.spin(self), same executor that also services every subscription
+        callback above. No manual spin_once() polling anywhere in this class.
+
+        No explicit phase flag: _rgb_hist is None until _enter_running() sets
+        it, so that alone distinguishes warmup from running. Nothing to check
+        for "aborted" either -- _abort() cancels the timer, so this simply
+        never gets called again after that."""
+        if self._rgb_hist is None:
+            self._warmup_tick()
+        else:
+            self._control_step()
+
+    def _warmup_tick(self):
         args = self.args
-        rclpy = self.rclpy
-        node = self.node
-        vcfg = self.vcfg
-        use_depth = self.use_depth
-        device = self.device
-        run_start_time = time.time()
-
-        print(f"[INFO] Waiting up to {args.start_delay}s for first pose on {args.pose_topic} ...")
-        t0 = time.time()
-        # In ROS2, we must spin to receive messages
-        while self.state["pos"] is None and time.time() - t0 < args.start_delay and rclpy.ok():
-            rclpy.spin_once(node, timeout_sec=0.05)
-
+        elapsed = time.time() - self._t0
         if self.state["pos"] is None:
-            raise RuntimeError(f"No pose received on {args.pose_topic} within {args.start_delay}s -- "
-                                "check mavros is running and the topic name.")
-
-        cam_topics = args.color_topic + (f" + {args.depth_topic}" if use_depth else "")
-        print(f"[INFO] Waiting up to {args.start_delay}s for first camera frame on {cam_topics} ...")
-        t0 = time.time()
-        while not self._cam_ready() and time.time() - t0 < args.start_delay and rclpy.ok():
-            rclpy.spin_once(node, timeout_sec=0.05)
-
+            if elapsed > args.start_delay:
+                self.get_logger().error(
+                    f"No pose received on {args.pose_topic} within {args.start_delay}s -- "
+                    "check mavros is running and the topic name."
+                )
+                self._abort()
+            return
         if not self._cam_ready():
-            raise RuntimeError(f"No camera frame received on {cam_topics} within {args.start_delay}s -- "
-                                "check the camera driver is running and the topic names.")
+            if elapsed > args.start_delay:
+                self.get_logger().error(
+                    f"No camera frame received on {self._cam_topics_desc} within {args.start_delay}s -- "
+                    "check the camera driver is running and the topic names."
+                )
+                self._abort()
+            return
+        self._enter_running()
+
+    def _abort(self):
+        self.timer.cancel()
+        rclpy.shutdown()   # makes main()'s rclpy.spin(self) return
+
+    def _enter_running(self):
+        args = self.args
+        vcfg = self.vcfg
 
         if args.depth_obstacles and vcfg["use_projection"]:
             self._rebuild_depth_projector()
@@ -679,192 +749,106 @@ class Ros2HardwareRunner:
 
         # init obs history (same seeding pattern as sim: repeat the first real frame To times)
         frame0 = self._grab_frame()
-        rgb_hist = deque(maxlen=self.To)
+        self._rgb_hist = deque(maxlen=self.To)
         for _ in range(self.To):
-            rgb_hist.append((frame0[0].copy(), frame0[1].copy()) if use_depth else frame0.copy())
+            self._rgb_hist.append((frame0[0].copy(), frame0[1].copy()) if self.use_depth else frame0.copy())
 
-        prev_actions_real = None
-        control_hz = 30
-        step = 0
-        print(f"[INFO] Starting control loop at {control_hz} Hz Ctrl+C to stop.")
+        self._prev_actions_real = None
+        self._step = 0
+        print(f"[INFO] Starting control loop at {self.CONTROL_HZ} Hz Ctrl+C to stop.")
 
-        # trajectory log for the .npz save below (same idea as eval_crazieflie1.py's
-        # traj_xyz/actions_taken, but logging the pose each action was computed from --
-        # hardware has no synchronous "post-step position", pose arrives async via _pose_cb)
-        pos_init = self.state["pos"].copy()
-        traj_xyz = [pos_init.copy()]
-        actions_taken = []
-
-        try:
-            while rclpy.ok():
-                # Spin once to process latest callbacks before acting
-                rclpy.spin_once(node, timeout_sec=0)
-
-                pos = self.state["pos"].copy()
-
-                obs_rgb_t = preprocess_obs_stack(rgb_hist, use_depth).to(device)
-                cond = {"obs_rgb": obs_rgb_t}
-
-                if self.use_pose_cond:
-                    pose_now_norm = self.dataset.pose_normalizer.normalize(pos[:3].astype(np.float32))
-                    pose_target_norm = self.dataset.pose_normalizer.normalize(self.pose_target_world)
-                    cond["pose_now"] = torch.from_numpy(pose_now_norm).float().unsqueeze(0).to(device)
-                    cond["pose_target"] = torch.from_numpy(pose_target_norm).float().unsqueeze(0).to(device)
-
-                if args.depth_obstacles and vcfg["use_projection"]:
-                    # Always rebuild: unlike ground-truth cylinders, the detected
-                    # point cloud changes every step regardless of whether any
-                    # obstacle is actually moving.
-                    self._rebuild_depth_projector()
-
-                if vcfg["projection_mode"] == "sdpc" and self.pos_projector is not None:
-                    self.pos_projector.pos0 = pos[:3]
-                in_loop_projector = self.pos_projector if vcfg["projection_mode"] == "sdpc" else None
-
-                a_candidates_norm, _ = sample_action_candidates(
-                    diffusion=self.diffusion, cond=cond, horizon=self.horizon, action_dim=self.action_dim,
-                    num_candidates=vcfg["num_candidates"], projector=in_loop_projector,
-                )
-                a_candidates_real = self.dataset.action_normalizer.unnormalize(a_candidates_norm) * float(args.action_scale)
-
-                if vcfg["use_projection"] and vcfg["projection_mode"] in ("post", "sdpc"):
-                    a_candidates_proj_real, proj_costs = project_action_candidates_with_positions(
-                        projector=self.pos_projector, pos0=pos[:3], a_candidates_real=a_candidates_real, device=device,
-                    )
-                else:
-                    a_candidates_proj_real, proj_costs = a_candidates_real, None
-
-                if vcfg["selection"] == "minimum_projection_cost" and proj_costs is not None:
-                    which = int(np.argmin(proj_costs))
-                else:
-                    which = choose_trajectory(a_candidates_proj_real, strategy=vcfg["selection"],
-                                                prev_actions_real=prev_actions_real)
-
-                a0_real = a_candidates_proj_real[which, 0]
-                prev_actions_real = a_candidates_proj_real[which:which + 1]
-
-                # delta-position -> velocity setpoint
-                pos_cmd = np.zeros(3, dtype=np.float32)
-
-                inc_action = a0_real[:self.action_dim] * args.action_scale
-                inc_action = np.clip(inc_action, [-0.5, -0.5, -0.1], [0.5, 0.5, 0.1])
-
-                pos_cmd[:self.action_dim] = pos + inc_action
-                # pos_cmd = np.clip(pos_cmd, -args.max_speed, args.max_speed)
-
-                cmd_pos = self.PoseStamped()
-                cmd_pos.header.stamp = node.get_clock().now().to_msg()
-                cmd_pos.pose.position.x = float(pos_cmd[0])
-                cmd_pos.pose.position.y = float(pos_cmd[1])
-                cmd_pos.pose.position.z = float(pos_cmd[2])
-
-                print(f"[step {step}] pos={pos} a0_real={a0_real} pos_cmd={pos_cmd}"
-                        f"{'  (DRY RUN)' if not args.live else ''}")
-
-                if args.live:
-                    self.cmd_pub.publish(cmd_pos)
-
-                traj_xyz.append(pos.copy())
-                actions_taken.append(a0_real.copy())
-
-                rgb_hist.append(self._grab_frame())
-                step += 1
-                time.sleep(1.0 / control_hz)
-        finally:
-            self._save_trajectory(traj_xyz, actions_taken, time.time() - run_start_time)
-
-        self._publish_stop()
-        print("[INFO] Hardware run stopped, zero velocity published.")
-        node.destroy_node()
-        rclpy.try_shutdown()
-
-    def _save_trajectory(self, traj_xyz, actions_taken, wall_time_sec):
-        """Same .npz schema as eval_crazieflie1.py's per-episode save (xyz, actions,
-        variant/encoder/latent_dim, cylinders, halfspaces, projection settings), minus
-        the fields that only make sense in sim (success/fell come from env.step(), no
-        equivalent on hardware; no candidate-rollout snapshots -- see run() docstring)."""
+    def _control_step(self):
+        """One control-loop tick, fired by self.timer at CONTROL_HZ. Identical
+        logic to the old run() while-loop body, minus the manual spin_once()
+        (the executor already services callbacks between ticks) and the manual
+        time.sleep() (the timer itself paces the calls)."""
         args = self.args
-        out_dir = Path(self.run_dir) / "hardware_trajectories"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        traj_path = out_dir / f"traj_{self.encoder_type}_L{self.latent_dim}_{args.variant}_{time.strftime('%Y%m%d_%H%M%S')}.npz"
+        vcfg = self.vcfg
+        use_depth = self.use_depth
+        device = self.device
 
-        np.savez(
-            traj_path,
-            xyz            = np.array(traj_xyz),        # (T, 3)
-            actions        = np.array(actions_taken),    # (T, 3)
-            variant        = args.variant,
-            encoder        = self.encoder_type,
-            latent_dim     = self.latent_dim,
-            wall_time_sec  = float(wall_time_sec),
-            wall_time_min  = float(wall_time_sec) / 60.0,
-            cylinders      = np.array(CYLINDERS),         # (N, 2) assumed ground-truth layout
-            halfspaces     = np.array([[hs[0], hs[1]] for hs in self.active_halfspaces], dtype=object),
-            hs_sides       = np.array([hs[2] for hs in self.active_halfspaces]),
-            tighten        = self.vcfg.get("tighten", 0.0),
-            use_projection = self.vcfg["use_projection"],
-            projection_mode = self.vcfg["projection_mode"],
-            num_candidates = self.vcfg["num_candidates"] if self.vcfg["num_candidates"] > 0 else 1,
-            selection      = self.vcfg["selection"],
-            action_scale   = float(args.action_scale),
-            live           = bool(args.live),
-            use_pose_cond  = bool(self.use_pose_cond),
-            pose_target    = self.pose_target_world if self.pose_target_world is not None else np.zeros(3, dtype=np.float32),
+        pos = self.state["pos"].copy()
+
+        obs_rgb_t = preprocess_obs_stack(self._rgb_hist, use_depth).to(device)
+        cond = {"obs_rgb": obs_rgb_t}
+
+        if self.use_pose_cond:
+            pose_now_norm = self.dataset.pose_normalizer.normalize(pos[:3].astype(np.float32))
+            pose_target_norm = self.dataset.pose_normalizer.normalize(self.pose_target_world)
+            cond["pose_now"] = torch.from_numpy(pose_now_norm).float().unsqueeze(0).to(device)
+            cond["pose_target"] = torch.from_numpy(pose_target_norm).float().unsqueeze(0).to(device)
+
+        if args.depth_obstacles and vcfg["use_projection"]:
+            # Always rebuild: unlike ground-truth cylinders, the detected
+            # point cloud changes every step regardless of whether any
+            # obstacle is actually moving.
+            self._rebuild_depth_projector()
+
+        if vcfg["projection_mode"] == "sdpc" and self.pos_projector is not None:
+            self.pos_projector.pos0 = pos[:3]
+        in_loop_projector = self.pos_projector if vcfg["projection_mode"] == "sdpc" else None
+
+        a_candidates_norm, _ = sample_action_candidates(
+            diffusion=self.diffusion, cond=cond, horizon=self.horizon, action_dim=self.action_dim,
+            num_candidates=vcfg["num_candidates"], projector=in_loop_projector,
         )
-        print(f"[TRAJ] saved: {traj_path}")
+        a_candidates_real = self.dataset.action_normalizer.unnormalize(a_candidates_norm) * float(args.action_scale)
+
+        if vcfg["use_projection"] and vcfg["projection_mode"] in ("post", "sdpc"):
+            a_candidates_proj_real, proj_costs = project_action_candidates_with_positions(
+                projector=self.pos_projector, pos0=pos[:3], a_candidates_real=a_candidates_real, device=device,
+            )
+        else:
+            a_candidates_proj_real, proj_costs = a_candidates_real, None
+
+        if vcfg["selection"] == "minimum_projection_cost" and proj_costs is not None:
+            which = int(np.argmin(proj_costs))
+        else:
+            which = choose_trajectory(a_candidates_proj_real, strategy=vcfg["selection"],
+                                        prev_actions_real=self._prev_actions_real)
+
+        a0_real = a_candidates_proj_real[which, 0]
+        self._prev_actions_real = a_candidates_proj_real[which:which + 1]
+
+        # delta-position -> velocity setpoint
+        pos_cmd = np.zeros(3, dtype=np.float32)
+
+        inc_action = a0_real[:self.action_dim] * args.action_scale
+        inc_action = np.clip(inc_action, [-0.5, -0.5, -0.1], [0.5, 0.5, 0.1])
+
+        pos_cmd[:self.action_dim] = pos + inc_action
+
+        cmd_pos = PoseStamped()
+        cmd_pos.header.stamp = self.get_clock().now().to_msg()
+        cmd_pos.pose.position.x = float(pos_cmd[0])
+        cmd_pos.pose.position.y = float(pos_cmd[1])
+        cmd_pos.pose.position.z = float(pos_cmd[2])
+
+        print(f"[step {self._step}] pos={pos} a0_real={a0_real} pos_cmd={pos_cmd}")
+
+        self.cmd_pub.publish(cmd_pos)
+
+        self._rgb_hist.append(self._grab_frame())
+        self._step += 1
+
+    def finalize(self):
+        """Called once from main()'s finally block (Ctrl+C, timeout abort, or
+        clean exit) -- publishes a zero-velocity stop. Replaces run()'s
+        try/finally, since there's no single blocking call left to wrap now
+        that control happens in _tick()."""
+        if hasattr(self, "timer"):
+            self.timer.cancel()
+        self._publish_stop()
+        self.get_logger().info("Hardware run stopped, zero velocity published.")
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run_dir", type=str, required=True)
-    parser.add_argument("--action_scale", type=float, default=1.0)
-    parser.add_argument("--num_candidates", type=int, default=2,)
-    parser.add_argument("--use_halfspaces", action="store_true", default=False,)
-    parser.add_argument("--variant", type=str, choices=projection_variants, default="diffuser",
-                        help="Single projection variant to fly (no sweep on real hardware).")
-    parser.add_argument("--pose_topic", type=str, default="/mavros/local_position/pose",)
-    parser.add_argument("--cmd_vel_topic", type=str, default="/mpc/set_pose",)
-    parser.add_argument("--max_speed", type=float, default=0.5,
-                        help="Per-axis velocity clamp in m/s, applied to every published "
-                             "command independent of --action_scale.")
-    parser.add_argument("--color_topic", type=str, default="camera/camera/color/image_raw",)
-    parser.add_argument("--depth_topic", type=str, default="/camera/aligned_depth_to_color/image_raw",)
-    parser.add_argument("--start_delay", type=float, default=5.0,
-                        help="Seconds to wait for the first pose/camera message before giving up.")
-    parser.add_argument("--live", action="store_true", default=False,)
-    parser.add_argument("--target_x", type=float, default=4.0,)
-    parser.add_argument("--target_y", type=float, default=0.75,)
-    parser.add_argument("--depth_obstacles", action="store_true", default=False,
-                        help="Detect obstacles from the live depth stream instead of the "
-                             "assumed ground-truth CYLINDERS/KEEPOUT_ZONES layout in config.")
-    parser.add_argument("--depth_obstacle_radius", type=float, default=0.2,
-                        help="Keep-out radius (m) around each detected surface point, on top "
-                             "of drone_radius (depth_obstacles only).")
-    parser.add_argument("--depth_obstacle_max_range", type=float, default=1.0,
-                        help="Drop depth points farther than this from the camera (m).")
-    parser.add_argument("--depth_obstacle_stride", type=int, default=2,
-                        help="Pixel stride when back-projecting the depth image (speed/density trade-off).")
-    parser.add_argument("--depth_obstacle_voxel", type=float, default=0.05,
-                        help="Voxel size (m) for downsampling the back-projected point cloud.")
-    parser.add_argument("--depth_obstacle_max_points", type=int, default=12,
-                        help="Cap on keep-out points passed to the projector per tracked obstacle "
-                             "(bounds the SLSQP solve's constraint count).")
-    parser.add_argument("--depth_obstacle_z_band", type=float, default=0.1,
-                        help="Half-height (m) of the z-band around the drone's current altitude "
-                             "that depth points are kept from.")
-
-    args, _unknown = parser.parse_known_args()
-
-    device         = torch.device("cuda:0")
-    drone_radius   = 0.1
-    goal_pull_weight = 0.05
-
-    # ── active halfspaces: from config only when --use_halfspaces is set ─────────
-    active_halfspaces = corridor_halfspaces if args.use_halfspaces else []
-    if args.use_halfspaces:
-        print(f"[INFO] Halfspace constraints enabled ({len(active_halfspaces)} halfspaces)")
-
-    Ros2HardwareRunner(args, args.run_dir, device, drone_radius, active_halfspaces, goal_pull_weight).run()
-
+    rclpy.init()
+    node = Ros2HardwareRunner()
+    rclpy.spin(node)
+    node.finalize()
+    node.destroy_node()
+    rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

@@ -42,8 +42,18 @@ WAREHOUSE_PROPS = [
     ("Environments/Simple_Warehouse/Props/SM_CardBoxA_01.usd",    1.0,  1.6, 0.0, (1.0, 0.0, 0.0, 0.0)),
     ("Props/Pallet/pallet.usd",                                   3.0, -1.6, 0.0, (0.92, 0.0, 0.0, 0.38)),
     ("Environments/Simple_Warehouse/Props/SM_BarelPlastic_A_01.usd", -2.0, 1.7, 0.0, (1.0, 0.0, 0.0, 0.0)),
-    # ("Environments/Simple_Warehouse/Props/SM_RackShelf_01.usd",  -4.5,  0.0, 0.0, (0.707, 0.0, 0.0, 0.707)),
+    ("Environments/Simple_Warehouse/Props/SM_RackShelf_01.usd",  -4.5,  0.0, 0.0, (0.707, 0.0, 0.0, 0.707)),
 
+    # NOTE: placeholder placements below (x/y/rot not verified in-sim yet) --
+    # spread along both walls, facing into the corridor like SM_RackShelf_01 above.
+    ("Environments/Simple_Warehouse/Props/SM_RackFrame_03_227.usd", -3.0,  2.1, 0.0, (0.707, 0.0, 0.0,  0.707)),
+    # SM_RackFrame_03.usd moved to WALLS_MODULAR below (mounted flush on the
+    # right wall as a stage truss, not freestanding).
+    ("Environments/Simple_Warehouse/Props/SM_RackPile_03.usd",       0.0,  2.1, 0.0, (0.707, 0.0, 0.0,  0.707)),
+    ("Environments/Simple_Warehouse/Props/SM_RackPile_04.usd",       0.0, -2.1, 0.0, (0.707, 0.0, 0.0, -0.707)),
+    ("Environments/Simple_Warehouse/Props/SM_RackPile_06_234.usd",   2.0,  2.1, 0.0, (0.707, 0.0, 0.0,  0.707)),
+    ("Environments/Simple_Warehouse/Props/SM_RackPile_06.usd",       2.0, -2.1, 0.0, (0.707, 0.0, 0.0, -0.707)),
+    ("Environments/Simple_Warehouse/Props/SM_RackShelf_01_226.usd",  4.0,  2.1, 0.0, (0.707, 0.0, 0.0,  0.707)),
 ]
 
 _WALL_ASSET_DIR    = "Environments/Simple_Warehouse/Props"
@@ -77,6 +87,10 @@ WALLS_MODULAR = [
     (_WALL_3M,     _CORR_X0 + _SEG_6M_LEN + _SEG_FILL_LEN / 2.0,_CORR_Y, 0.0, _ROT_YAW_N90, (1.0, _SEG_FILL_SCALE_Y, _WALL_Z_SCALE)),
     (_WALL_CORNER, _CORR_X1,                                    -_CORR_Y, 0.0, _ROT_YAW_180, (1.0, 1.0, _WALL_Z_SCALE)),
 
+    # ---- stage truss, flush on the right wall (y = +CORR_Y) ----
+    # placeholder placement/scale (native truss usd size unverified) -- check
+    # in-sim and adjust z (mount height) / scale (span length) as needed.
+    (f"{_WALL_ASSET_DIR}/SM_RackFrame_03.usd", _CORR_X0 + CORRIDOR_LENGTH / 2.0, _CORR_Y, 1.6, _ROT_YAW_N90, (1.0, 1.0, 1.0)),
 ]
 
 CRAZYFLIE = ArticulationCfg(

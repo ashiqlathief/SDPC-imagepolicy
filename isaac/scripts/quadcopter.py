@@ -29,7 +29,7 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.scene import InteractiveScene
 
 from diffuser.utils.path import project_path
-from isaac.scripts.crazyflie_env_cfg import CrazyflieSceneCfg, BOXES, CYLINDERS, DEPTH_FAR
+from isaac.scripts.env_cfg import CrazyflieSceneCfg, BOXES, CYLINDERS, DEPTH_FAR
 
 scene_cfg = CrazyflieSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
 if args_cli.use_depth:
@@ -95,7 +95,7 @@ def quat_to_euler_xyzw(q):
 def sample_targets(num_envs: int, device, env_origins,
                    x_min=4.5, x_max=4.5,
                    y_min=-2.0, y_max=2.0, #y_min=-0.94, y_max=-0.6, y_min=0.94, y_max=0.6,
-                   z_min=1.0, z_max=1.0):
+                   z_min=2.0, z_max=2.0):
     """
     Sample one random target position per environment.
     Returns a tensor of shape (num_envs, 3).
@@ -117,7 +117,11 @@ def save_dataset_for_all_envs(episodes_states,
                               episodes_depths=None,
                               curr_depths=None,
                               episodes_targets=None,
-                              curr_targets=None):
+                              curr_targets=None,
+                              frame_dt_sec=10 * (1.0 / 30.0)):
+    """frame_dt_sec: seconds of sim time between consecutive recorded frames
+    (sim_dt * IMG_STRIDE at the call site) -- used only to print each episode's
+    duration; default matches main()'s sim_dt=1/30, IMG_STRIDE=10."""
     use_depth = curr_depths is not None
     use_targets = curr_targets is not None
 
@@ -195,7 +199,8 @@ def save_dataset_for_all_envs(episodes_states,
         else:
             np.savez_compressed(images_path, rgb=images_arr)
 
-        print(f"[INFO] Env {env_id}: total_steps={total_steps}, images={images_arr.shape}")
+        duration_sec = total_steps * frame_dt_sec
+        print(f"[INFO] Env {env_id}: total_steps={total_steps}, duration={duration_sec:.1f}s, images={images_arr.shape}")
         print(f"[INFO] Saved env {env_id} data to: {save_path}")
         print(f"[INFO] Saved env {env_id} images to: {images_path}")
 
@@ -325,9 +330,16 @@ def controller_motor_forces(
     # ---------------------------------------------------
     # 1) Outer loop: Position → desired velocity
     # ---------------------------------------------------
+    MAX_SPEED = 1.5  # m/s, cruise speed cap for the generated dataset
+
     pos_err = target_cmd - pos
     vel_des = Kp_pos * pos_err - Kd_pos * linvel
-    vel_des = torch.clamp(vel_des, -0.5, 0.5)
+    # clamp the *magnitude* (not per-axis) so diagonal motion still caps at
+    # MAX_SPEED instead of allowing up to MAX_SPEED per axis (sqrt(2)*MAX_SPEED
+    # combined in xy)
+    speed = torch.linalg.norm(vel_des, dim=-1, keepdim=True)
+    scale = torch.clamp(MAX_SPEED / speed.clamp_min(1e-6), max=1.0)
+    vel_des = vel_des * scale
 
     # ---------------------------------------------------
     # 2) Inner loop: Velocity PID → desired acc / attitude
@@ -592,6 +604,7 @@ def main():
                     curr_depths=curr_depths,
                     episodes_targets=episodes_targets,
                     curr_targets=curr_targets,
+                    frame_dt_sec=sim_dt * IMG_STRIDE,
                 )
 
         if reset:
@@ -765,6 +778,7 @@ def main():
                 curr_depths=curr_depths,
                 episodes_targets=episodes_targets,
                 curr_targets=curr_targets,
+                frame_dt_sec=sim_dt * IMG_STRIDE,
             )
 
             # Reset sim to initial pose (your reset block already does this) 

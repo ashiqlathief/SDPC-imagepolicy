@@ -4,11 +4,12 @@ import isaaclab.sim as sim_utils
 from isaaclab.utils import configclass
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, NVIDIA_NUCLEUS_DIR
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors.camera import CameraCfg
 from isaaclab.sim.spawners.materials import PreviewSurfaceCfg
+from isaaclab.sim.spawners.materials import MdlFileCfg
 
 cfg = importlib.import_module("config.avoiding-crazyflie")
 
@@ -22,7 +23,7 @@ DEPTH_FAR = cfg.DEPTH_FAR
 CORRIDOR_LENGTH = 11     # x direction
 CORRIDOR_WIDTH = 5.0       # y direction (clearance between walls)
 WALL_THICKNESS = 0.10
-WALL_HEIGHT = 2.0
+WALL_HEIGHT = 3.0
 CEILING_HEIGHT  = WALL_HEIGHT          # = 1.0  (flush with obstacle tops)
 CEILING_Z_CENTER = CEILING_HEIGHT + WALL_THICKNESS / 2.0   # centre of roof slab
 CORRIDOR_X_OFFSET = -CORRIDOR_LENGTH / 2.0
@@ -32,6 +33,60 @@ CYLINDERS = [(x , y, 1.0 / 2.0) for (x, y) in _CYLINDERS_XY]
 SPHERES_XYZ = [(x, y, z) for (x, y, z) in _SPHERES_XYZ]
 RED_MAT   = PreviewSurfaceCfg(diffuse_color=(0.85, 0.10, 0.10))
 BLUE_MAT  = PreviewSurfaceCfg(diffuse_color=(0.10, 0.30, 0.90))
+FLOOR_BASE_MAT = PreviewSurfaceCfg(diffuse_color=(0.22, 0.22, 0.22), roughness=0.9)   # visible through the tile seams
+
+_WALL_ASSET_DIR    = "Environments/Simple_Warehouse/Props"
+_WALL_6M           = f"{_WALL_ASSET_DIR}/SM_WallA_6M.usd"
+_WALL_3M           = f"{_WALL_ASSET_DIR}/SM_WallA_3M.usd"
+_WALL_CORNER       = f"{_WALL_ASSET_DIR}/SM_WallA_InnerCorner.usd"
+_WALL_NATIVE_HEIGHT = 3.1
+_WALL_Z_SCALE      = WALL_HEIGHT / _WALL_NATIVE_HEIGHT   # squash 3.1 m -> WALL_HEIGHT
+
+_ROT_YAW_P90 = (0.7071, 0.0, 0.0,  0.7071)   # +90 deg about Z: local +X -> world +Y
+_ROT_YAW_N90 = (0.7071, 0.0, 0.0, -0.7071)   # -90 deg about Z: local +X -> world -Y
+_ROT_YAW_180 = (0.0,    0.0, 0.0,  1.0)      # 180 deg about Z
+
+_CORR_X0 = CORRIDOR_X_OFFSET                       # open end of the corridor
+_CORR_X1 = CORRIDOR_LENGTH + CORRIDOR_X_OFFSET      # closed end / corner vertex x
+_CORR_Y  = CORRIDOR_WIDTH / 2.0                     # inner-face y of each side wall
+_SEG_6M_LEN       = 6.0
+_SEG_FILL_LEN     = CORRIDOR_LENGTH - 3.0 - _SEG_6M_LEN   # = 2.0 for CORRIDOR_LENGTH = 11
+_SEG_FILL_SCALE_Y = _SEG_FILL_LEN / 3.0
+
+# (usd, x, y, z, yaw quat (w,x,y,z), scale (sx,sy,sz))
+WALLS_MODULAR = [
+    # ---- left wall (y = -CORR_Y) ----
+    (_WALL_6M,     _CORR_X0 + _SEG_6M_LEN / 2.0,                -_CORR_Y, 0.0, _ROT_YAW_P90, (1.0, 1.0, _WALL_Z_SCALE)),
+    (_WALL_3M,     _CORR_X0 + _SEG_6M_LEN + _SEG_FILL_LEN / 2.0,-_CORR_Y, 0.0, _ROT_YAW_P90, (1.0, _SEG_FILL_SCALE_Y, _WALL_Z_SCALE)),
+    # mirrored (scale_y = -1) so its Y-leg points toward the corridor centreline, not outward
+    (_WALL_CORNER, _CORR_X1,                                    _CORR_Y, 0.0, _ROT_YAW_180, (1.0, -1.0, _WALL_Z_SCALE)),
+
+    # ---- right wall (y = +CORR_Y) ----
+    (_WALL_6M,     _CORR_X0 + _SEG_6M_LEN / 2.0,                _CORR_Y, 0.0, _ROT_YAW_N90, (1.0, 1.0, _WALL_Z_SCALE)),
+    (_WALL_3M,     _CORR_X0 + _SEG_6M_LEN + _SEG_FILL_LEN / 2.0,_CORR_Y, 0.0, _ROT_YAW_N90, (1.0, _SEG_FILL_SCALE_Y, _WALL_Z_SCALE)),
+    (_WALL_CORNER, _CORR_X1,                                    -_CORR_Y, 0.0, _ROT_YAW_180, (1.0, 1.0, _WALL_Z_SCALE)),
+]
+
+_TRUSS_USD         = f"{_WALL_ASSET_DIR}/SM_RackFrame_03.usd"
+_TRUSS_UNIT_WIDTH  = 1.0   # m, assumed frame width -- VERIFY IN-SIM
+_TRUSS_Z           = 0.0   # floor-pivot -- touches the ground
+_TRUSS_COUNT       = 10
+_TRUSS_SPAN        = _TRUSS_COUNT * _TRUSS_UNIT_WIDTH
+_TRUSS_X0          = _CORR_X0 + (CORRIDOR_LENGTH - _TRUSS_SPAN) / 2.0 + _TRUSS_UNIT_WIDTH / 2.0  # centred run
+
+# (wall y, rotation) -- right wall (+CORR_Y, faces -Y into the corridor) and
+# left wall (-CORR_Y, faces +Y into the corridor), matching the wall panels above.
+for _wall_y, _wall_rot in ((_CORR_Y, _ROT_YAW_N90), (-_CORR_Y, _ROT_YAW_P90)):
+    for _ti in range(_TRUSS_COUNT):
+        WALLS_MODULAR.append((
+            _TRUSS_USD,
+            _TRUSS_X0 + _ti * _TRUSS_UNIT_WIDTH,
+            _wall_y,
+            _TRUSS_Z,
+            _wall_rot,
+            (1.0, 1.0, 1.0),
+        ))
+del _wall_y, _wall_rot, _ti
 
 CRAZYFLIE = ArticulationCfg(
         spawn=sim_utils.MultiUsdFileCfg(
@@ -83,7 +138,7 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
     # -------------------------
     crazyflie = CRAZYFLIE.replace(
         prim_path="/World/envs/env_.*/Crazyflie",
-        init_state=CRAZYFLIE.init_state.replace(pos=(CORRIDOR_X_OFFSET, 0.0, 0.5))
+        init_state=CRAZYFLIE.init_state.replace(pos=(CORRIDOR_X_OFFSET, -1.0, 1.0))
     )
 
     FPV_CAMERA_CFG = CameraCfg(
@@ -109,45 +164,16 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
     # -------------------------
     # Environment geometry
     # -------------------------
-    ground = AssetBaseCfg(
-        prim_path="/World/defaultGroundPlane",
-        spawn=sim_utils.GroundPlaneCfg(),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
-    )
-
-    # Left wall
-    wall_left = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/WallLeft",
+    # Base floor slab (structural), with the thin foam-tile mat (FLOOR_TILES) laid on top.
+    floor_base = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/FloorBase",
         spawn=sim_utils.CuboidCfg(
-            size=(CORRIDOR_LENGTH, WALL_THICKNESS, WALL_HEIGHT),
+            size=(CORRIDOR_LENGTH + 2 * WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, WALL_THICKNESS),
+            visual_material=FLOOR_BASE_MAT,
             collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH / 2.0 + CORRIDOR_X_OFFSET, +(CORRIDOR_WIDTH / 2.0 + WALL_THICKNESS / 2.0), WALL_HEIGHT / 2.0), #2.5, 1.05
-        ),
-    )
-
-    # Right wall
-    wall_right = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/WallRight",
-        spawn=sim_utils.CuboidCfg(
-            size=(CORRIDOR_LENGTH, WALL_THICKNESS, WALL_HEIGHT),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH / 2.0 + CORRIDOR_X_OFFSET, -(CORRIDOR_WIDTH / 2.0 + WALL_THICKNESS / 2.0), WALL_HEIGHT / 2.0),  #2.5,
-        ),
-    )
-
-    # End wall (optional, like the closed end in your screenshot)
-    wall_end = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/WallEnd",
-        spawn=sim_utils.CuboidCfg(
-            size=(WALL_THICKNESS, CORRIDOR_WIDTH + 2 * WALL_THICKNESS, WALL_HEIGHT),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(CORRIDOR_LENGTH + WALL_THICKNESS / 2.0 + CORRIDOR_X_OFFSET, 0.0, WALL_HEIGHT / 2.0),
+            pos=(CORRIDOR_LENGTH / 2.0 + CORRIDOR_X_OFFSET, 0.0, -WALL_THICKNESS / 2.0),  # top face at z=0
         ),
     )
 
@@ -163,17 +189,15 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # for _i, _pos in enumerate(CYLINDERS):
-    #     vars()[f"cyl_{_i:02d}"] = RigidObjectCfg(
-    #         prim_path=f"/World/envs/env_.*/Cyl{_i:02d}",
-    #         spawn=sim_utils.CylinderCfg(
-    #             visual_material=RED_MAT,
-    #             radius=0.15,
-    #             height=2.0,
-    #             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-    #             collision_props=sim_utils.CollisionPropertiesCfg(),
-    #         ),
-    #         init_state=RigidObjectCfg.InitialStateCfg(pos=_pos, rot=(1, 0, 0, 0)),
-    #     )
-    # if CYLINDERS:
-    #     del _i, _pos
+    for _mi, (_usd, _mx, _my, _mz, _mrot, _mscale) in enumerate(WALLS_MODULAR):
+        vars()[f"wall_modular_{_mi:02d}"] = AssetBaseCfg(
+            prim_path=f"/World/envs/env_.*/WallModular{_mi:02d}",
+            spawn=sim_utils.UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/{_usd}",
+                scale=_mscale,
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(_mx, _my, _mz), rot=_mrot),
+        )
+    if WALLS_MODULAR:
+        del _mi, _usd, _mx, _my, _mz, _mrot, _mscale

@@ -17,7 +17,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.sim import SimulationContext
 from isaaclab.scene import InteractiveScene
 
-from crazyflie_env_cfg1 import CrazyflieSceneCfg
+from env_cfg import CrazyflieSceneCfg, CORRIDOR_X_OFFSET, CORRIDOR_LENGTH, WALL_HEIGHT
 # from env_cfg import CrazyflieSceneCfg
 
 _capture_count = 0
@@ -44,10 +44,17 @@ def main():
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
     sim = SimulationContext(sim_cfg)
 
-    # Top-down view: camera just under the ceiling (WALL_HEIGHT=2.0), looking
-    # straight down at the corridor centre. Staying inside the room avoids
-    # the Ceiling cuboid (crazyflie_env_cfg.py) blocking the shot.
-    sim.set_camera_view([2.25, 0.0, 1.9], [2.25, 0.0, 0.0])
+    # Elevated view above the drone's spawn point, tilted to look down the
+    # corridor's length toward the closed end wall (instead of straight down,
+    # which just looks like an XY plot). This script doesn't step physics, so
+    # the drone just sits there -- see CrazyflieSceneCfg's crazyflie.init_state
+    # in env_cfg.py.
+    _drone_x, _drone_y = CORRIDOR_X_OFFSET, 0.5
+    _endwall_x = CORRIDOR_LENGTH + CORRIDOR_X_OFFSET   # closed end of the corridor
+    sim.set_camera_view(
+        [_drone_x, _drone_y, WALL_HEIGHT - 0.1],   # eye: above the drone
+        [_endwall_x, _drone_y, 0.3],               # target: down the corridor, low, at the end wall
+    )
 
     scene_cfg = CrazyflieSceneCfg(num_envs=args_cli.num_envs, env_spacing= 2.0)
     scene = InteractiveScene(scene_cfg)

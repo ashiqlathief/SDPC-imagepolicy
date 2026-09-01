@@ -6,7 +6,7 @@ import diffuser.utils as utils
 
 exp = 'avoiding-crazyflie'
 
-seeds = [8,9,10] 
+seeds = [7] 
 
 def set_seed(seed: int):
     random.seed(seed)
