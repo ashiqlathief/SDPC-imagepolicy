@@ -9,9 +9,7 @@ import diffuser.utils as utils
 from diffuser.sampling.projection import Projector
 from diffuser.sampling.policies import temporal_consistency_distances
 from depth_obstacle_estimator import (
-    camera_intrinsics, camera_world_pose, backproject_depth_to_world, quat_apply,
-    filter_points, cluster_points, ObstacleTracker, tracks_to_constraints,
-    keep_nearest_along_z,
+    camera_intrinsics, camera_world_pose, quat_apply, detect_largest_obstacle_umap,
     FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE,
 )
 import rclpy
@@ -22,7 +20,6 @@ from sensor_msgs.msg import Image, CameraInfo
 cfg = importlib.import_module("config.avoiding-crazyflie")
 CYLINDERS = cfg.CYLINDERS
 KEEPOUT_ZONES = getattr(cfg, 'KEEPOUT_ZONES', [])   # (x, y, radius) world-frame, planner-only  see config/avoiding-crazyflie.py
-_IDENTITY_POS = np.zeros(3, dtype=np.float32)
 _IDENTITY_QUAT = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
 corridor_halfspaces = cfg.CORRIDOR_HALFSPACES
@@ -422,12 +419,14 @@ class Ros2HardwareRunner(Node):
     TARGET_Y = 0.75
 
     DEPTH_OBSTACLES = False
-    DEPTH_OBSTACLE_RADIUS = 0.2      # keep-out radius (m) around each detected surface point, on top of drone_radius
-    DEPTH_OBSTACLE_MAX_RANGE = 10.0   # drop depth points farther than this from the camera (m)
-    DEPTH_OBSTACLE_STRIDE = 2        # pixel stride when back-projecting the depth image (speed/density trade-off)
-    DEPTH_OBSTACLE_VOXEL = 0.05      # voxel size (m) for downsampling the back-projected point cloud
-    DEPTH_OBSTACLE_MAX_POINTS = 12   # cap on keep-out points passed to the projector per tracked obstacle
-    DEPTH_OBSTACLE_Z_BAND = 0.1      # half-height (m) of the z-band around the drone's current altitude
+    DEPTH_OBSTACLE_RADIUS = 0.2      # floor for the detected obstacle's keep-out radius (m), on top of drone_radius
+    # detect_largest_obstacle_umap() tuning -- these are darshit-desai's original
+    # tuned values (see depth_obstacle_estimator.py), likely need retuning for
+    # this camera/corridor.
+    UMAP_MAX_RANGE = 3.0             # depth range covered by the U-map histogram (m)
+    UMAP_BIN_SIZE = 200              # number of depth bins across UMAP_MAX_RANGE
+    UMAP_T_POI = 500.0               # point-of-interest threshold
+    UMAP_T_THO = 1800.0              # U-map contour threshold
     DEVICE = "cuda:0"
     DRONE_RADIUS = 0.1
     GOAL_PULL_WEIGHT = 0.05
@@ -455,9 +454,8 @@ class Ros2HardwareRunner(Node):
             depth_topic=self.DEPTH_TOPIC, depth_camera_info_topic=self.DEPTH_CAMERA_INFO_TOPIC,
             start_delay=self.START_DELAY, target_x=self.TARGET_X, target_y=self.TARGET_Y,
             depth_obstacles=self.DEPTH_OBSTACLES, depth_obstacle_radius=self.DEPTH_OBSTACLE_RADIUS,
-            depth_obstacle_max_range=self.DEPTH_OBSTACLE_MAX_RANGE, depth_obstacle_stride=self.DEPTH_OBSTACLE_STRIDE,
-            depth_obstacle_voxel=self.DEPTH_OBSTACLE_VOXEL, depth_obstacle_max_points=self.DEPTH_OBSTACLE_MAX_POINTS,
-            depth_obstacle_z_band=self.DEPTH_OBSTACLE_Z_BAND,
+            umap_max_range=self.UMAP_MAX_RANGE, umap_bin_size=self.UMAP_BIN_SIZE,
+            umap_t_poi=self.UMAP_T_POI, umap_t_tho=self.UMAP_T_THO,
         )
         args = self.args
         run_dir = self.RUN_DIR
@@ -500,8 +498,6 @@ class Ros2HardwareRunner(Node):
         self.gradient = (self.vcfg["projection_mode"] == "gradient")
         self.pos_projector = None
         self.proj_dt = 0.1
-        self.depth_tracker = ObstacleTracker() if args.depth_obstacles else None
-        self._last_depth_rebuild_time = None  # set on first _rebuild_depth_projector() call
         # latest detection, kept only so it's available if you want to log/inspect it
         self.depth_static_pts_latest, self.depth_dyn_preds_latest = [], {}
         
@@ -643,12 +639,20 @@ class Ros2HardwareRunner(Node):
         self.cmd_pub.publish(stop)
 
     def _rebuild_depth_projector(self):
-        """--depth_obstacles: capture the current depth frame, back-project ->
-        filter -> cluster -> track (see depth_obstacle_estimator.py), and build
-        the point-based projector from that instead of ground-truth cylinder
-        geometry. Called once after camera warm-up and then every control step.
-        Mirrors eval_crazieflie1.py's module-level _rebuild_depth_projector,
-        adapted to read pose/depth from ROS2 state instead of an Isaac Sim env.
+        """--depth_obstacles: detect the single largest obstacle in the current
+        depth frame via detect_largest_obstacle_umap() (U-disparity-map +
+        contour method, ported from darshit-desai/Dynamic-Obstacle-avoidance-
+        on-drone -- see depth_obstacle_estimator.py's module docstring there),
+        and build the point-based projector from that instead of ground-truth
+        cylinder geometry. Called once after camera warm-up and then every
+        control step.
+
+        Deliberate trade-offs versus the previous backproject/filter/cluster/
+        track pipeline (still used by eval_crazieflie1.py's sim path): only
+        ONE (the largest) obstacle is ever reported, nothing is tracked
+        frame-to-frame (no static/dynamic split, no memory once an obstacle
+        leaves the FOV), and the keep-out radius is a coarse bounding-box
+        estimate rather than a fitted circle.
         """
         args = self.args
         depth = self.cam_state["depth"]
@@ -656,48 +660,28 @@ class Ros2HardwareRunner(Node):
         quat_body_w = self.state["quat"]
         pos_cam_w, quat_cam_w = camera_world_pose(pos_body_w, quat_body_w)
 
-        # Camera-frame first (identity pose), NOT world frame directly -- same
-        # reasoning as eval_crazieflie1.py: keep_nearest_along_z needs real
-        # camera-frame lateral position to correctly drop flying-pixel/multipath
-        # echo points behind the true front surface.
-        pts_cam = backproject_depth_to_world(
+        detection = detect_largest_obstacle_umap(
             depth, self.depth_fx, self.depth_fy, self.depth_cx, self.depth_cy,
-            _IDENTITY_POS, _IDENTITY_QUAT,
-            max_range=args.depth_obstacle_max_range, stride=args.depth_obstacle_stride,
+            max_range_m=args.umap_max_range, bin_size=args.umap_bin_size,
+            t_poi=args.umap_t_poi, t_tho=args.umap_t_tho,
         )
-        if len(pts_cam):
-            pts_cam = keep_nearest_along_z(pts_cam, xy_bin_size=0.05)
-        pts = pos_cam_w[None, :] + quat_apply(quat_cam_w, pts_cam)  # -> world frame
 
-        # z-crop centered on the drone's CURRENT altitude, clamped to the real
-        # flight envelope (see --depth_obstacle_z_band help).
-        _z_band = args.depth_obstacle_z_band
-        _z_lo = max(FLIGHT_Z_MIN, pos_body_w[2] - _z_band)
-        _z_hi = min(FLIGHT_Z_MAX, pos_body_w[2] + _z_band)
-        pts = filter_points(
-            pts, x_bounds=(-0.5, 4.5), y_bounds=(-0.95, 0.95), z_bounds=(_z_lo, _z_hi),
-            voxel_size=args.depth_obstacle_voxel, output_2d=True,
-        )
-        clusters = cluster_points(pts)
-
-        # Real elapsed wall-clock time since the last call -- this runs once per
-        # control-loop iteration on hardware (no fixed substep count like sim's
-        # env.count), so measure it directly rather than assume a rate.
-        now = time.time()
-        rebuild_dt = now - self._last_depth_rebuild_time if self._last_depth_rebuild_time is not None else 1.0 / 30
-        self._last_depth_rebuild_time = now
-        active_tracks = self.depth_tracker.update(clusters, dt=rebuild_dt)
-
-        static_pts, dyn_preds = tracks_to_constraints(
-            active_tracks, horizon=self.horizon, proj_dt=self.proj_dt,
-            max_points_per_obstacle=args.depth_obstacle_max_points,
-        )
-        self.depth_static_pts_latest, self.depth_dyn_preds_latest = static_pts, dyn_preds
+        static_pts: list[tuple[float, float]] = []
+        point_radius = args.depth_obstacle_radius
+        if detection is not None:
+            pos_cam, half_width_m, half_height_m = detection
+            world_xyz = pos_cam_w + quat_apply(quat_cam_w, pos_cam)
+            static_pts = [(float(world_xyz[0]), float(world_xyz[1]))]
+            # Coarse size estimate from the detected bounding box, floored at
+            # DEPTH_OBSTACLE_RADIUS so a thin/noisy blob doesn't collapse to a
+            # near-zero keep-out.
+            point_radius = max(args.depth_obstacle_radius, max(half_width_m, half_height_m))
+        self.depth_static_pts_latest, self.depth_dyn_preds_latest = static_pts, {}
 
         projector = build_position_projector_from_points(
             horizon_H=self.horizon, gradient=self.gradient, device=self.device,
-            static_points=static_pts, dynamic_predictions=dyn_preds,
-            point_radius=args.depth_obstacle_radius,
+            static_points=static_pts, dynamic_predictions={},
+            point_radius=point_radius,
             normalizer=None, tighten=self.vcfg["tighten"], dt=self.proj_dt,
             use_dynamics=self.vcfg.get("use_dynamics", True),
             drone_radius=self.drone_radius,

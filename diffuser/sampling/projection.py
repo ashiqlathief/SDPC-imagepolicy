@@ -8,6 +8,14 @@ from scipy.optimize import minimize, Bounds
 
 _POS_BOUND = 7.0
 
+# Opt-in diagnostic: minimize() result (res.x) is used unconditionally below
+# regardless of res.success -- a solver that gives up at maxiter without
+# actually satisfying the constraints (plausible for a nonconvex
+# "sphere_outside" constraint started from a deeply-infeasible point) fails
+# silently. Flip this on from a caller to print success/status/nit per solve;
+# off by default so it doesn't spam existing eval scripts.
+DEBUG_SLSQP = False
+
 
 def _build_slsqp_constraints(C, d, A, b, obstacle_specs, transition_dim, horizon):
     """Build the SLSQP constraint tuple for one solve. Shared by the serial path
@@ -48,6 +56,9 @@ def _solve_slsqp_candidate(x0, r_i, Q, C, d, A, b, obstacle_specs, transition_di
                     bounds=Bounds(-_POS_BOUND * np.ones_like(x0), _POS_BOUND * np.ones_like(x0)),
                     tol=1e-6,
                     options={'maxiter': 1000, 'disp': False})
+    if DEBUG_SLSQP:
+        print(f"[Projector/parallel] SLSQP: success={res.success} status={res.status} "
+              f"nit={res.nit} msg={res.message}")
     return res.x
 
 
@@ -271,6 +282,9 @@ class Projector:
                 sol_np[i] = res.x # Save the optimized trajectory vector.
                 if collect_nit:
                     self.last_nit.append(int(res.nit))
+                if DEBUG_SLSQP:
+                    print(f"[Projector] SLSQP candidate {i}: success={res.success} "
+                          f"status={res.status} nit={res.nit} msg={res.message}")
 
         #Compute a “projection cost” (a measure of how much the trajectory changed) for every candidate.
         for i in range(batch_size):

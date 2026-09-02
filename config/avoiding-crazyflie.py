@@ -14,7 +14,7 @@ _UNET_MODELS = {
 }
 _IS_UNET = MODEL in _UNET_MODELS
 
-VIT_IMG_SIZE = 96
+VIT_IMG_SIZE = 128  # matches vit_small_patch8_224's own ImageNet pretraining resolution
 ENCODER_TYPE = 'vitp' if _IS_UNET else 'raw_pixels'
 IMAGE_COND_DIM = 384 if _IS_UNET else (4 if USE_DEPTH else 3) * VIT_IMG_SIZE * VIT_IMG_SIZE
 
@@ -22,20 +22,31 @@ BOXES = [
 ]
 
 CYLINDERS = [
-    # # (2, 0.7),
-    # (2.5, 0.5),
+    # (2, 0.7),
+    (2.5, 0.5),
+    # (2, 0.0),
+    (2.5, -0.5),
+    # (2, -0.8),
+    (0, 0.8),
+    # (0.5, 0.4),
+    (0, 0.0),
+    # (0.5, -0.4),
+    (0, -0.9),
+
+    # (2, 0.7),
+    (-1, 0.5),
     # # (2, 0.0),
-    # (2.5, -0.5),
-    # # (2, -0.8),
-    # (0, 0.8),
-    # # (0.5, 0.4),
-    # (0, 0.0),
-    # # (0.5, -0.4),
-    # (0, -0.9),
+    (-1, -0.5),
+    # (2, -0.8),
+    (-2.5, 0.8),
+    # (0.5, 0.4),
+    (-2.5, 0.0),
+    # (0.5, -0.4),
+    (-2.5, -0.9),
 ]
 
 KEEPOUT_ZONES = [
-    (-2.0, 0.0, 0.5),
+    # (-2.0, 0.0, 0.5),
 ]
 
 CORRIDOR_HALFSPACES = [
@@ -111,6 +122,7 @@ base = {
 
         ## dataset
         'loader': 'datasets.CrazyflieImageDataset',
+        'action_mode': 'vxz_yawrate',   # 'xyz' (default) or 'vxz_yawrate'
         'normalizer': 'LimitsNormalizer',
         'preprocess_fns': [],
         'clip_denoised': False,
