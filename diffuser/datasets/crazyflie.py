@@ -2,6 +2,7 @@ from collections import namedtuple
 import importlib
 import os
 import glob
+import cv2
 import numpy as np
 import torch
 import zarr
@@ -15,6 +16,27 @@ _DEFAULT_DEPTH_FAR = _scene_cfg_module.DEPTH_FAR
 # Keep the same “shape” of outputs as other datasets
 Batch = namedtuple("Batch", "trajectories conditions")
 RewardBatch = namedtuple("RewardBatch", "trajectories conditions returns")
+
+
+def _quat_conjugate(q):
+    """q: (..., 4) xyzw -> conjugate (inverse, for unit quaternions)."""
+    q = q.copy()
+    q[..., :3] *= -1.0
+    return q
+
+
+def _quat_rotate(q, v):
+    """Rotate vector(s) v (..., 3) by quaternion(s) q (..., 4) xyzw:
+    v' = q * v * q^-1, expanded without building a full rotation matrix.
+    Used by action_mode="vxz_yawrate" to convert states' world-frame
+    linvel/angvel into the body frame the RL controller's own
+    [v_x, v_z, yaw_rate] action is expressed in (see execise_01_c.py's
+    _pre_physics_step: lin_vel_b/ang_vel_b get quat_apply'd from body ->
+    world before being written to sim, so this is the inverse of that step)."""
+    q_xyz = q[..., :3]
+    q_w = q[..., 3:4]
+    t = 2.0 * np.cross(q_xyz, v)
+    return v + q_w * t + np.cross(q_xyz, t)
 
 
 class CrazyflieImageDataset(torch.utils.data.Dataset):
@@ -43,31 +65,22 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         returns_scale=100.0,
         include_returns=False,
         zarr_subdir="zarr",
-        data_subdir="data",         # isaac/dataset/avoiding_crazyflie/<data_subdir>/<zarr_subdir>
+        data_subdir="data1",         # isaac/dataset/avoiding_crazyflie/<data_subdir>/<zarr_subdir>
         use_depth=False,            # load and concat the depth channel collected via quadcopter.py --use_depth
         depth_near=None,            # metres; defaults to config/avoiding-crazyflie.py DEPTH_NEAR
         depth_far=None,             # metres; defaults to config/avoiding-crazyflie.py DEPTH_FAR
-        stats_path=None,            # path to the state_*.pt checkpoint, which embeds
-                                     # action_min/action_max (see Trainer.save/save_best).
-                                     # Used as a fallback ONLY when the Zarr data_dir isn't
-                                     # found, so eval can run on a machine without the raw
-                                     # dataset. Also accepts a legacy normalizer_stats.npz
-                                     # sidecar for runs trained before stats were embedded.
-        use_pose_cond=False,        # also expose "pose_now" (current position at the last
-                                     # observed frame) and "pose_target" (that episode's
-                                     # fixed goal, from the zarr "targets" array) in
-                                     # conditions, normalized via self.pose_normalizer.
-                                     # Off by default: existing image-only models never see
-                                     # these extra keys.
-        **_legacy_kwargs,           # swallow stride/dt/action_mode etc. from a
-                                     # dataset_config.pkl pickled before those params were
-                                     # removed -- Config.__call__ forwards every key it has
-                                     # saved, so old checkpoints must still be accepted here.
+        stats_path=None,
+        use_pose_cond=False,
+        action_mode="xyz",
+        **_legacy_kwargs,
     ):
         super().__init__()
         if _legacy_kwargs:
             print(f"[CrazyflieImageDataset] Ignoring legacy kwargs from an older "
                   f"dataset_config.pkl: {sorted(_legacy_kwargs)}")
+        if action_mode not in ("xyz", "vxz_yawrate"):
+            raise ValueError(f"action_mode must be 'xyz' or 'vxz_yawrate', got {action_mode!r}")
+        self.action_mode = action_mode
         self.env = env
         self.horizon = int(horizon)         # H
         self.n_obs_steps = int(n_obs_steps) # To
@@ -150,10 +163,20 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
 
         # --- Sanity / dims from first store ---
         g0 = self.groups[0]
-        self.img_h, self.img_w = int(g0["rgb"].shape[1]), int(g0["rgb"].shape[2])
+        raw_h, raw_w = int(g0["rgb"].shape[1]), int(g0["rgb"].shape[2])
+        # Model was trained on config.avoiding-crazyflie's VIT_IMG_SIZE (224x224,
+        # square, matching vit_small_patch8_224's own pretraining resolution).
+        # Real-camera zarr stores (240x424) are a different, non-square
+        # resolution -- __getitem__ center-crops to square then resizes to
+        # this, so img_h/img_w below reflect what's actually served, not the
+        # raw zarr resolution. No-op if the zarr is already this size.
+        self.img_size = int(getattr(_scene_cfg_module, "VIT_IMG_SIZE", 96))
+        self.img_h = self.img_w = self.img_size
+        self._raw_img_h, self._raw_img_w = raw_h, raw_w
 
         self.pos_slice = slice(0, 3)   # CHANGE if needed
-        self.action_dim = 3            # (dx,dy,dz)
+        self.action_dim = 3            # (dx,dy,dz) if action_mode=="xyz", else
+                                        # (vx_body,vz_body,yaw_rate_body)
         self.observation_dim = 0
         self.goal_dim = 0
 
@@ -206,21 +229,31 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         a_mins = None
         a_maxs = None
         for gi, g in enumerate (self.groups):
-            s = g["states"]  # (T, state_dim)
+            s = g["states"]  # (T, state_dim): [pos(3), quat_xyzw(4), linvel_w(3), angvel_w(3)]
             pos_all = s[:, self.pos_slice]
+            if self.action_mode == "vxz_yawrate":
+                quat_all = s[:, 3:7]
+                linvel_all = s[:, 7:10]
+                angvel_all = s[:, 10:13]
 
             for (ep_gi, ep_start, ep_end) in self.episodes:
                 if ep_gi != gi:
                     continue
 
-                p = pos_all[ep_start : ep_end + 1]                        # fully within real episode
-                vel = p[1:] - p[:-1]                                      # (>=0, action_dim)
+                if self.action_mode == "xyz":
+                    p = pos_all[ep_start : ep_end + 1]                    # fully within real episode
+                    act = p[1:] - p[:-1]                                  # (>=0, action_dim)
+                else:
+                    q = quat_all[ep_start : ep_end + 1]
+                    lv_b = _quat_rotate(_quat_conjugate(q), linvel_all[ep_start : ep_end + 1])
+                    av_b = _quat_rotate(_quat_conjugate(q), angvel_all[ep_start : ep_end + 1])
+                    act = np.stack([lv_b[:, 0], lv_b[:, 2], av_b[:, 2]], axis=-1)  # (>=0, 3)
 
-                if vel.shape[0] == 0:
+                if act.shape[0] == 0:
                     continue
 
-                cmin = vel.min(axis=0)
-                cmax = vel.max(axis=0)
+                cmin = act.min(axis=0)
+                cmax = act.max(axis=0)
 
                 a_mins = cmin if a_mins is None else np.minimum(a_mins, cmin)
                 a_maxs = cmax if a_maxs is None else np.maximum(a_maxs, cmax)
@@ -258,6 +291,24 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.indices)
 
+    def _center_crop_resize(self, frames, interpolation):
+        """Center-crop to square (using the shorter side) then resize to
+        self.img_size. Matches the eval-time preprocessing the real camera
+        feed goes through (see scripts/eval_crazieflieros2.py), so a
+        non-square native camera resolution (e.g. 240x424) still lands on
+        the same square VIT_IMG_SIZE the model's vision encoder expects.
+        No-op if frames are already img_size x img_size."""
+        T, h, w = frames.shape[:3]
+        if h == self.img_size and w == self.img_size:
+            return frames
+        side = min(h, w)
+        y0, x0 = (h - side) // 2, (w - side) // 2
+        cropped = frames[:, y0:y0 + side, x0:x0 + side, ...]
+        out = np.empty((T, self.img_size, self.img_size) + frames.shape[3:], dtype=frames.dtype)
+        for t in range(T):
+            out[t] = cv2.resize(cropped[t], (self.img_size, self.img_size), interpolation=interpolation)
+        return out
+
     def __getitem__(self, idx):
         gi, t_start = self.indices[idx]
         g = self.groups[gi]
@@ -268,11 +319,13 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         # --- condition: image window ending at t_start ---
         # rgb in zarr: (T, H, W, 3) uint8
         rgb = g["rgb"][t_start - To + 1 : t_start + 1]  # (To, H, W, 3) uint8
+        rgb = self._center_crop_resize(rgb, cv2.INTER_AREA)  # (To, img_size, img_size, 3) uint8
         # convert to float32 in [0,1], and channel-first for PyTorch
-        rgb = (rgb.astype(np.float32) / 255.0).transpose(0, 3, 1, 2)  # (To, 3, H, W)
+        rgb = (rgb.astype(np.float32) / 255.0).transpose(0, 3, 1, 2)  # (To, 3, img_size, img_size)
 
         if self.use_depth:
             depth = g["depth"][t_start - To + 1 : t_start + 1]  # (To, H, W) float32 metres
+            depth = self._center_crop_resize(depth, cv2.INTER_NEAREST)  # nearest: don't blend across depth edges
             # quadcopter.py clamps inf/nan to DEPTH_FAR at collection time, but np.clip alone
             # would NOT fix nan (np.clip(nan, lo, hi) == nan), so guard here too in case older
             # data was collected before that fix.
@@ -287,10 +340,20 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
             rgb = np.concatenate([rgb, depth], axis=1)  # (To, 4, H, W)
 
         # --- target: action chunk starting at t_start ---
-        # Need H+1 consecutive states to compute H velocity steps
+        # Need H+1 consecutive states; states[0] is only used below for pose_now.
         states = g["states"][t_start : t_start + H + 1].astype(np.float32)  # (H+1, state_dim)
-        pos = states[:, self.pos_slice]                                     # (H+1, 3)
-        actions = pos[1:] - pos[:-1]                                        # (H, action_dim), each spanning one frame
+        if self.action_mode == "xyz":
+            pos = states[:, self.pos_slice]                                 # (H+1, 3)
+            actions = pos[1:] - pos[:-1]                                    # (H, action_dim), each spanning one frame
+        else:
+            quat = states[1:, 3:7]           # (H, 4) xyzw
+            lin_vel_w = states[1:, 7:10]     # (H, 3) world-frame
+            ang_vel_w = states[1:, 10:13]    # (H, 3) world-frame
+            lin_vel_b = _quat_rotate(_quat_conjugate(quat), lin_vel_w)   # (H, 3) body-frame
+            ang_vel_b = _quat_rotate(_quat_conjugate(quat), ang_vel_w)   # (H, 3) body-frame
+            # [vx_body, vz_body, yaw_rate_body] -- vy_body is omitted: the collection
+            # controller never commands lateral velocity, so it's ~0 throughout.
+            actions = np.stack([lin_vel_b[:, 0], lin_vel_b[:, 2], ang_vel_b[:, 2]], axis=-1)  # (H, 3)
 
         actions = self.action_normalizer.normalize(actions.astype(np.float32))
         conditions = {"obs_rgb": rgb}

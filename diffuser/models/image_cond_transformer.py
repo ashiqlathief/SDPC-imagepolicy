@@ -25,7 +25,7 @@ class RawPixelEncoder(nn.Module):
         if x.max() > 1.5:
             x = x / 255.0
 
-        x = x.view(B, To, -1)   # (B, To, 27648)
+        x = x.reshape(B, To, -1)   # (B, To, 27648)
         x = x.mean(dim=1)        # (B, 27648)
         return x
     

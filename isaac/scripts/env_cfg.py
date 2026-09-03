@@ -13,9 +13,7 @@ from isaaclab.sim.spawners.materials import MdlFileCfg
 
 cfg = importlib.import_module("config.avoiding-crazyflie")
 
-_BOXES_XY = cfg.BOXES
 _CYLINDERS_XY = cfg.CYLINDERS
-_SPHERES_XYZ = getattr(cfg, 'SPHERES', [])
 SPHERE_RADIUS = getattr(cfg, 'SPHERE_RADIUS', 0.10)
 USE_DEPTH = cfg.USE_DEPTH
 DEPTH_NEAR = cfg.DEPTH_NEAR
@@ -27,10 +25,12 @@ WALL_HEIGHT = 3.0
 CEILING_HEIGHT  = WALL_HEIGHT          # = 1.0  (flush with obstacle tops)
 CEILING_Z_CENTER = CEILING_HEIGHT + WALL_THICKNESS / 2.0   # centre of roof slab
 CORRIDOR_X_OFFSET = -CORRIDOR_LENGTH / 2.0
+FPV_REAL_WIDTH, FPV_REAL_HEIGHT = 96, 96
+FPV_REAL_K = [212.49798583984375, 0.0, 215.16233825683594,
+              0.0, 212.30624389648438, 121.23411560058594,
+              0.0, 0.0, 1.0]
 
-BOXES = [(x , y, 1.0 / 2.0) for (x, y) in _BOXES_XY]
-CYLINDERS = [(x , y, 1.0 / 2.0) for (x, y) in _CYLINDERS_XY]
-SPHERES_XYZ = [(x, y, z) for (x, y, z) in _SPHERES_XYZ]
+CYLINDERS = [(x , y, 1.0) for (x, y) in _CYLINDERS_XY]
 RED_MAT   = PreviewSurfaceCfg(diffuse_color=(0.85, 0.10, 0.10))
 BLUE_MAT  = PreviewSurfaceCfg(diffuse_color=(0.10, 0.30, 0.90))
 FLOOR_BASE_MAT = PreviewSurfaceCfg(diffuse_color=(0.22, 0.22, 0.22), roughness=0.9)   # visible through the tile seams
@@ -58,7 +58,6 @@ WALLS_MODULAR = [
     # ---- left wall (y = -CORR_Y) ----
     (_WALL_6M,     _CORR_X0 + _SEG_6M_LEN / 2.0,                -_CORR_Y, 0.0, _ROT_YAW_P90, (1.0, 1.0, _WALL_Z_SCALE)),
     (_WALL_3M,     _CORR_X0 + _SEG_6M_LEN + _SEG_FILL_LEN / 2.0,-_CORR_Y, 0.0, _ROT_YAW_P90, (1.0, _SEG_FILL_SCALE_Y, _WALL_Z_SCALE)),
-    # mirrored (scale_y = -1) so its Y-leg points toward the corridor centreline, not outward
     (_WALL_CORNER, _CORR_X1,                                    _CORR_Y, 0.0, _ROT_YAW_180, (1.0, -1.0, _WALL_Z_SCALE)),
 
     # ---- right wall (y = +CORR_Y) ----
@@ -144,14 +143,15 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
     FPV_CAMERA_CFG = CameraCfg(
         prim_path="/World/envs/env_.*/Crazyflie/body/fpv",
         update_period=1.0 / 10.0,       # update every physics step (matches sim dt)
-        height=96,
-        width=96,
+        height=FPV_REAL_HEIGHT,
+        width=FPV_REAL_WIDTH,
         data_types=["rgb", "distance_to_camera"] if USE_DEPTH else ["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(   # camera intrinsics
-            focal_length=24.0,
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.1, 1000.0),
+        spawn=sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
+            intrinsic_matrix=FPV_REAL_K,
+            width=FPV_REAL_WIDTH,
+            height=FPV_REAL_HEIGHT,
+            focus_distance=0.6,           # m   (typical focus plane)
+            clipping_range=(0.4, 10.0),   # m   (D455 recommended range)
         ),
         # Pose relative to the Crazyflie
         offset=CameraCfg.OffsetCfg(
@@ -201,3 +201,18 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
         )
     if WALLS_MODULAR:
         del _mi, _usd, _mx, _my, _mz, _mrot, _mscale
+
+    for _i, _pos in enumerate(CYLINDERS):
+        vars()[f"cyl_{_i:02d}"] = RigidObjectCfg(
+            prim_path=f"/World/envs/env_.*/Cyl{_i:02d}",
+            spawn=sim_utils.CylinderCfg(
+                visual_material=RED_MAT,
+                radius=0.15,
+                height=2.0,
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=_pos, rot=(1, 0, 0, 0)),
+        )
+    if CYLINDERS:
+        del _i, _pos

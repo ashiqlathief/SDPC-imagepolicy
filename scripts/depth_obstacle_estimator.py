@@ -1,7 +1,16 @@
 from __future__ import annotations
+import cv2
 import numpy as np
 from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
+
+# Opt-in diagnostic: prints each U-map contour's raw pixel bbox, implied depth,
+# and area right where it gets converted to a world-frame detection -- lets a
+# caller see whether an oversized/suspicious detection (e.g. a wall or floor
+# picked up instead of a real obstacle) came from a contour spanning many
+# columns (wide object or merged blobs) vs one sitting at a far depth-bin
+# (small angular size projected out to a large physical size). Off by default.
+DEBUG_DETECT = False
 
 
 # =============================================================================
@@ -403,3 +412,167 @@ def tracks_to_constraints(active_tracks: list[tuple[int, dict]], horizon: int, p
                 ]
                 key += 1
     return static_points, dynamic_predictions
+
+
+# =============================================================================
+# Single-largest-obstacle detector, ported from darshit-desai/Dynamic-Obstacle-
+# avoidance-on-drone's depth_processor.py (U-disparity-map + contour method,
+# see https://github.com/darshit-desai/Dynamic-Obstacle-avoidance-on-drone).
+#
+# This REPLACES the backproject/filter/cluster/track pipeline above for
+# eval_crazieflieros2.py's real-hardware obstacle path. It's a materially
+# different (and more limited) approach, ported deliberately with these
+# known trade-offs versus the pipeline above:
+#   - only the single LARGEST obstacle in frame is ever reported (no
+#     multi-obstacle support -- the source picks one contour via
+#     areas.index(max(areas)))
+#   - no static/dynamic classification and no memory: nothing is tracked
+#     frame-to-frame, so an obstacle that leaves the narrow FOV is
+#     immediately forgotten (unlike ObstacleTracker's missed-frame buffer)
+#   - radius/size is a coarse bounding-box estimate, not a fitted circle
+# Ported changes from the original: works in metres (not raw uint16 mm) to
+# match _depth_cb's decoding; uses the REAL calibrated (fx, fy, cx, cy) from
+# the camera's CameraInfo message instead of one hardcoded focal_length tied
+# to the original authors' specific camera+resolution; drops all ROS1/
+# cv_bridge/rospy dependencies (this repo's depth image already arrives as a
+# plain numpy array). The U-map bin/threshold constants (bin_size, T_poi,
+# T_tho) are the original authors' tuned values and will likely need
+# retuning for this corridor and camera.
+# =============================================================================
+
+def _contour_to_camera_detection(contour, depth_mm: np.ndarray, fx: float, fy: float,
+                                  cx: float, cy: float, mm_per_bin: float, W: int):
+    """Shared per-contour math behind detect_largest_obstacle_umap()/
+    detect_obstacles_umap(): one U-map contour -> (pos_cam, half_width_m,
+    half_height_m), or None if it doesn't yield a valid detection (out of
+    frame, or no matching depth pixels in its row band)."""
+    x, y, width, height = cv2.boundingRect(contour)
+    u_l, d_t = x, y                    # left column, near depth-bin
+    u_r, d_b = x + width, y + height   # right column, far depth-bin
+    if u_l >= W or u_r >= W:
+        return None
+
+    depth_forward_mm = d_b * mm_per_bin  # far edge of the contour = nearest-visible-surface depth
+
+    # Vertical extent: scan the depth image's rows within [u_l, u_r] columns for
+    # pixels whose depth-bin falls inside the contour's depth range (d_t..d_b),
+    # same restriction the original applies before taking row min/max.
+    lo_mm, hi_mm = d_t * mm_per_bin, d_b * mm_per_bin
+    cols = np.linspace(u_l, u_r - 1, min(20, max(u_r - u_l, 1)), dtype=int)
+    band = depth_mm[:, cols]
+    row_hit = np.any((band > lo_mm) & (band < hi_mm), axis=1)
+    rows = np.nonzero(row_hit)[0]
+    if len(rows) == 0:
+        return None
+    row_min, row_max = int(rows.min()), int(rows.max())
+
+    right_cam_mm = ((u_l - cx) + (u_r - cx)) * depth_forward_mm / (2.0 * fx)   # camera x (right)
+    down_cam_mm = ((row_min - cy) + (row_max - cy)) * depth_forward_mm / (2.0 * fy)  # camera y (down)
+
+    pos_cam = np.array([right_cam_mm, down_cam_mm, depth_forward_mm], dtype=np.float32) / 1000.0
+    half_width_m = (u_r - u_l) * depth_forward_mm / fx / 2.0 / 1000.0
+    half_height_m = (row_max - row_min) * depth_forward_mm / fy / 2.0 / 1000.0
+    if DEBUG_DETECT:
+        print(f"[Detect] cols=[{u_l},{u_r}) rows=[{row_min},{row_max}] "
+              f"depth={depth_forward_mm/1000.0:.2f}m half_w={half_width_m:.3f}m "
+              f"half_h={half_height_m:.3f}m contour_area={cv2.contourArea(contour):.0f} "
+              f"pos_cam={pos_cam}")
+    return pos_cam, half_width_m, half_height_m
+
+
+def _umap_contours(depth_m: np.ndarray, fx: float, bin_size: int, max_range_m: float,
+                    t_poi: float, t_tho: float, bin_thresh: int = 15):
+    """Shared U-map build + contour extraction behind detect_largest_obstacle_umap()/
+    detect_obstacles_umap(). Returns (contours, areas, depth_mm, mm_per_bin, W),
+    with contours/areas empty lists if nothing was found."""
+    # Deliberately NOT clipped into range -- np.histogram(range=...) silently
+    # DROPS out-of-range samples rather than piling them into the edge bin,
+    # which is what the original algorithm relies on: a far/out-of-range
+    # background (or an invalid all-zero sensor return) must disappear from
+    # the U-map entirely, not compete with real near obstacles for "largest
+    # contour." Invalid (<=0 or non-finite) pixels are pushed to +inf so
+    # they're dropped the same way.
+    depth_mm = depth_m.astype(np.float32) * 1000.0
+    depth_mm[~np.isfinite(depth_mm) | (depth_mm <= 0.0)] = np.inf
+    H, W = depth_mm.shape
+    max_range_mm = max_range_m * 1000.0
+    mm_per_bin = max_range_mm / bin_size
+
+    # U-map: one column-wise depth histogram per image column.
+    histograms = np.zeros((bin_size, W), dtype=np.int32)
+    for col in range(W):
+        histograms[:, col], _ = np.histogram(depth_mm[:, col], bins=bin_size, range=(0.0, max_range_mm))
+
+    # T_poi/T_tho thresholding, same as the original (kept in mm to match
+    # their tuned constants without re-deriving them).
+    dbin = (np.arange(bin_size) + 0.5) * mm_per_bin
+    t_pois = fx * t_tho / np.clip(dbin, 1e-6, None)
+    _ = t_pois > t_poi  # kept for parity with the source; unused downstream there too
+
+    normalized = cv2.normalize(histograms, None, 0, 255, cv2.NORM_MINMAX)
+    binary = cv2.threshold(np.uint8(normalized), bin_thresh, 36, cv2.THRESH_BINARY)[1]
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    areas = [cv2.contourArea(c) for c in contours]
+    return contours, areas, depth_mm, mm_per_bin, W
+
+
+def detect_largest_obstacle_umap(depth_m: np.ndarray, fx: float, fy: float, cx: float, cy: float,
+                                  max_range_m: float = 3.0, bin_size: int = 200,
+                                  t_poi: float = 500.0, t_tho: float = 1800.0, bin_thresh: int = 15):
+    """depth_m: (H,W) float32 metres (planar or radial -- the original method
+    doesn't distinguish; matches what _depth_cb hands it after mm->m scaling).
+
+    Returns (pos_cam, half_width_m, half_height_m) or None if no contour was
+    found. pos_cam is (3,) in THIS repo's camera-frame convention (x=right,
+    y=down, z=forward -- same as backproject_depth_to_world), ready to pass
+    through camera_world_pose()/quat_apply() for the world-frame transform,
+    unlike the original which baked in one fixed rotation for its own flight
+    stack's body-frame convention.
+
+    Single-obstacle convenience wrapper around detect_obstacles_umap() -- kept
+    for callers (e.g. eval_crazieflie1.py) that only want the largest one."""
+    detections = detect_obstacles_umap(
+        depth_m, fx, fy, cx, cy,
+        max_range_m=max_range_m, bin_size=bin_size, t_poi=t_poi, t_tho=t_tho,
+        bin_thresh=bin_thresh, max_obstacles=1,
+    )
+    return detections[0] if detections else None
+
+
+def detect_obstacles_umap(depth_m: np.ndarray, fx: float, fy: float, cx: float, cy: float,
+                           max_range_m: float = 3.0, bin_size: int = 200,
+                           t_poi: float = 500.0, t_tho: float = 1800.0,
+                           bin_thresh: int = 15, max_obstacles: int = 5):
+    """Same U-disparity-map + contour method as detect_largest_obstacle_umap(),
+    but returns every contour found (largest-area first), up to max_obstacles,
+    instead of only the single largest. Motivation: reporting just one
+    obstacle per frame means a real, closer obstacle can go completely
+    unconstrained on any given step just because something else was a bigger
+    blob that frame -- see the conversation this was added from, where the
+    drone side-swiped a cylinder that lost out to a larger one in the same
+    frame. Each entry is (pos_cam, half_width_m, half_height_m), same shape
+    detect_largest_obstacle_umap() returns for its one detection.
+
+    bin_thresh: cv2.threshold's binarization cutoff (0-255, on the normalized
+    U-map histogram) below which a bin is "empty". The original default of 15
+    is low enough that a mostly-open corridor's scattered background/free-
+    space depth readings can clear it and connect into one giant contour
+    spanning near-camera out to max_range_m -- swamping a real, much smaller,
+    denser cylinder-surface peak. Raise this to require a denser peak (an
+    actual reflecting surface) before something counts as a contour at all.
+    """
+    contours, areas, depth_mm, mm_per_bin, W = _umap_contours(
+        depth_m, fx, bin_size, max_range_m, t_poi, t_tho, bin_thresh
+    )
+    if not contours:
+        return []
+
+    order = np.argsort(areas)[::-1]  # largest area first
+    detections = []
+    for i in order:
+        det = _contour_to_camera_detection(contours[int(i)], depth_mm, fx, fy, cx, cy, mm_per_bin, W)
+        if det is not None:
+            detections.append(det)
+        if len(detections) >= max_obstacles:
+            break
+    return detections

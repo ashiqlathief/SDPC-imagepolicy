@@ -28,6 +28,11 @@ CEILING_HEIGHT  = WALL_HEIGHT          # = 1.0  (flush with obstacle tops)
 CEILING_Z_CENTER = CEILING_HEIGHT + WALL_THICKNESS / 2.0   # centre of roof slab
 CORRIDOR_X_OFFSET = -CORRIDOR_LENGTH / 2.0
 
+FPV_REAL_WIDTH, FPV_REAL_HEIGHT = 424, 240
+FPV_REAL_K = [212.49798583984375, 0.0, 215.16233825683594,
+              0.0, 212.30624389648438, 121.23411560058594,
+              0.0, 0.0, 1.0]
+
 BOXES = [(x , y, 1.0 / 2.0) for (x, y) in _BOXES_XY]
 CYLINDERS = [(x , y, 1.0 / 2.0) for (x, y) in _CYLINDERS_XY]
 SPHERES_XYZ = [(x, y, z) for (x, y, z) in _SPHERES_XYZ]
@@ -148,15 +153,16 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
 
     FPV_CAMERA_CFG = CameraCfg(
         prim_path="/World/envs/env_.*/Crazyflie/body/fpv",
-        update_period=1.0 / 10.0,       # update every physics step (matches sim dt)
-        height=96,
-        width=96,
+        update_period=1.0 / 30.0,       # update every physics step (matches sim dt)
+        height=FPV_REAL_HEIGHT,
+        width=FPV_REAL_WIDTH,
         data_types=["rgb", "distance_to_camera"] if USE_DEPTH else ["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(   # camera intrinsics
-            focal_length=24.0,
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.1, 1000.0),
+        spawn=sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
+            intrinsic_matrix=FPV_REAL_K,
+            width=FPV_REAL_WIDTH,
+            height=FPV_REAL_HEIGHT,
+            focus_distance=0.6,           # m   (typical focus plane)
+            clipping_range=(0.4, 10.0),   # m   (D455 recommended range)
         ),
         # Pose relative to the Crazyflie
         offset=CameraCfg.OffsetCfg(

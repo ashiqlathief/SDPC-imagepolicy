@@ -17,8 +17,8 @@ import isaaclab.sim as sim_utils
 from isaaclab.sim import SimulationContext
 from isaaclab.scene import InteractiveScene
 
+# from crazyflie_env_cfg1 import CrazyflieSceneCfg, CORRIDOR_X_OFFSET, CORRIDOR_LENGTH, WALL_HEIGHT
 from env_cfg import CrazyflieSceneCfg, CORRIDOR_X_OFFSET, CORRIDOR_LENGTH, WALL_HEIGHT
-# from env_cfg import CrazyflieSceneCfg
 
 _capture_count = 0
 

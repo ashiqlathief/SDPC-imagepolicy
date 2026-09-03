@@ -4,17 +4,6 @@ import argparse
 import os
 from isaaclab.app import AppLauncher
 from warp import pos
-_parser = argparse.ArgumentParser(add_help=False)
-AppLauncher.add_app_launcher_args(_parser)
-_app_args, _ = _parser.parse_known_args()
-# Headless by default (every existing caller relies on this); set
-# CRAZYFLIE_ENV_HEADLESS=0 before importing this module to pop up the actual
-# Isaac Sim GUI instead -- see --source isaac in depth_camera_live_test.py.
-_app_args.headless = os.environ.get("CRAZYFLIE_ENV_HEADLESS", "0") != "0"
-_app_args.enable_cameras = True
-app_launcher = AppLauncher(_app_args)
-simulation_app = app_launcher.app
-
 import torch
 import numpy as np
 import torch
@@ -22,8 +11,15 @@ import gymnasium as gym
 from typing import Tuple
 import math
 
+_parser = argparse.ArgumentParser(add_help=False)
+AppLauncher.add_app_launcher_args(_parser)
+_app_args, _ = _parser.parse_known_args()
+_app_args.headless = os.environ.get("CRAZYFLIE_ENV_HEADLESS", "1") != "0"
+_app_args.enable_cameras = True
+app_launcher = AppLauncher(_app_args)
+simulation_app = app_launcher.app
+
 import isaaclab.sim as sim_utils
-from isaaclab.scene import InteractiveScene
 from isaaclab.scene import InteractiveScene
 
 
@@ -321,7 +317,7 @@ class Crazyflie(gym.Env):
         self.gravity = torch.tensor(self._sim.cfg.gravity, device=self.device).norm()
         self.hover_thrust = self.robot_mass * self.gravity / 4.0
         self.count = 10
-        self._cyl_phys_radius = 0.06   # matches CylinderCfg radius in scene
+        self._cyl_phys_radius = 0.15   # matches CylinderCfg radius in scene
 
         # episode bookkeeping
         self.success_count = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
@@ -527,7 +523,7 @@ class Crazyflie(gym.Env):
             self.robot.write_data_to_sim()
             self._sim.step()
             self.robot.update(self._sim.get_physics_dt())
-            self.scene.update(self._sim.get_physics_dt()) #camera won’t refresh.
+            self.scene.update(self._sim.get_physics_dt())
 
             pos_world = self._pos_world()
             x = pos_world[:, 0]

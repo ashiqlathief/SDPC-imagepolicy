@@ -25,7 +25,8 @@ drone_rosbag_files-20260831T201556Z-1-001
 plots/*
 videos/
 all_variants_xy.pdf
-
+isaac/dataset/avoiding_crazyflie/data1
+outputs
 # Dead/orphaned code, kept on disk but untracked
 diffuser/models/mlp.py
 scripts/visualize_data_constraints.py
@@ -49,4 +50,8 @@ flight_test.py
 Simple_Warehouse
 Modular_Warehouse
 Modular_Warehouse/Props
-outputs
+
+# Reference clone (darshit-desai/Dynamic-Obstacle-avoidance-on-drone), ported
+# from manually into depth_obstacle_estimator.py -- not a build dependency,
+# and cloning it nested here would otherwise show up as an untracked gitlink.
+third_party/
