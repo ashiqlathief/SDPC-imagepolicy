@@ -4,7 +4,7 @@ from diffuser.utils import watch
 USE_DEPTH = False
 DEPTH_NEAR = 0.1   # metres
 DEPTH_FAR = 10.0    # metres
-MODEL = 'models.ImagePoseCondUNet1DTemporalCondModel'
+MODEL = 'models.ImagePoseCondTransformer1DModel'
 # other options: models.ImageCondTransformer1DModel, models.ImageCondUNet1DTemporalCondModel,
 #                models.ImagePoseCondTransformer1DModel, models.ImagePoseCondUNet1DTemporalCondModel
 
@@ -135,7 +135,7 @@ base = {
 
         ## serialization
         'logbase': logbase,
-        'prefix': 'diffusion/',
+        'prefix': 'diffusionvel/',
         'exp_name': watch(args_to_watch),
 
         ## training

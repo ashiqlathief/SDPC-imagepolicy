@@ -65,35 +65,14 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         returns_scale=100.0,
         include_returns=False,
         zarr_subdir="zarr",
-        data_subdir="data",         # isaac/dataset/avoiding_crazyflie/<data_subdir>/<zarr_subdir>
+        data_subdir="data1",         # isaac/dataset/avoiding_crazyflie/<data_subdir>/<zarr_subdir>
         use_depth=False,            # load and concat the depth channel collected via quadcopter.py --use_depth
         depth_near=None,            # metres; defaults to config/avoiding-crazyflie.py DEPTH_NEAR
         depth_far=None,             # metres; defaults to config/avoiding-crazyflie.py DEPTH_FAR
-        stats_path=None,            # path to the state_*.pt checkpoint, which embeds
-                                     # action_min/action_max (see Trainer.save/save_best).
-                                     # Used as a fallback ONLY when the Zarr data_dir isn't
-                                     # found, so eval can run on a machine without the raw
-                                     # dataset. Also accepts a legacy normalizer_stats.npz
-                                     # sidecar for runs trained before stats were embedded.
-        use_pose_cond=False,        # also expose "pose_now" (current position at the last
-                                     # observed frame) and "pose_target" (that episode's
-                                     # fixed goal, from the zarr "targets" array) in
-                                     # conditions, normalized via self.pose_normalizer.
-                                     # Off by default: existing image-only models never see
-                                     # these extra keys.
-        action_mode="xyz",          # "xyz" (default, unchanged): world-frame position delta
-                                     # (dx,dy,dz) per step, pos[i+1]-pos[i]. Or "vxz_yawrate":
-                                     # instantaneous [vx_body, vz_body, yaw_rate], matching the
-                                     # RL controller's own action semantics (execise_01_c.py's
-                                     # _pre_physics_step) -- rotates states' world-frame
-                                     # linvel/angvel (dims 7:13) into the body frame via states'
-                                     # quaternion (dims 3:7). NOT the same as the older removed
-                                     # "xz_yaw" mode, which was a body-projected step
-                                     # *displacement*, not a velocity.
-        **_legacy_kwargs,           # swallow stride/dt/etc. from a dataset_config.pkl pickled
-                                     # before those params were removed -- Config.__call__
-                                     # forwards every key it has saved, so old checkpoints must
-                                     # still be accepted here.
+        stats_path=None,
+        use_pose_cond=False,
+        action_mode="xyz",
+        **_legacy_kwargs,
     ):
         super().__init__()
         if _legacy_kwargs:
