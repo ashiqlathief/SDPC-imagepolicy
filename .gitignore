@@ -50,8 +50,5 @@ flight_test.py
 Simple_Warehouse
 Modular_Warehouse
 Modular_Warehouse/Props
-
-# Reference clone (darshit-desai/Dynamic-Obstacle-avoidance-on-drone), ported
-# from manually into depth_obstacle_estimator.py -- not a build dependency,
-# and cloning it nested here would otherwise show up as an untracked gitlink.
+outputs
 third_party/
