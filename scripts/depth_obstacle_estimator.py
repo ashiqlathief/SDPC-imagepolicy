@@ -47,17 +47,8 @@ def quat_apply(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     uuv = np.cross(qv, uv)
     return v + 2.0 * (w * uv + uuv)
 
-
-# Fixed body->camera offset, copied from CrazyflieSceneCfg.FPV_CAMERA_CFG in
-# isaac/scripts/crazyflie_env_cfg.py (pos=(0,0,0.02), rot=(0.5,-0.5,0.5,-0.5),
-# convention="ros") -- kept as a constant here rather than imported so this
-# module has no IsaacLab dependency. If that offset ever changes, update it
-# here too.
 CAM_OFFSET_POS = np.array([0.0, 0.0, 0.02], dtype=np.float32)
 CAM_OFFSET_QUAT = np.array([0.5, -0.5, 0.5, -0.5], dtype=np.float32)  # (w,x,y,z)
-
-# FPV_CAMERA_CFG's sensor params (height/width/focal_length/horizontal_aperture),
-# also copied rather than imported for the same reason.
 FPV_WIDTH, FPV_HEIGHT = 96, 96
 FPV_FOCAL_LENGTH = 24.0
 FPV_HORIZONTAL_APERTURE = 20.955

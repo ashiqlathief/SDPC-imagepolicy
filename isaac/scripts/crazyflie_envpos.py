@@ -25,19 +25,21 @@ from .env_cfg import (CrazyflieSceneCfg, CYLINDERS, CORRIDOR_LENGTH,
 class CrazyflieEnvCfg:
     num_envs: int = 1
     env_spacing: float = 2.0
-    dt: float = 1.0 / 50.0  # matches exp2vla's execise_01_c.py control cadence (see
-                             # crazyflie_envvel.py's cfg.dt comment) -- not load-bearing
-                             # here the way it is for the vel env (no dynamics being
-                             # integrated), but kept the same for consistency/comparability.
+    dt: float = 1.0 / 50.0  # matches exp2vla's execise_01_c.py control cadence -- not
+                             # load-bearing here (no dynamics being integrated), but kept
+                             # the same for consistency/comparability.
     device: str = "cuda:0"
     gate_x_min: float = 3.95
     gate_x_max: float =  4.0
     gate_y: float = 1.0
     gate_y_tol: float = 0.005   # how close to y=1 counts
     min_z: float = 0.02
-    max_z: float = 2.0
+    max_z: float = 2.5
     reset_on_fail: bool = False # if True, env auto-resets inside step()
-    success_radius: float = 0.2
+    success_radius: float = 0.1
+    goal_pos: tuple | None = None  # (x, y, z) world-frame goal; None = fall back to the
+                                    # legacy gate_x_max line-crossing check instead of a
+                                    # true point-goal (see step()).
     drone_radius: float = 0.10   # Crazyflie body radius (m) for collision checks
     dynamic_obstacles: bool = False
     obs_amplitude: float = 0.25   # sinusoid amplitude in metres
@@ -47,7 +49,7 @@ class CrazyflieEnvCfg:
                                    # None = all "y" (legacy lateral-only behaviour).
                                    # Must match length of dynamic_cyl_indices (or len(CYLINDERS) if that's None).
 
-    goal_y = 2.0
+    goal_y = 2.5
 
 class Crazyflie(gym.Env):
 
@@ -86,6 +88,10 @@ class Crazyflie(gym.Env):
         self.env_origins = self.initial_root_state[:, 0:3].clone().to(self.device)
 
         self.num_envs = self.robot.num_instances
+
+        self.goal_pos = None
+        if cfg.goal_pos is not None:
+            self.goal_pos = torch.tensor(cfg.goal_pos, dtype=torch.float32, device=self.device)
 
         print("prop names:", self.robot.body_names)
 
@@ -281,7 +287,11 @@ class Crazyflie(gym.Env):
         z = pos_world[:, 2]
 
         # goal
-        self.success_acc |= (x >= self.cfg.gate_x_max)
+        if self.goal_pos is not None:
+            dist_to_goal = torch.norm(pos_world - self.goal_pos.unsqueeze(0), dim=-1)
+            self.success_acc |= (dist_to_goal <= self.cfg.success_radius)
+        else:
+            self.success_acc |= (x >= self.cfg.gate_x_max)
 
         # floor / walls / ceiling
         self.fell_acc |= (z < self.cfg.min_z)                   # hit ground

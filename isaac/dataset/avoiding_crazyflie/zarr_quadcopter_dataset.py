@@ -102,7 +102,7 @@ def add_obstacles(ax, boxes, cylinders, tighten=0.0,
 
 
 # ── load zarr dataset ─────────────────────────────────────────────────────
-path = sim_framework_path("isaac", "dataset", "avoiding_crazyflie", "data1", "zarr", "env_000.zarr")
+path = sim_framework_path("isaac", "dataset", "avoiding_crazyflie", "data", "zarr", "env_000.zarr")
 g = zarr.open_group(path, mode="r")
 
 print("arrays:", list(g.array_keys()))

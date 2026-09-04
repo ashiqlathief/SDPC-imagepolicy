@@ -1000,10 +1000,10 @@ def main():
                 cond = {"obs_rgb": obs_rgb_t}
 
                 if use_pose_cond:
-                    pose_now_norm = dataset.pose_normalizer.normalize(pos[:3].astype(np.float32))
-                    pose_target_norm = dataset.pose_normalizer.normalize(pose_target_world)
-                    cond["pose_now"] = torch.from_numpy(pose_now_norm).float().unsqueeze(0).to(device)
-                    cond["pose_target"] = torch.from_numpy(pose_target_norm).float().unsqueeze(0).to(device)
+                    # Raw world-frame metres, unnormalized -- matches training (see
+                    # diffuser/datasets/crazyflie.py's __getitem__).
+                    cond["pose_now"] = torch.from_numpy(pos[:3].astype(np.float32)).float().unsqueeze(0).to(device)
+                    cond["pose_target"] = torch.from_numpy(pose_target_world).float().unsqueeze(0).to(device)
 
                 # -------------------------------------------------
                 # Sample K candidate chunks (normalized action space)

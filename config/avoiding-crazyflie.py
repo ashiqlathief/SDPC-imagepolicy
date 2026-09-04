@@ -4,7 +4,7 @@ from diffuser.utils import watch
 USE_DEPTH = False
 DEPTH_NEAR = 0.1   # metres
 DEPTH_FAR = 10.0    # metres
-MODEL = 'models.ImagePoseCondTransformer1DModel'
+MODEL = 'models.ImagePoseCondUNet1DTemporalCondModel'
 # other options: models.ImageCondTransformer1DModel, models.ImageCondUNet1DTemporalCondModel,
 #                models.ImagePoseCondTransformer1DModel, models.ImagePoseCondUNet1DTemporalCondModel
 
@@ -14,35 +14,35 @@ _UNET_MODELS = {
 }
 _IS_UNET = MODEL in _UNET_MODELS
 
-VIT_IMG_SIZE = 128  # matches vit_small_patch8_224's own ImageNet pretraining resolution
+VIT_IMG_SIZE = 96
 ENCODER_TYPE = 'vitp' if _IS_UNET else 'raw_pixels'
-IMAGE_COND_DIM = 384 if _IS_UNET else (4 if USE_DEPTH else 3) * VIT_IMG_SIZE * VIT_IMG_SIZE
+IMAGE_COND_DIM = 384 if _IS_UNET else 3 * VIT_IMG_SIZE * VIT_IMG_SIZE
 
 BOXES = [
 ]
 
 CYLINDERS = [
-    # (2, 0.7),
-    (2.5, 0.5),
-    # (2, 0.0),
-    (2.5, -0.5),
-    # (2, -0.8),
-    (0, 0.8),
-    # (0.5, 0.4),
-    (0, 0.0),
-    # (0.5, -0.4),
-    (0, -0.9),
-
-    # (2, 0.7),
-    (-1, 0.5),
+    # # (2, 0.7),
+    # (2.5, 0.5),
     # # (2, 0.0),
-    (-1, -0.5),
-    # (2, -0.8),
-    (-2.5, 0.8),
-    # (0.5, 0.4),
-    (-2.5, 0.0),
-    # (0.5, -0.4),
-    (-2.5, -0.9),
+    # (2.5, -0.5),
+    # # (2, -0.8),
+    # (0, 0.8),
+    # # (0.5, 0.4),
+    # (0, 0.0),
+    # # (0.5, -0.4),
+    # (0, -0.9),
+
+    # # (2, 0.7),
+    # (-1, 0.5),
+    # # # (2, 0.0),
+    # (-1, -0.5),
+    # # (2, -0.8),
+    # (-2.5, 0.8),
+    # # (0.5, 0.4),
+    # (-2.5, 0.0),
+    # # (0.5, -0.4),
+    # (-2.5, -0.9),
 ]
 
 KEEPOUT_ZONES = [
@@ -75,7 +75,6 @@ args_to_watch = [
     ('model', 'D'),
     ('encoder_type', 'E'),
     ('image_cond_dim', 'L'),
-    ('use_depth', 'DEPTH'),
 ]
 
 logbase = 'isaac/logs'
@@ -86,7 +85,6 @@ base = {
         'model': MODEL,
         'diffusion': 'models.GaussianDiffusion',
         'encoder_type': ENCODER_TYPE,   # derived from MODEL above -- see comment there
-        'use_depth': USE_DEPTH,   # RGBD switch: set True only if the zarr dataset was collected with quadcopter.py --use_depth
         'horizon': 8,
         'n_obs_steps': 2,
         'image_cond_dim': IMAGE_COND_DIM,   # derived from MODEL above -- see comment there
@@ -122,7 +120,6 @@ base = {
 
         ## dataset
         'loader': 'datasets.CrazyflieImageDataset',
-        'action_mode': 'vxz_yawrate',   # 'xyz' (default) or 'vxz_yawrate'
         'normalizer': 'LimitsNormalizer',
         'preprocess_fns': [],
         'clip_denoised': False,
@@ -135,7 +132,7 @@ base = {
 
         ## serialization
         'logbase': logbase,
-        'prefix': 'diffusionvel/',
+        'prefix': 'diffusion/',
         'exp_name': watch(args_to_watch),
 
         ## training

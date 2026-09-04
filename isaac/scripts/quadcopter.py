@@ -29,13 +29,11 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.scene import InteractiveScene
 
 from diffuser.utils.path import project_path
-from isaac.scripts.env_cfg import CrazyflieSceneCfg, BOXES, CYLINDERS, DEPTH_FAR
+from isaac.scripts.env_cfg import CrazyflieSceneCfg, CYLINDERS, DEPTH_FAR
 from isaac.scripts.zarr_episode_writer import ZarrEpisodeWriter
 
 scene_cfg = CrazyflieSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
 if args_cli.use_depth:
-    # FPV_CAMERA_CFG defaults to RGB-only (see USE_DEPTH in crazyflie_env_cfg.py);
-    # override here so --use_depth is the single switch controlling this script.
     scene_cfg.FPV_CAMERA_CFG = scene_cfg.FPV_CAMERA_CFG.replace(
         data_types=["rgb", "distance_to_camera"]
     )
@@ -51,7 +49,11 @@ print("Resolved data path:", data_dir)
 
 # Auto-save settings
 SUCCESS_RADIUS = 0.05      # meters
-SUCCESS_HOLD_STEPS = 1    # require staying in radius for 20 sim steps
+SUCCESS_HOLD_STEPS = 30    # require staying in radius for 2s before save+reset
+                           # (60 steps @ sim_dt=1/30s in main()) -- gives the recorded
+                           # trajectory a genuine "hold at goal" tail instead of ending
+                           # the instant it first enters the radius, so the model has
+                           # something to imitate besides just approaching the target.
 
 def _sub_keyboard_event(event, *args, **kwargs):
     global reset, save_now,recording,clear_now
@@ -94,9 +96,9 @@ def quat_to_euler_xyzw(q):
     return roll, pitch, yaw
 
 def sample_targets(num_envs: int, device, env_origins,
-                   x_min=4.5, x_max=4.5,
-                   y_min=-2.0, y_max=2.0, #y_min=-0.94, y_max=-0.6, y_min=0.94, y_max=0.6,
-                   z_min=2.0, z_max=2.0):
+                   x_min=3.8, x_max=4.5,
+                   y_min=-2.0, y_max=-1.7, #y_min=-0.94, y_max=-0.6, y_min=0.94, y_max=0.6,
+                   z_min=1.5, z_max=1.0):
     """
     Sample one random target position per environment.
     Returns a tensor of shape (num_envs, 3).
@@ -435,6 +437,17 @@ def main():
     env_origins = initial_root_state[:, 0:3].clone()
     env_origins = env_origins.to(sim.device)
     num_envs = robot.num_instances
+
+    # Randomize the very first episode's spawn too (not just resets after episode 1) --
+    # same box as the reset block below, keeps behaviour consistent across all episodes.
+    spawn_pos = sample_targets(num_envs, sim.device, env_origins,
+                                x_min=-5.0, x_max=-5.0,
+                                y_min=1.7, y_max=2.0,
+                                z_min=0.8, z_max=1.5)
+    spawn_pose = torch.cat([spawn_pos, initial_root_state[:, 3:7]], dim=-1)  # keep initial orientation
+    robot.write_root_pose_to_sim(spawn_pose)
+    robot.write_root_velocity_to_sim(torch.zeros_like(initial_root_state[:, 7:]))
+    robot.update(sim.get_physics_dt())
     success_count = torch.zeros(num_envs, dtype=torch.int32, device=sim.device)
     # Fetch relevant parameters to make the quadcopter hover in place
     prop_body_ids = robot.find_bodies("m.*_prop")[0]
@@ -503,11 +516,12 @@ def main():
             joint_pos, joint_vel = robot.data.default_joint_pos, robot.data.default_joint_vel
             robot.write_joint_state_to_sim(joint_pos, joint_vel)
 
-            robot.write_root_pose_to_sim(initial_root_state[:, :7])
-
-            # robot.write_root_pose_to_sim(robot.data.default_root_state[:, :7])
-            # robot.write_root_velocity_to_sim(robot.data.default_root_state[:, 7:])
-
+            spawn_pos = sample_targets(num_envs, sim.device, env_origins,
+                                        x_min=-5.0, x_max=-5.0,
+                                        y_min=1.7, y_max=2.0,
+                                        z_min=0.8, z_max=1.5)
+            spawn_pose = torch.cat([spawn_pos, initial_root_state[:, 3:7]], dim=-1)  # keep initial orientation
+            robot.write_root_pose_to_sim(spawn_pose)
             zero_root_vel = torch.zeros_like(initial_root_state[:, 7:])
             robot.write_root_velocity_to_sim(zero_root_vel)
 

@@ -55,7 +55,6 @@ for seed in seeds:
         include_returns=args.include_returns,
         returns_scale=args.max_path_length,               # Because the reward is <= 1 in each timestep
         discount=args.discount,
-        use_depth=getattr(args, 'use_depth', False),
         use_pose_cond=args.model in _POSE_COND_MODELS,
     )
 
@@ -106,7 +105,6 @@ for seed in seeds:
             returns_condition=args.returns_condition,
             condition_dropout=args.condition_dropout,
             device=args.device,
-            use_depth=getattr(args, 'use_depth', False),
             **pose_kwargs,
         )
         print("Using Transformer denoiser model.")
@@ -137,7 +135,6 @@ for seed in seeds:
             vit_dropout=args.vit_dropout,
             vit_attn_dropout=args.vit_attn_dropout,
             device=args.device,
-            use_depth=getattr(args, 'use_depth', False),
             **pose_kwargs,
         )
         print("Using image-conditioned Unet model")
@@ -183,16 +180,6 @@ for seed in seeds:
     # Step 1
     model = model_config() #creates the neural network.
 
-    # Guard against a mismatched RGB/RGBD config silently corrupting training:
-    # dataset.use_depth controls what's loaded from zarr, model.use_depth controls
-    # the encoder's in_chans — both must agree with the requested args.use_depth.
-    use_depth = getattr(args, 'use_depth', False)
-    assert dataset.use_depth == use_depth, (
-        f"Dataset use_depth={dataset.use_depth} != config use_depth={use_depth}"
-    )
-    assert model.use_depth == use_depth and model.in_chans == (4 if use_depth else 3), (
-        f"Model use_depth={model.use_depth} (in_chans={model.in_chans}) != config use_depth={use_depth}"
-    )
     # Step 2 — wrap it in the diffusion math
     diffusion = diffusion_config(model) #wraps the model in the diffusion process
     trainer = trainer_config(diffusion, dataset) #sets up the training routine

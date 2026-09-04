@@ -10,13 +10,12 @@ class RawPixelEncoder(nn.Module):
     True raw pixel baseline.
     Full 96x96 image flattened directly as conditioning vector.
     """
-    def __init__(self, in_chans=3, img_size=96):
+    def __init__(self, img_size=96):
         super().__init__()
-        self.in_chans = in_chans
-        self.out_dim = in_chans * img_size * img_size  # 27648 for 3x96x96
+        self.out_dim = 3 * img_size * img_size  # 27648 for 3x96x96
 
     def forward(self, obs_rgb: torch.Tensor) -> torch.Tensor:
-        if obs_rgb.shape[-1] == self.in_chans and obs_rgb.shape[2] != self.in_chans:
+        if obs_rgb.shape[-1] == 3 and obs_rgb.shape[2] != 3:
             obs_rgb = obs_rgb.permute(0, 1, 4, 2, 3).contiguous()
 
         B, To, C, H, W = obs_rgb.shape
@@ -49,7 +48,6 @@ class ImageCondUNet1DTemporalCondModel(nn.Module):
         vit_dropout: float = 0.1,
         vit_attn_dropout: float = 0.0,
         device: str = None,
-        use_depth: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -57,8 +55,6 @@ class ImageCondUNet1DTemporalCondModel(nn.Module):
         self.action_dim = action_dim
         self.image_cond_dim = image_cond_dim
         self.encoder_type = encoder_type.lower()
-        self.use_depth = use_depth
-        self.in_chans = 4 if use_depth else 3
 
         if self.encoder_type == "vitp":
             self.encoder = ViTObsEncoderPretrained(
@@ -66,7 +62,6 @@ class ImageCondUNet1DTemporalCondModel(nn.Module):
                 patch_size=vit_patch_size,
                 cond_dim=image_cond_dim,
                 pretrained=True,
-                in_chans=self.in_chans,
             )
         elif self.encoder_type == "vit":
             self.encoder = ViTObsEncoder(
@@ -79,26 +74,17 @@ class ImageCondUNet1DTemporalCondModel(nn.Module):
                 mlp_ratio=vit_mlp_ratio,
                 dropout=vit_dropout,
                 attn_dropout=vit_attn_dropout,
-                in_chans=self.in_chans,
             )
         elif self.encoder_type == "raw_pixels":
-            self.encoder = RawPixelEncoder(in_chans=self.in_chans, img_size=vit_img_size)
+            self.encoder = RawPixelEncoder(img_size=vit_img_size)
             self.image_cond_dim = self.encoder.out_dim
         elif self.encoder_type == "cnn":
             self.encoder = ImageObsEncoder(  #CNN
                 cond_dim=image_cond_dim,
                 pretrained=True,
-                in_chans=self.in_chans,
             )
         else:
             raise ValueError(f"Unsupported encoder_type: {encoder_type}")
-
-        # consistency check: every encoder branch above sets self.encoder.in_chans
-        assert self.encoder.in_chans == self.in_chans, (
-            f"Encoder in_chans mismatch: encoder built with {self.encoder.in_chans}, "
-            f"model expected {self.in_chans} (use_depth={use_depth})"
-        )
-
 
         # ------------------------------------------------------------------
         # 2) Temporal denoiser UNet denoises [action || image_condition] jointly.
@@ -197,7 +183,6 @@ class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
         vit_dropout: float = 0.1,
         vit_attn_dropout: float = 0.0,
         device: str = None,
-        use_depth: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -207,8 +192,6 @@ class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
         self.pose_dim = pose_dim
         self.pose_cond_dim = pose_cond_dim
         self.encoder_type = encoder_type.lower()
-        self.use_depth = use_depth
-        self.in_chans = 4 if use_depth else 3
 
         if self.encoder_type == "vitp":
             self.encoder = ViTObsEncoderPretrained(
@@ -216,37 +199,9 @@ class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
                 patch_size=vit_patch_size,
                 cond_dim=image_cond_dim,
                 pretrained=True,
-                in_chans=self.in_chans,
-            )
-        elif self.encoder_type == "vit":
-            self.encoder = ViTObsEncoder(
-                image_size=vit_img_size,
-                patch_size=vit_patch_size,
-                cond_dim=image_cond_dim,
-                embed_dim=image_cond_dim,
-                depth=vit_depth,
-                num_heads=vit_heads,
-                mlp_ratio=vit_mlp_ratio,
-                dropout=vit_dropout,
-                attn_dropout=vit_attn_dropout,
-                in_chans=self.in_chans,
-            )
-        elif self.encoder_type == "raw_pixels":
-            self.encoder = RawPixelEncoder(in_chans=self.in_chans, img_size=vit_img_size)
-            self.image_cond_dim = self.encoder.out_dim
-        elif self.encoder_type == "cnn":
-            self.encoder = ImageObsEncoder(
-                cond_dim=image_cond_dim,
-                pretrained=True,
-                in_chans=self.in_chans,
             )
         else:
             raise ValueError(f"Unsupported encoder_type: {encoder_type}")
-
-        assert self.encoder.in_chans == self.in_chans, (
-            f"Encoder in_chans mismatch: encoder built with {self.encoder.in_chans}, "
-            f"model expected {self.in_chans} (use_depth={use_depth})"
-        )
 
         self.pose_encoder = nn.Sequential(
             nn.Linear(2 * pose_dim, 64),
@@ -256,7 +211,8 @@ class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
 
         self.core = UNet1DTemporalCondModel(
             horizon=horizon,
-            transition_dim=action_dim + self.image_cond_dim + pose_cond_dim,
+            transition_dim=action_dim + self.image_cond_dim + 2 * pose_dim,
+            # transition_dim=action_dim + self.image_cond_dim + pose_cond_dim,
             cond_dim=0,  # image + pose cond is concatenated, not passed as a separate "state condition"
             dim=dim,
             dim_mults=dim_mults,
@@ -277,7 +233,7 @@ class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
             raise KeyError("cond must contain keys 'pose_now' and 'pose_target'")
 
         rgb = cond["obs_rgb"]
-        B, H, A = x.shape
+        B, H, A = x.shape # B=batch size, H=horizon, A=action_dim x=noisy action sequence
         if A != self.action_dim:
             raise ValueError(f"x action dim mismatch: got {A}, expected {self.action_dim}")
         if H != self.horizon:
@@ -285,9 +241,10 @@ class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
 
         image_z = self.encoder(rgb)  # (B, image_cond_dim)
         pose_in = torch.cat([cond["pose_now"], cond["pose_target"]], dim=-1)  # (B, 2*pose_dim)
-        pose_z = self.pose_encoder(pose_in)  # (B, pose_cond_dim)
+        # pose_z = self.pose_encoder(pose_in)  # (B, pose_cond_dim)
 
-        cond_vec = torch.cat([image_z, pose_z], dim=-1)  # (B, image_cond_dim+pose_cond_dim)
+        # cond_vec = torch.cat([image_z, pose_z], dim=-1)  # (B, image_cond_dim+pose_cond_dim)
+        cond_vec = torch.cat([image_z, pose_in], dim=-1)  # (B, image_cond_dim+pose_cond_dim)
         cond_seq = cond_vec.unsqueeze(1).expand(B, H, cond_vec.shape[-1])
 
         x_in = torch.cat([x, cond_seq], dim=-1)

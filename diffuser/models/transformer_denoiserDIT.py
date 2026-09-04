@@ -247,15 +247,17 @@ class PoseCondTransformer1DDenoisingModel(Transformer1DDenoisingModel):
         # ── 1. Encode image + pose ─────────────────────────────────────
         image_z = self.encoder(cond["obs_rgb"])          # (B, image_cond_dim)
         pose_in = torch.cat([cond["pose_now"], cond["pose_target"]], dim=-1)  # (B, 2*pose_dim)
-        pose_z = self.pose_encoder(pose_in)               # (B, image_cond_dim)
+        # pose_z = self.pose_encoder(pose_in)               # (B, image_cond_dim)
 
         # Both tokens feed cross-attention as separate context entries
-        context = torch.stack([image_z, pose_z], dim=1)  # (B, 2, image_cond_dim)
+        # context = torch.stack([image_z, pose_z], dim=1)  # (B, 2, image_cond_dim)
+        context = torch.stack([image_z, pose_in], dim=1)  # (B, 2, image_cond_dim)
 
         # ── 2. Build combined conditioning vector c ───────────────────
         t_emb = self.time_mlp(time)                      # (B, d_model)
         z_emb = self.image_proj(image_z)                 # (B, d_model)
-        p_emb = self.pose_proj(pose_z)                    # (B, d_model)
+        # p_emb = self.pose_proj(pose_z)                    # (B, d_model)
+        p_emb = self.pose_proj(pose_in)                    # (B, d_model)
         c = t_emb + z_emb + p_emb                         # (B, d_model)
 
         # ── 3. Tokenize actions ───────────────────────────────────────

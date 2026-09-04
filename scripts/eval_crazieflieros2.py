@@ -9,14 +9,14 @@ import diffuser.utils as utils
 from diffuser.sampling.projection import Projector
 from diffuser.sampling.policies import temporal_consistency_distances
 from depth_obstacle_estimator import (
-    camera_intrinsics, camera_world_pose, quat_apply, detect_obstacles_umap,
-    FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE,
+    camera_world_pose, quat_apply, detect_obstacles_umap,
+    FPV_WIDTH, FPV_HEIGHT,
 )
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import PoseStamped, TwistStamped
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image
 cfg = importlib.import_module("config.avoiding-crazyflie")
 _IDENTITY_QUAT = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
@@ -177,8 +177,14 @@ class Ros2HardwareRunner(Node):
     CMD_VEL_TOPIC = "/mpc/set_pose"
     COLOR_TOPIC = "camera/camera/color/image_raw"
     DEPTH_TOPIC = "/camera/camera/depth/image_raw"
-    DEPTH_CAMERA_INFO_TOPIC = "/camera/camera/depth/camera_info"
     START_DELAY = 5.0  # seconds to wait for the first pose/camera message before giving up
+
+    DEPTH_WIDTH = 848
+    DEPTH_HEIGHT = 480
+    DEPTH_FX = 430.64617919921875
+    DEPTH_FY = 430.64617919921875
+    DEPTH_CX = 427.7652587890625
+    DEPTH_CY = 242.2167510986328
     TARGET_X = 4.0
     TARGET_Y = 0.75
 
@@ -194,6 +200,8 @@ class Ros2HardwareRunner(Node):
     DEVICE = "cuda:0"
     DRONE_RADIUS = 0.1
     CONTROL_HZ = 30
+    GOAL_SUCCESS_RADIUS = 0.2     # stop-at-goal threshold (m), matches CrazyflieEnvCfg.success_radius
+    WAYPOINT_REACH_RADIUS = 0.1   # don't replan/grab a new frame until within this of the last setpoint (m)
 
     def __init__(self):
         super().__init__("diffusion_policy_hardware")
@@ -203,13 +211,10 @@ class Ros2HardwareRunner(Node):
         if self.VARIANT not in VARIANT_CFG:
             raise ValueError(f"VARIANT={self.VARIANT!r} must be one of {list(VARIANT_CFG)}")
 
-        # Kept as a SimpleNamespace (not scattered self.xxx reads) purely so
-        # every method below that already reads self.args.xxx / args.xxx needed
-        # no further changes when CLI args were replaced by class attributes.
         self.args = SimpleNamespace(
             run_dir=self.RUN_DIR, variant=self.VARIANT, pose_topic=self.POSE_TOPIC,
             cmd_vel_topic=self.CMD_VEL_TOPIC, color_topic=self.COLOR_TOPIC,
-            depth_topic=self.DEPTH_TOPIC, depth_camera_info_topic=self.DEPTH_CAMERA_INFO_TOPIC,
+            depth_topic=self.DEPTH_TOPIC,
             start_delay=self.START_DELAY, target_x=self.TARGET_X, target_y=self.TARGET_Y,
         )
         args = self.args
@@ -233,9 +238,7 @@ class Ros2HardwareRunner(Node):
         self.action_dim = int(getattr(self.diffusion, "action_dim", 3))
         self.To = int(getattr(self.dataset, "n_obs_steps", 2))
 
-        # ------------------ Pose conditioning (same as eval_crazieflie1pos.py) ------------------
-        # No Isaac Sim env here, so there's no env.cfg.gate_x_max -- use TARGET_X
-        # instead (defaults to the sim's gate_x_max=4.0, see crazyflie_envpos.py).
+        # ------------------ Pose conditioning ------------------
         self.use_pose_cond = bool(getattr(self.dataset, "use_pose_cond", False))
         self.pose_target_world = None
         if self.use_pose_cond:
@@ -247,10 +250,9 @@ class Ros2HardwareRunner(Node):
         self.vcfg = VARIANT_CFG[args.variant]
         self.depth_static_pts_latest = []  # latest detection, kept only for logging/inspection
 
-        self.depth_fx, self.depth_fy, self.depth_cx, self.depth_cy = camera_intrinsics(
-            FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE
-        )
-        self._depth_intrinsics_ready = False
+        self.depth_fx, self.depth_fy = self.DEPTH_FX, self.DEPTH_FY
+        self.depth_cx, self.depth_cy = self.DEPTH_CX, self.DEPTH_CY
+        self._depth_intrinsics_ready = True  # hardcoded above, no camera_info topic needed
 
         print(f"[INFO] Variant: {args.variant} (num_candidates={self.vcfg['num_candidates']}, "
               f"selection={self.vcfg['selection']}, use_projection={self.vcfg['use_projection']})")
@@ -262,32 +264,24 @@ class Ros2HardwareRunner(Node):
         self.create_subscription(Image, args.color_topic, self._color_cb, qos_profile_sensor_data)
         if self.need_depth_frame:
             self.create_subscription(Image, args.depth_topic, self._depth_cb, qos_profile_sensor_data)
-        if self.vcfg["use_projection"]:
-            self.create_subscription(
-                CameraInfo, args.depth_camera_info_topic, self._depth_info_cb, qos_profile_sensor_data
-            )
 
         self.state = {"pos": None, "quat": _IDENTITY_QUAT.copy()}
         self.create_subscription(PoseStamped, args.pose_topic, self._pose_cb, qos_profile_sensor_data)
         self.cmd_pub = self.create_publisher(PoseStamped, args.cmd_vel_topic, 1)
 
         self._t0 = time.time()
-        self._rgb_hist = None   # still None == warmup; set once by _enter_running()
+        self._rgb_hist = None   # still None == warmup; seeded once by _warmup_tick() on entering running
         self._prev_actions_real = None
         self._step = 0
+        self._last_cmd_pos = None   # last position setpoint published; gates replanning until reached
+        self._goal_reached = False  # latched True once within GOAL_SUCCESS_RADIUS of pose_target_world
         self._cam_topics_desc = args.color_topic + (f" + {args.depth_topic}" if self.need_depth_frame else "")
-        if self.vcfg["use_projection"]:
-            self._cam_topics_desc += f" + {args.depth_camera_info_topic}"
         print(f"[INFO] Waiting up to {args.start_delay}s for pose ({args.pose_topic}) "
               f"and camera ({self._cam_topics_desc}) ...")
         self.timer = self.create_timer(1.0 / self.CONTROL_HZ, self._tick)
 
     # ------------------ ROS2 subscription callbacks ------------------
     def _center_crop(self, img):
-        """Center-crop to (FPV_HEIGHT, FPV_WIDTH) -- no resize, so pixel scale
-        stays 1:1 with the source instead of being stretched/squished like a
-        plain cv2.resize would. Source must be >= 96x96 in both dims (true for
-        any real color/depth topic here)."""
         h, w = img.shape[:2]
         if h < FPV_HEIGHT or w < FPV_WIDTH:
             raise ValueError(f"frame {w}x{h} smaller than crop target {FPV_WIDTH}x{FPV_HEIGHT}")
@@ -296,9 +290,6 @@ class Ros2HardwareRunner(Node):
         return img[y0:y0 + FPV_HEIGHT, x0:x0 + FPV_WIDTH]
 
     def _decode_image(self, msg, spec):
-        """Shared decode for _color_cb/_depth_cb, driven by IMAGE_SPECS instead
-        of an if/elif per possible encoding -- returns None (after logging) if
-        this message doesn't match the one real encoding that topic ever sends."""
         if msg.encoding != spec["encoding"]:
             self.get_logger().warning(
                 f"expected '{spec['encoding']}' encoding, got '{msg.encoding}', skipping frame",
@@ -314,19 +305,16 @@ class Ros2HardwareRunner(Node):
             self.cam_state["color"] = self._center_crop(frame)
 
     def _depth_cb(self, msg):
+        if (msg.height, msg.width) != (self.DEPTH_HEIGHT, self.DEPTH_WIDTH):
+            self.get_logger().warning(
+                f"depth frame is {msg.width}x{msg.height}, expected {self.DEPTH_WIDTH}x{self.DEPTH_HEIGHT} "
+                "-- hardcoded DEPTH_FX/FY/CX/CY no longer match this resolution",
+                throttle_duration_sec=5.0
+            )
         depth = self._decode_image(msg, IMAGE_SPECS["depth"])
         if depth is not None:
             depth = depth.astype(np.float32) * 0.001  # RealSense: raw mm -> metres
             self.cam_state["depth"] = depth
-
-    def _depth_info_cb(self, msg):
-        """Real depth-sensor intrinsics (fx/fy/cx/cy from K), NOT the simulated
-        FPV camera's -- backprojection needs the actual calibration. Depth is
-        no longer cropped (see _depth_cb), so cx/cy are used as-is, uncorrected."""
-        self.depth_fx, self.depth_fy = float(msg.k[0]), float(msg.k[4])
-        self.depth_cx = float(msg.k[2])
-        self.depth_cy = float(msg.k[5])
-        self._depth_intrinsics_ready = True
 
     def _pose_cb(self, msg):
         p = msg.pose.position
@@ -346,33 +334,8 @@ class Ros2HardwareRunner(Node):
             return self.cam_state["color"]
         return self.cam_state["color"], self.cam_state["depth"]
 
-    def _publish_stop(self):
-        """Hold the drone's last known position -- NOT a TwistStamped zero
-        (cmd_pub is a PoseStamped publisher; publishing a TwistStamped on it
-        raises a TypeError) and NOT an all-zero pose (that would command a
-        flight to the origin instead of stopping in place)."""
-        if not rclpy.ok():
-            return
-        pos = self.state.get("pos")
-        if pos is None:
-            return  # never got a pose fix -- nothing safe to hold to
-        stop = PoseStamped()
-        stop.header.stamp = self.get_clock().now().to_msg()
-        stop.pose.position.x = float(pos[0])
-        stop.pose.position.y = float(pos[1])
-        stop.pose.position.z = float(pos[2])
-        self.cmd_pub.publish(stop)
-
     # ------------------ timer-driven state machine (replaces run()) ------------------
     def _tick(self):
-        """The one and only recurring callback -- serviced by main()'s single
-        rclpy.spin(self), same executor that also services every subscription
-        callback above. No manual spin_once() polling anywhere in this class.
-
-        No explicit phase flag: _rgb_hist is None until _enter_running() sets
-        it, so that alone distinguishes warmup from running. Nothing to check
-        for "aborted" either -- _abort() cancels the timer, so this simply
-        never gets called again after that."""
         if self._rgb_hist is None:
             self._warmup_tick()
         else:
@@ -397,14 +360,7 @@ class Ros2HardwareRunner(Node):
                 )
                 self._abort()
             return
-        self._enter_running()
-
-    def _abort(self):
-        self.timer.cancel()
-        rclpy.shutdown()   # makes main()'s rclpy.spin(self) return
-
-    def _enter_running(self):
-        # init obs history (same seeding pattern as sim: repeat the first real frame To times)
+        # ready -- seed the observation history and enter the running state
         frame0 = self._grab_frame()
         self._rgb_hist = deque(maxlen=self.To)
         for _ in range(self.To):
@@ -414,6 +370,16 @@ class Ros2HardwareRunner(Node):
         self._step = 0
         print(f"[INFO] Starting control loop at {self.CONTROL_HZ} Hz Ctrl+C to stop.")
 
+    def _abort(self):
+        self.timer.cancel()
+        rclpy.shutdown()   # makes main()'s rclpy.spin(self) return
+
+    def _publish_pos(self, xyz):
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = (float(v) for v in xyz)
+        self.cmd_pub.publish(msg)
+
     def _control_step(self):
         vcfg = self.vcfg
         use_depth = self.use_depth
@@ -421,14 +387,23 @@ class Ros2HardwareRunner(Node):
 
         pos = self.state["pos"].copy()
 
+        if self.use_pose_cond:
+            if not self._goal_reached and np.linalg.norm(pos[:3] - self.pose_target_world) <= self.GOAL_SUCCESS_RADIUS:
+                self._goal_reached = True
+                self.get_logger().info(f"[GOAL] Reached target (within {self.GOAL_SUCCESS_RADIUS}m). Holding position.")
+            if self._goal_reached:
+                self._publish_pos(pos[:3])
+                return
+        
+        if self._last_cmd_pos is not None and np.linalg.norm(pos[:3] - self._last_cmd_pos) > self.WAYPOINT_REACH_RADIUS:
+            return
+
         obs_rgb_t = preprocess_obs_stack(self._rgb_hist, use_depth).to(device)
         cond = {"obs_rgb": obs_rgb_t}
 
         if self.use_pose_cond:
-            pose_now_norm = self.dataset.pose_normalizer.normalize(pos[:3].astype(np.float32))
-            pose_target_norm = self.dataset.pose_normalizer.normalize(self.pose_target_world)
-            cond["pose_now"] = torch.from_numpy(pose_now_norm).float().unsqueeze(0).to(device)
-            cond["pose_target"] = torch.from_numpy(pose_target_norm).float().unsqueeze(0).to(device)
+            cond["pose_now"] = torch.from_numpy(pos[:3].astype(np.float32)).float().unsqueeze(0).to(device)
+            cond["pose_target"] = torch.from_numpy(self.pose_target_world).float().unsqueeze(0).to(device)
 
         if vcfg["use_projection"]:
             static_pts = detect_depth_obstacles(
@@ -472,34 +447,18 @@ class Ros2HardwareRunner(Node):
         pos_cmd[:self.action_dim] = pos + inc_action
         pos_cmd[2] = np.clip(pos_cmd[2], FLIGHT_Z_MIN, FLIGHT_Z_MAX)
 
-        cmd_pos = PoseStamped()
-        cmd_pos.header.stamp = self.get_clock().now().to_msg()
-        cmd_pos.pose.position.x = float(pos_cmd[0])
-        cmd_pos.pose.position.y = float(pos_cmd[1])
-        cmd_pos.pose.position.z = float(pos_cmd[2])
-
         print(f"[step {self._step}] pos={pos} a0_real={a0_real} pos_cmd={pos_cmd}")
 
-        self.cmd_pub.publish(cmd_pos)
+        self._publish_pos(pos_cmd[:3])
+        self._last_cmd_pos = pos_cmd[:3].copy()
 
         self._rgb_hist.append(self._grab_frame())
         self._step += 1
-
-    def finalize(self):
-        """Called once from main()'s finally block (Ctrl+C, timeout abort, or
-        clean exit) -- publishes a zero-velocity stop. Replaces run()'s
-        try/finally, since there's no single blocking call left to wrap now
-        that control happens in _tick()."""
-        if hasattr(self, "timer"):
-            self.timer.cancel()
-        self._publish_stop()
-        self.get_logger().info("Hardware run stopped, zero velocity published.")
 
 def main():
     rclpy.init()
     node = Ros2HardwareRunner()
     rclpy.spin(node)
-    node.finalize()
     node.destroy_node()
     rclpy.try_shutdown()
 

@@ -6,24 +6,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _to_float_chw(x: torch.Tensor, in_chans: int = 3) -> torch.Tensor:
+def _to_float_chw(x: torch.Tensor) -> torch.Tensor:
     """
     Accepts:
-      - (B, To, H, W, in_chans) uint8 or float
-      - (B, To, in_chans, H, W) uint8 or float
+      - (B, To, H, W, 3) uint8 or float
+      - (B, To, 3, H, W) uint8 or float
     Returns:
-      - (B*To, in_chans, H, W) float32 in [0,1]
+      - (B*To, 3, H, W) float32 in [0,1]
     """
     if x.dim() != 5:
         raise ValueError(f"Expected 5D tensor, got shape={tuple(x.shape)}")
 
-    # (B,To,H,W,in_chans) -> (B,To,in_chans,H,W)
-    if x.shape[-1] == in_chans and x.shape[2] != in_chans:
+    # (B,To,H,W,3) -> (B,To,3,H,W)
+    if x.shape[-1] == 3 and x.shape[2] != 3:
         x = x.permute(0, 1, 4, 2, 3).contiguous()
 
-    # now should be (B,To,in_chans,H,W)
-    if x.shape[2] != in_chans:
-        raise ValueError(f"Expected channel dim={in_chans} at index 2, got shape={tuple(x.shape)}")
+    # now should be (B,To,3,H,W)
+    if x.shape[2] != 3:
+        raise ValueError(f"Expected channel dim=3 at index 2, got shape={tuple(x.shape)}")
 
     if x.dtype == torch.uint8:
         x = x.float() / 255.0
@@ -41,7 +41,7 @@ def _to_float_chw(x: torch.Tensor, in_chans: int = 3) -> torch.Tensor:
 
 class PatchEmbed(nn.Module):
     """Image to Patch Embedding using Conv2d."""
-    def __init__(self, img_size=96, patch_size=16, in_chans=3, embed_dim=256):
+    def __init__(self, img_size=96, patch_size=16, embed_dim=256):
         super().__init__()
         assert img_size % patch_size == 0, "img_size must be divisible by patch_size"
         self.img_size = img_size
@@ -49,7 +49,7 @@ class PatchEmbed(nn.Module):
         self.grid_size = img_size // patch_size
         self.num_patches = self.grid_size * self.grid_size
 
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.proj = nn.Conv2d(3, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
         # x: (B,3,H,W)
@@ -75,7 +75,6 @@ class ViTObsEncoder(nn.Module):
         self,
         image_size: int = 96,
         patch_size: int = 16,
-        in_chans: int = 3,
         embed_dim: int = 256,
         depth: int = 4,
         num_heads: int = 8,
@@ -89,12 +88,9 @@ class ViTObsEncoder(nn.Module):
         super().__init__()
         self.To = To
         self.temporal_pool = temporal_pool
-        self.in_chans = in_chans
-        if in_chans not in (3, 4):
-            raise ValueError(f"in_chans must be 3 (rgb) or 4 (rgbd), got {in_chans}")
 
         # Convert image to patches
-        self.patch = PatchEmbed(image_size, patch_size, in_chans, embed_dim)
+        self.patch = PatchEmbed(image_size, patch_size, embed_dim)
         num_patches = self.patch.num_patches
 
         # CLS token + positional embedding
@@ -119,16 +115,11 @@ class ViTObsEncoder(nn.Module):
 
         self._init_weights()
 
-        # Optional: normalize like ViT/CLIP style (helps a bit).
-        # RGB uses ImageNet stats; depth (4th channel) is already clipped/min-max'd to
-        # [0,1] by the dataset loader, so it's just recentered to roughly [-1,1] here.
+        # Optional: normalize like ViT/CLIP style (helps a bit). ImageNet stats.
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
-        if in_chans == 4:
-            mean = mean + [0.5]
-            std = std + [0.5]
-        self.register_buffer("img_mean", torch.tensor(mean).view(1, in_chans, 1, 1), persistent=False)
-        self.register_buffer("img_std",  torch.tensor(std).view(1, in_chans, 1, 1), persistent=False)
+        self.register_buffer("img_mean", torch.tensor(mean).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("img_std",  torch.tensor(std).view(1, 3, 1, 1), persistent=False)
 
     def _init_weights(self):
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
@@ -136,8 +127,8 @@ class ViTObsEncoder(nn.Module):
         # proj/norm already have decent defaults
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        # images -> (B*To,in_chans,H,W) in [0,1]
-        x = _to_float_chw(images, in_chans=self.in_chans)
+        # images -> (B*To,3,H,W) in [0,1]
+        x = _to_float_chw(images)
 
         # normalize
         x = (x - self.img_mean) / self.img_std
@@ -191,31 +182,21 @@ class ViTObsEncoderPretrained(nn.Module):
         temporal_pool: str = "mean",      # "mean" or "last"
         pretrained: bool = True,          # set False to compare random-init
         model_name: str = "vit_small_patch8_224",  # timm model name
-        in_chans: int = 3,
     ):
         super().__init__()
         self.temporal_pool = temporal_pool
-        self.in_chans = in_chans
 
         # Load pretrained ViT backbone from timm
         # num_classes=0 removes the classification head
         # global_pool='token' uses the CLS token as output (same as your current design)
-        # RGBD: load the standard 3-channel pretrained stem, then extend the patch-embed
-        # conv to a 4th (depth) channel below, instead of asking timm to load weights
-        # directly into a 4-channel stem (which only matches if the checkpoint never
-        # learned anything depth-specific).
-        load_chans = 3 if (in_chans == 4 and pretrained) else in_chans
         self.backbone = timm.create_model(
             model_name,
             pretrained=pretrained,
             num_classes=0,           # no classification head
             global_pool='token',     # output is CLS token
             img_size=image_size,
-            in_chans=load_chans,
+            in_chans=3,
         )
-
-        if in_chans == 4 and pretrained:
-            self._extend_patch_embed_to_rgbd()
 
         # Get the embed_dim from the loaded backbone
         embed_dim = self.backbone.embed_dim  # e.g. 384 for vit_small
@@ -227,41 +208,15 @@ class ViTObsEncoderPretrained(nn.Module):
         # Same projection head as your current ViTObsEncoder
         self.proj = nn.Linear(embed_dim, cond_dim)
 
-        # ImageNet normalization (+ depth recentering if in_chans==4, see ViTObsEncoder)
+        # ImageNet normalization
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
-        if in_chans == 4:
-            mean = mean + [0.5]
-            std = std + [0.5]
-        self.register_buffer("img_mean", torch.tensor(mean).view(1, in_chans, 1, 1), persistent=False)
-        self.register_buffer("img_std",  torch.tensor(std).view(1, in_chans, 1, 1), persistent=False)
-
-    def _extend_patch_embed_to_rgbd(self):
-        """
-        Extend the pretrained 3-channel patch-embed conv to 4 channels (RGB + depth).
-        The RGB weights/bias are kept exactly as pretrained; the new depth channel's
-        weight is initialized as the mean of the RGB filters (i.e. depth starts out
-        behaving like a luminance channel) so the stem isn't disturbed at init.
-        """
-        old_proj = self.backbone.patch_embed.proj  # nn.Conv2d(3, embed_dim, k, stride=k)
-        new_proj = nn.Conv2d(
-            4,
-            old_proj.out_channels,
-            kernel_size=old_proj.kernel_size,
-            stride=old_proj.stride,
-            padding=old_proj.padding,
-            bias=old_proj.bias is not None,
-        )
-        with torch.no_grad():
-            new_proj.weight[:, :3] = old_proj.weight
-            new_proj.weight[:, 3:4] = old_proj.weight.mean(dim=1, keepdim=True)
-            if old_proj.bias is not None:
-                new_proj.bias.copy_(old_proj.bias)
-        self.backbone.patch_embed.proj = new_proj
+        self.register_buffer("img_mean", torch.tensor(mean).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("img_std",  torch.tensor(std).view(1, 3, 1, 1), persistent=False)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        # images → (B*To, in_chans, H, W) in [0,1]
-        x = _to_float_chw(images, in_chans=self.in_chans)
+        # images → (B*To, 3, H, W) in [0,1]
+        x = _to_float_chw(images)
 
         # Normalize
         x = (x - self.img_mean) / self.img_std

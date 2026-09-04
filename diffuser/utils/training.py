@@ -233,10 +233,6 @@ class Trainer(object):
             # re-open the raw dataset (e.g. Zarr) on an eval-only machine.
             data['action_min'] = torch.as_tensor(normalizer.mins)
             data['action_max'] = torch.as_tensor(normalizer.maxs)
-        pose_normalizer = getattr(self.dataset, 'pose_normalizer', None)
-        if pose_normalizer is not None:
-            data['pose_min'] = torch.as_tensor(pose_normalizer.mins)
-            data['pose_max'] = torch.as_tensor(pose_normalizer.maxs)
         savepath = os.path.join(self.logdir, f'state_{epoch}.pt')
         torch.save(data, savepath)
         # print(f'Saved model to {savepath}', flush=True)
@@ -255,10 +251,6 @@ class Trainer(object):
         if normalizer is not None:
             data['action_min'] = torch.as_tensor(normalizer.mins)
             data['action_max'] = torch.as_tensor(normalizer.maxs)
-        pose_normalizer = getattr(self.dataset, 'pose_normalizer', None)
-        if pose_normalizer is not None:
-            data['pose_min'] = torch.as_tensor(pose_normalizer.mins)
-            data['pose_max'] = torch.as_tensor(pose_normalizer.maxs)
         savepath = os.path.join(self.logdir, f'state_best.pt')
         torch.save(data, savepath)
         # print(f'Saved best model to {savepath}', flush=True)
