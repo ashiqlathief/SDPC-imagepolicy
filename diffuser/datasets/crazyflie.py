@@ -211,8 +211,7 @@ class CrazyflieImageDataset(torch.utils.data.Dataset):
         if self.use_pose_cond:
             pose_now = states[0, self.pos_slice]                  # (3,) position at t_start
             pose_target = g["targets"][t_start].astype(np.float32)  # (3,) this episode's goal
-            conditions["pose_now"] = pose_now
-            conditions["pose_target"] = pose_target
+            conditions["goal_rel"] = pose_target - pose_now
 
         if self.include_returns:
             returns = np.array([0.0 / self.returns_scale], dtype=np.float32)

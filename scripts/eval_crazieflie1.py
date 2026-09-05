@@ -365,9 +365,8 @@ def sample_action_candidates(diffusion, cond, horizon, action_dim, num_candidate
     # Repeat condition across batch to get K samples
     obs_rgb = cond["obs_rgb"]  # (1,To,3,H,W)
     cond_k = {"obs_rgb": obs_rgb.repeat(num_candidates, 1, 1, 1, 1)}  # (K,To,3,H,W)
-    if "pose_now" in cond:
-        cond_k["pose_now"] = cond["pose_now"].repeat(num_candidates, 1)        # (K,3)
-        cond_k["pose_target"] = cond["pose_target"].repeat(num_candidates, 1)  # (K,3)
+    if "goal_rel" in cond:
+        cond_k["goal_rel"] = cond["goal_rel"].repeat(num_candidates, 1)  # (K,3)
 
     with torch.no_grad():
         x, infos = diffusion.conditional_sample(cond_k, horizon=horizon,projector=projector)  # x: (K,H,D)
@@ -1000,10 +999,10 @@ def main():
                 cond = {"obs_rgb": obs_rgb_t}
 
                 if use_pose_cond:
-                    # Raw world-frame metres, unnormalized -- matches training (see
-                    # diffuser/datasets/crazyflie.py's __getitem__).
-                    cond["pose_now"] = torch.from_numpy(pos[:3].astype(np.float32)).float().unsqueeze(0).to(device)
-                    cond["pose_target"] = torch.from_numpy(pose_target_world).float().unsqueeze(0).to(device)
+                    # Relative displacement to the goal, unnormalized -- matches training
+                    # (see diffuser/datasets/crazyflie.py's __getitem__).
+                    goal_rel = (pose_target_world - pos[:3]).astype(np.float32)
+                    cond["goal_rel"] = torch.from_numpy(goal_rel).float().unsqueeze(0).to(device)
 
                 # -------------------------------------------------
                 # Sample K candidate chunks (normalized action space)

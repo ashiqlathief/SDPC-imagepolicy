@@ -149,17 +149,16 @@ class ImageCondUNet1DTemporalCondModel(nn.Module):
 
 class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
     """
-    Same as ImageCondUNet1DTemporalCondModel, plus current-pose + target-pose conditioning.
+    Same as ImageCondUNet1DTemporalCondModel, plus goal-relative pose conditioning.
 
     cond must additionally contain:
-        "pose_now":    (B, 3) normalized current position at the last observed frame
-        "pose_target": (B, 3) normalized episode goal position
+        "goal_rel": (B, pose_dim) relative displacement to the goal
+                     (pose_target - pose_now, computed in CrazyflieImageDataset)
     (see CrazyflieImageDataset(use_pose_cond=True)).
 
-    The two 3-vectors are concatenated and passed through a small MLP to get a
-    pose_cond_dim embedding, which is concatenated with the image embedding before
-    being widened across the horizon -- everything downstream (the UNet core) is
-    identical to the image-only model, just with a wider transition_dim.
+    Fed raw (no MLP currently) alongside the image embedding, then widened across
+    the horizon -- everything downstream (the UNet core) is identical to the
+    image-only model, just with a wider transition_dim.
     """
 
     def __init__(
@@ -203,16 +202,15 @@ class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
         else:
             raise ValueError(f"Unsupported encoder_type: {encoder_type}")
 
-        self.pose_encoder = nn.Sequential(
-            nn.Linear(2 * pose_dim, 64),
+        self.pose_encoder = nn.Sequential(  # unused for now -- pose_target fed to the UNet raw, see forward()
+            nn.Linear(pose_dim, 64),
             nn.ReLU(),
             nn.Linear(64, pose_cond_dim),
         )
 
         self.core = UNet1DTemporalCondModel(
             horizon=horizon,
-            transition_dim=action_dim + self.image_cond_dim + 2 * pose_dim,
-            # transition_dim=action_dim + self.image_cond_dim + pose_cond_dim,
+            transition_dim=action_dim + self.image_cond_dim + pose_dim,
             cond_dim=0,  # image + pose cond is concatenated, not passed as a separate "state condition"
             dim=dim,
             dim_mults=dim_mults,
@@ -229,8 +227,8 @@ class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
             raise TypeError(f"Expected cond to be dict, got {type(cond)}")
         if "obs_rgb" not in cond:
             raise KeyError("cond must contain key 'obs_rgb'")
-        if "pose_now" not in cond or "pose_target" not in cond:
-            raise KeyError("cond must contain keys 'pose_now' and 'pose_target'")
+        if "goal_rel" not in cond:
+            raise KeyError("cond must contain key 'goal_rel' (relative displacement pose_target - pose_now)")
 
         rgb = cond["obs_rgb"]
         B, H, A = x.shape # B=batch size, H=horizon, A=action_dim x=noisy action sequence
@@ -240,11 +238,9 @@ class ImagePoseCondUNet1DTemporalCondModel(nn.Module):
             raise ValueError(f"x horizon mismatch: got {H}, expected {self.horizon}")
 
         image_z = self.encoder(rgb)  # (B, image_cond_dim)
-        pose_in = torch.cat([cond["pose_now"], cond["pose_target"]], dim=-1)  # (B, 2*pose_dim)
-        # pose_z = self.pose_encoder(pose_in)  # (B, pose_cond_dim)
+        goal_rel = cond["goal_rel"]  # (B, pose_dim) -- already pose_target - pose_now (see CrazyflieImageDataset)
 
-        # cond_vec = torch.cat([image_z, pose_z], dim=-1)  # (B, image_cond_dim+pose_cond_dim)
-        cond_vec = torch.cat([image_z, pose_in], dim=-1)  # (B, image_cond_dim+pose_cond_dim)
+        cond_vec = torch.cat([image_z, goal_rel], dim=-1)  # (B, image_cond_dim+pose_dim)
         cond_seq = cond_vec.unsqueeze(1).expand(B, H, cond_vec.shape[-1])
 
         x_in = torch.cat([x, cond_seq], dim=-1)

@@ -3,16 +3,7 @@ import cv2
 import numpy as np
 from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
-
-# Opt-in diagnostic: prints each U-map contour's raw pixel bbox, implied depth,
-# and area right where it gets converted to a world-frame detection -- lets a
-# caller see whether an oversized/suspicious detection (e.g. a wall or floor
-# picked up instead of a real obstacle) came from a contour spanning many
-# columns (wide object or merged blobs) vs one sitting at a far depth-bin
-# (small angular size projected out to a large physical size). Off by default.
 DEBUG_DETECT = False
-
-
 # =============================================================================
 # Camera geometry
 # =============================================================================
@@ -52,6 +43,12 @@ CAM_OFFSET_QUAT = np.array([0.5, -0.5, 0.5, -0.5], dtype=np.float32)  # (w,x,y,z
 FPV_WIDTH, FPV_HEIGHT = 96, 96
 FPV_FOCAL_LENGTH = 24.0
 FPV_HORIZONTAL_APERTURE = 20.955
+DEPTH_WIDTH = 848
+DEPTH_HEIGHT = 480
+DEPTH_FX = 430.64617919921875
+DEPTH_FY = 430.64617919921875
+DEPTH_CX = 427.7652587890625
+DEPTH_CY = 242.2167510986328
 
 
 def camera_world_pose(pos_body_w: np.ndarray, quat_body_w: np.ndarray):

@@ -84,9 +84,8 @@ def sample_action(diffusion, cond, horizon, action_dim):
 def sample_action_horizon(diffusion, cond, horizon, action_dim, projector=None, num_candidates=1):
     obs_rgb = cond["obs_rgb"]  # (1,To,3or4,H,W)
     cond_k = {"obs_rgb": obs_rgb.repeat(num_candidates, 1, 1, 1, 1)}
-    if "pose_now" in cond:
-        cond_k["pose_now"] = cond["pose_now"].repeat(num_candidates, 1)
-        cond_k["pose_target"] = cond["pose_target"].repeat(num_candidates, 1)
+    if "goal_rel" in cond:
+        cond_k["goal_rel"] = cond["goal_rel"].repeat(num_candidates, 1)
     with torch.no_grad():
         x, _ = diffusion.conditional_sample(cond_k, horizon=horizon, projector=projector)  # (K,H,D)
     return x[:, :, :action_dim].detach().cpu().numpy()  # (K, H, action_dim)
@@ -176,7 +175,7 @@ class Ros2HardwareRunner(Node):
     POSE_TOPIC = "/mavros/local_position/pose"
     CMD_VEL_TOPIC = "/mpc/set_pose"
     COLOR_TOPIC = "camera/camera/color/image_raw"
-    DEPTH_TOPIC = "/camera/camera/depth/image_raw"
+    DEPTH_TOPIC = "/camera/camera/depth/image_rect_raw"
     START_DELAY = 5.0  # seconds to wait for the first pose/camera message before giving up
 
     DEPTH_WIDTH = 848
@@ -402,8 +401,8 @@ class Ros2HardwareRunner(Node):
         cond = {"obs_rgb": obs_rgb_t}
 
         if self.use_pose_cond:
-            cond["pose_now"] = torch.from_numpy(pos[:3].astype(np.float32)).float().unsqueeze(0).to(device)
-            cond["pose_target"] = torch.from_numpy(self.pose_target_world).float().unsqueeze(0).to(device)
+            goal_rel = (self.pose_target_world - pos[:3]).astype(np.float32)
+            cond["goal_rel"] = torch.from_numpy(goal_rel).float().unsqueeze(0).to(device)
 
         if vcfg["use_projection"]:
             static_pts = detect_depth_obstacles(

@@ -106,9 +106,8 @@ def sample_action_horizon(diffusion, cond, horizon, action_dim, projector=None, 
     Returns (K, H, action_dim); K=1 (default) is the sdpc-r case, just batch-of-one."""
     obs_rgb = cond["obs_rgb"]  # (1,To,3or4,H,W)
     cond_k = {"obs_rgb": obs_rgb.repeat(num_candidates, 1, 1, 1, 1)}
-    if "pose_now" in cond:
-        cond_k["pose_now"] = cond["pose_now"].repeat(num_candidates, 1)
-        cond_k["pose_target"] = cond["pose_target"].repeat(num_candidates, 1)
+    if "goal_rel" in cond:
+        cond_k["goal_rel"] = cond["goal_rel"].repeat(num_candidates, 1)
     with torch.no_grad():
         x, _ = diffusion.conditional_sample(cond_k, horizon=horizon, projector=projector)  # (K,H,D)
     return x[:, :, :action_dim].detach().cpu().numpy()  # (K, H, action_dim)
@@ -376,8 +375,8 @@ def main():
                 obs_rgb_t = preprocess_rgb_stack(rgb_hist).to(device)
                 cond = {"obs_rgb": obs_rgb_t}
                 if use_pose_cond:
-                    cond["pose_now"] = torch.from_numpy(pos[:3].astype(np.float32)).float().unsqueeze(0).to(device)
-                    cond["pose_target"] = torch.from_numpy(pose_target_world).float().unsqueeze(0).to(device)
+                    goal_rel = (pose_target_world - pos[:3]).astype(np.float32)
+                    cond["goal_rel"] = torch.from_numpy(goal_rel).float().unsqueeze(0).to(device)
 
                 if use_projection:
                     if OBSTACLE_SOURCE == "ground_truth":
