@@ -142,7 +142,7 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
 
     FPV_CAMERA_CFG = CameraCfg(
         prim_path="/World/envs/env_.*/Crazyflie/body/fpv",
-        update_period=1.0 / 10.0,       # update every physics step (matches sim dt)
+        update_period=1.0 / 50.0,       # update every physics step (matches sim dt)
         height=FPV_REAL_HEIGHT,
         width=FPV_REAL_WIDTH,
         data_types=["rgb", "distance_to_camera"] if USE_DEPTH else ["rgb"],

@@ -9,7 +9,7 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Rectangle, Polygon
+from matplotlib.patches import Circle
 
 import diffuser.utils as utils
 import diffuser.sampling.projection as projection_mod
@@ -30,9 +30,6 @@ RUN_DIR = "isaac/logs/avoiding-crazyflie/diffusion/H8_K20_Dmodels.ImagePoseCondU
 # "isaac/logs/avoiding-crazyflie/diffusion/H8_K20_Dmodels.ImagePoseCondTransformer1DModel_Eraw_pixels_L27648"
 # "isaac/logs/avoiding-crazyflie/diffusion/H8_K20_Dmodels.ImagePoseCondUNet1DTemporalCondModel_Evitp_L384"
 SEEDS = [7]
-DYNAMIC_OBSTACLES = None  # None = disabled. [] = move ALL cylinders laterally (axis
-                          # 'y'). Or 'idx:axis' tokens (axis 'x'/'y'/'xy', ':axis'
-                          # optional, defaults to 'y'), e.g. ["0:y", "2:x", "4:xy"].
 MAX_STEPS = 700
 TARGET_X = 3.00
 TARGET_Y = -1.50
@@ -47,7 +44,7 @@ TARGET_Y_RANGE = (-1.0, 1.0)
 
 # ── Obstacle-aware projection (in-loop SLSQP) ────────────────────────────────────
 VARIANTS = ["sdpc-r", "sdpc-c", "sdpc-t", 
-            "diffuser"]*3
+            "diffuser"]*5
 VARIANT_CFG = {
     "sdpc-r": dict(num_candidates=1, selection="first", use_projection=True),
     "sdpc-c": dict(num_candidates=2, selection="minimum_projection_cost", use_projection=True),
@@ -62,11 +59,7 @@ UMAP_MAX_RANGE = 3.0
 UMAP_BIN_SIZE = 100
 UMAP_T_POI = 500.0
 UMAP_T_THO = 1800.0
-UMAP_MIN_PIXEL_COUNT = 50  # raw pixel-count floor for a U-map cell to count as a real
-                          # surface (was UMAP_BIN_THRESH=150 on a per-frame-normalized
-                          # 0-255 scale -- see depth_obstacle_estimator._umap_contours()'s
-                          # min_pixel_count docstring for why that was replaced; this
-                          # default is unvalidated against real depth data, retune as needed)
+UMAP_MIN_PIXEL_COUNT = 50
 PROJ_TIGHTEN = 0.15
 PROJ_DT = 0.1
 FLIGHT_Z_MIN = 0.02
@@ -75,13 +68,6 @@ _Z_HALFSPACES = [
     ([0.0, 0.0, 1.0], FLIGHT_Z_MAX),    # z <= FLIGHT_Z_MAX
     ([0.0, 0.0, -1.0], FLIGHT_Z_MIN),   # z >= FLIGHT_Z_MIN
 ]
-
-
-def get_rgb_from_env(env):
-    """Fetch RGB frame only from env.get_rgb(). Returns uint8 (H,W,3)."""
-    if not hasattr(env, "get_rgb"):
-        raise RuntimeError("Env does not have get_rgb() method.")
-    return env.get_rgb()
 
 
 def preprocess_rgb_stack(rgb_hist):
@@ -141,11 +127,6 @@ def detect_depth_obstacles(env, depth_fx, depth_fy, depth_cx, depth_cy):
     points = []
     for pos_cam, half_w, _half_h in detections:
         world_xyz = pos_cam_w + quat_apply(quat_cam_w, pos_cam)
-        # half_h is the obstacle's VERTICAL extent (depth-image height), not a
-        # horizontal measurement -- this radius feeds a flat XY sphere_outside
-        # keep-out circle (z is handled separately via _Z_HALFSPACES), so folding
-        # half_h in here mislabels a tall/thin pole's height as if it were its
-        # width, ballooning the keep-out radius (2026-09 fix, see [[umap_obstacle_detector_bugs]]).
         radius = max(DEPTH_OBSTACLE_RADIUS, half_w)
         points.append((float(world_xyz[0]), float(world_xyz[1]), float(radius)))
     return points
@@ -211,40 +192,6 @@ def add_obstacles_xy(ax, cylinders, cyl_radius=CYL_RADIUS):
                              edgecolor="black", facecolor="tab:orange", alpha=0.30))
 
 
-def add_dynamic_cylinders_xy(ax, cyl_rest, cyl_axes, cand_snapshots, obs_amplitude,
-                              cyl_radius=CYL_RADIUS, drone_radius=0.0,
-                              x_clamp=(0.3, 4.7), y_clamp=(-0.85, 0.85)):
-    """orange band = oscillation sweep, dashed circle = exclusion zone at rest,
-    faded dots = physical cylinder position sampled every few steps."""
-    excl_r = cyl_radius + drone_radius
-    for (x0, y0), axis in zip(cyl_rest, cyl_axes):
-        if axis == "y":
-            ylo, yhi = max(y_clamp[0], y0 - obs_amplitude), min(y_clamp[1], y0 + obs_amplitude)
-            band = Rectangle((x0 - excl_r, ylo), 2 * excl_r, yhi - ylo, facecolor="tab:orange", alpha=0.15, zorder=1)
-        elif axis == "x":
-            xlo, xhi = max(x_clamp[0], x0 - obs_amplitude), min(x_clamp[1], x0 + obs_amplitude)
-            band = Rectangle((xlo, y0 - excl_r), xhi - xlo, 2 * excl_r, facecolor="tab:orange", alpha=0.15, zorder=1)
-        else:  # "xy"
-            x_lo, x_hi = max(x_clamp[0], x0 - obs_amplitude), min(x_clamp[1], x0 + obs_amplitude)
-            y_lo, y_hi = max(y_clamp[0], y0 - obs_amplitude), min(y_clamp[1], y0 + obs_amplitude)
-            p1, p2 = np.array([x_lo, y_lo]), np.array([x_hi, y_hi])
-            seg = p2 - p1
-            d_hat = seg / (np.linalg.norm(seg) + 1e-8)
-            n_hat = np.array([-d_hat[1], d_hat[0]])
-            corners = np.array([p1 - excl_r * n_hat, p1 + excl_r * n_hat, p2 + excl_r * n_hat, p2 - excl_r * n_hat])
-            band = Polygon(corners, facecolor="tab:orange", alpha=0.15, zorder=1)
-        ax.add_patch(band)
-        ax.add_patch(Circle((x0, y0), excl_r, linewidth=1.2, linestyle="--",
-                             edgecolor="tab:orange", facecolor="none", alpha=0.5, zorder=2))
-
-    stride = max(1, len(cand_snapshots) // 30)
-    for snap in cand_snapshots[::stride]:
-        if snap.get("cyl_xy") is None:
-            continue
-        for (cx, cy) in snap["cyl_xy"]:
-            ax.add_patch(Circle((cx, cy), cyl_radius, facecolor="tab:orange", alpha=0.10, zorder=2))
-
-
 def main():
     run_start_time = time.time()
     if RUN_DIR is None:
@@ -252,32 +199,6 @@ def main():
 
     device = torch.device("cuda:0")
 
-    # ── parse DYNAMIC_OBSTACLES tokens (same convention as eval_crazieflie1.py) ──
-    if DYNAMIC_OBSTACLES is None:
-        dynamic_obstacles_enabled = False
-        dynamic_cyl_indices = None
-        obs_axes = None
-    else:
-        dynamic_obstacles_enabled = True
-        if len(DYNAMIC_OBSTACLES) == 0:
-            dynamic_cyl_indices = None
-            obs_axes = None
-        elif len(DYNAMIC_OBSTACLES) == 1 and DYNAMIC_OBSTACLES[0] in ("x", "y", "xy"):
-            dynamic_cyl_indices = None
-            obs_axes = [DYNAMIC_OBSTACLES[0]]
-        else:
-            indices, axes = [], []
-            for tok in DYNAMIC_OBSTACLES:
-                idx_str, _, axis = tok.partition(":")
-                axis = axis or "y"
-                if axis not in ("x", "y", "xy"):
-                    raise ValueError(f"DYNAMIC_OBSTACLES: invalid axis '{axis}' in '{tok}' (use x, y, or xy)")
-                indices.append(int(idx_str))
-                axes.append(axis)
-            dynamic_cyl_indices = indices
-            obs_axes = axes
-    obs_amplitude = 0.35
-    obs_frequency = 0.25
     drone_radius = 0.15
 
     run_dirs = [os.path.join(RUN_DIR, str(s)) for s in SEEDS] if SEEDS else [RUN_DIR]
@@ -300,9 +221,6 @@ def main():
 
         env_cfg = CrazyflieEnvCfg(
             num_envs=1, device=str(device),
-            dynamic_obstacles=dynamic_obstacles_enabled,
-            obs_amplitude=obs_amplitude, obs_frequency=obs_frequency,
-            dynamic_cyl_indices=dynamic_cyl_indices, obs_axes=obs_axes,
             drone_radius=drone_radius,
             goal_pos=tuple(pose_target_world.tolist()),
         )
@@ -377,7 +295,7 @@ def main():
                 except Exception:
                     pass
 
-            rgb0 = get_rgb_from_env(env)
+            rgb0 = env.get_rgb()
             rgb_hist = deque(maxlen=To)
             for _ in range(To):
                 rgb_hist.append(rgb0.copy())
@@ -387,7 +305,6 @@ def main():
             inference_times = []  # per-step diffusion sampling wall time (seconds)
             prev_actions_real = None  # previous step's executed (H,3) chunk, for
                                        # SELECTION_STRATEGY="temporal_consistency"
-            cand_snapshots = []  # kept only for the dynamic-cylinder plot overlay
             depth_obstacle_accum = {}  # {(vx,vy): (x,y)} -- every depth detection this
                                         # episode, deduped by voxel cell, for the XY plot
 
@@ -397,12 +314,10 @@ def main():
             for step in range(MAX_STEPS):
                 pos = env._pos_world().detach().cpu().numpy()[0]
                 _elapsed = time.strftime('%M:%S', time.gmtime(time.time() - episode_start_time))
-
                 obs_rgb_t = preprocess_rgb_stack(rgb_hist).to(device)
                 cond = {"obs_rgb": obs_rgb_t}
-                if use_pose_cond:
-                    goal_rel = (pose_target_world - pos[:3]).astype(np.float32)
-                    cond["goal_rel"] = torch.from_numpy(goal_rel).float().unsqueeze(0).to(device)
+                goal_rel = (pose_target_world - pos[:3]).astype(np.float32)
+                cond["goal_rel"] = torch.from_numpy(goal_rel).float().unsqueeze(0).to(device)
 
                 if use_projection:
                     if OBSTACLE_SOURCE == "ground_truth":
@@ -452,7 +367,7 @@ def main():
                 # cmd_xyz[2] = np.clip(cmd_xyz[2], FLIGHT_Z_MIN, FLIGHT_Z_MAX)
                 obs_next, _rew, done_vec, info = env.step(cmd_xyz[None, :])  # (action_dim,) -> (1, action_dim)
 
-                rgb = get_rgb_from_env(env)
+                rgb = env.get_rgb()
                 rgb_hist.append(rgb)
 
                 pos2 = obs_next[0]
@@ -462,10 +377,6 @@ def main():
 
                 done = bool(done_vec[0]) if isinstance(done_vec, (list, tuple, np.ndarray, torch.Tensor)) else bool(done_vec)
                 print(f"{_elapsed} step {step:04d} pos={pos2} done={done}")
-                cand_snapshots.append({
-                    "pos": pos2.copy(),
-                    "cyl_xy": env.get_cylinder_positions() if dynamic_obstacles_enabled else None,
-                })
 
                 if done:
                     print("[INFO] Done=True. Breaking episode loop.")
@@ -494,8 +405,6 @@ def main():
                 episode_wall_time_sec=float(episode_wall_time_sec),
                 inference_times=inference_times_arr,
                 cylinders=np.array(CYLINDERS),
-                dynamic_obstacles=bool(dynamic_obstacles_enabled),
-                obs_amplitude=float(obs_amplitude), obs_frequency=float(obs_frequency),
             )
             print(f"[TRAJ] saved: {traj_path}")
 
@@ -523,19 +432,7 @@ def main():
                 ax.scatter(pos_init[0], pos_init[1], marker="o", s=70, color="green", zorder=5, label="start")
                 ax.scatter(xy_exec[-1, 0], xy_exec[-1, 1], marker="x", s=60, label="end")
 
-                if dynamic_obstacles_enabled:
-                    dyn_idx = dynamic_cyl_indices if dynamic_cyl_indices is not None else list(range(len(CYLINDERS)))
-                    _raw_axes = obs_axes if obs_axes is not None else ["y"]
-                    dyn_axes_resolved = (_raw_axes * len(dyn_idx))[:len(dyn_idx)] if len(_raw_axes) == 1 else _raw_axes
-                    dyn_set = set(dyn_idx)
-                    static_cyls = [CYLINDERS[i] for i in range(len(CYLINDERS)) if i not in dyn_set]
-                    dyn_cyls = [CYLINDERS[i] for i in dyn_idx]
-                    add_obstacles_xy(ax, static_cyls, cyl_radius=CYL_RADIUS)
-                    add_dynamic_cylinders_xy(ax, dyn_cyls, dyn_axes_resolved, cand_snapshots,
-                                              obs_amplitude=obs_amplitude, cyl_radius=CYL_RADIUS,
-                                              drone_radius=drone_radius)
-                else:
-                    add_obstacles_xy(ax, CYLINDERS, cyl_radius=CYL_RADIUS)
+                add_obstacles_xy(ax, CYLINDERS, cyl_radius=CYL_RADIUS)
 
                 if use_projection and depth_obstacle_accum:
                     det_xy = np.array(list(depth_obstacle_accum.values()))
@@ -567,9 +464,6 @@ def main():
                 print("[PLOT] saved:", out_path)
 
             env.reset()
-        # Each variant already printed its own "[Episode NNN] variant=... success=..."
-        # line as it finished (see logger.end_episode()) -- that's the comparison.
-        # This is just an aggregate roll-up across all VARIANTS runs.
         print(f"\n[INFO] ===== Aggregate over {', '.join(VARIANTS)} =====")
         logger.print_live_summary()
         logger.save()

@@ -5,7 +5,6 @@ from isaaclab.app import AppLauncher
 import torch
 import numpy as np
 import gymnasium as gym
-import math
 
 _parser = argparse.ArgumentParser(add_help=False)
 AppLauncher.add_app_launcher_args(_parser)
@@ -18,16 +17,13 @@ simulation_app = app_launcher.app
 import isaaclab.sim as sim_utils
 from isaaclab.scene import InteractiveScene
 
-from .env_cfg import (CrazyflieSceneCfg, CYLINDERS, CORRIDOR_LENGTH,
-                                DEPTH_FAR)
+from .env_cfg import CrazyflieSceneCfg, CYLINDERS, DEPTH_FAR
 
 @dataclass
 class CrazyflieEnvCfg:
     num_envs: int = 1
     env_spacing: float = 2.0
-    dt: float = 1.0 / 50.0  # matches exp2vla's execise_01_c.py control cadence -- not
-                             # load-bearing here (no dynamics being integrated), but kept
-                             # the same for consistency/comparability.
+    dt: float = 1.0 / 50.0
     device: str = "cuda:0"
     gate_x_min: float = 3.95
     gate_x_max: float =  4.0
@@ -37,18 +33,8 @@ class CrazyflieEnvCfg:
     max_z: float = 2.5
     reset_on_fail: bool = False # if True, env auto-resets inside step()
     success_radius: float = 0.2
-    goal_pos: tuple | None = None  # (x, y, z) world-frame goal; None = fall back to the
-                                    # legacy gate_x_max line-crossing check instead of a
-                                    # true point-goal (see step()).
+    goal_pos: tuple | None = None
     drone_radius: float = 0.10   # Crazyflie body radius (m) for collision checks
-    dynamic_obstacles: bool = False
-    obs_amplitude: float = 0.25   # sinusoid amplitude in metres
-    obs_frequency: float = 0.25   # oscillation frequency in Hz
-    dynamic_cyl_indices: list | None = None  # which cylinders move; None = all
-    obs_axes: list | None = None  # per-dynamic-cylinder motion axis: "x", "y", or "xy".
-                                   # None = all "y" (legacy lateral-only behaviour).
-                                   # Must match length of dynamic_cyl_indices (or len(CYLINDERS) if that's None).
-
     goal_y = 2.5
 
 class Crazyflie(gym.Env):
@@ -101,122 +87,10 @@ class Crazyflie(gym.Env):
         self.success_acc = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.fell_acc    = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-        # dynamic obstacle state (disabled unless cfg.dynamic_obstacles=True)
-        self._dynamic_obs = cfg.dynamic_obstacles
-        if self._dynamic_obs:
-            dyn_idx = list(cfg.dynamic_cyl_indices) if cfg.dynamic_cyl_indices is not None \
-                      else list(range(len(CYLINDERS)))
-            self._dyn_indices = dyn_idx
-            self._dyn_cyls   = [self.scene[f"cyl_{i:02d}"] for i in dyn_idx]
-            self._cyl_x0     = [float(CYLINDERS[i][0]) for i in dyn_idx]
-            self._cyl_y0     = [float(CYLINDERS[i][1]) for i in dyn_idx]
-            self._cyl_z0     = [float(CYLINDERS[i][2]) for i in dyn_idx]
-            self._obs_phases  = [2.0 * math.pi * k / len(dyn_idx) for k in range(len(dyn_idx))]
-            self._obs_amplitude = cfg.obs_amplitude
-            self._obs_frequency = cfg.obs_frequency
-
-            if cfg.obs_axes is None:
-                axes = ["y"] * len(dyn_idx)
-            elif len(cfg.obs_axes) == 1:
-                axes = list(cfg.obs_axes) * len(dyn_idx)   # broadcast single axis to all
-            else:
-                axes = list(cfg.obs_axes)
-            if len(axes) != len(dyn_idx):
-                raise ValueError(
-                    f"obs_axes length ({len(axes)}) must match dynamic_cyl_indices length ({len(dyn_idx)})"
-                )
-            self._obs_axes = axes
-            # Keep oscillation within the playable corridor regardless of axis.
-            self._x_clamp = (0.3 , CORRIDOR_LENGTH - 0.3 )
-            self._y_clamp = (-0.85, 0.85)
-        self._obs_t = 0.0
-
-    # ------------------------------------------------------------------
-    # Dynamic obstacle helpers
-    # ------------------------------------------------------------------
-    def _oscillate(self, axis: str, x0: float, y0: float, delta: float) -> tuple:
-        """Apply a sinusoidal offset `delta` to x and/or y depending on `axis`
-        ("x", "y", or "xy"), clamped to stay inside the corridor."""
-        new_x, new_y = x0, y0
-        if "x" in axis:
-            new_x = max(self._x_clamp[0], min(self._x_clamp[1], x0 + delta))
-        if "y" in axis:
-            new_y = max(self._y_clamp[0], min(self._y_clamp[1], y0 + delta))
-        return new_x, new_y
-
-    def _step_dynamic_obstacles(self, dt: float) -> None:
-        """Sinusoidal oscillation for all kinematic cylinders, along the axis
-        configured per-cylinder via obs_axes. Called every control step inside
-        step() when dynamic_obstacles=True."""
-        for i, cyl_obj in enumerate(self._dyn_cyls):
-            delta = self._obs_amplitude * math.sin(
-                2.0 * math.pi * self._obs_frequency * self._obs_t + self._obs_phases[i]
-            )
-            new_x, new_y = self._oscillate(self._obs_axes[i], self._cyl_x0[i], self._cyl_y0[i], delta)
-            pose = torch.zeros(self.num_envs, 7, device=self.device)
-            pose[:, 0] = new_x
-            pose[:, 1] = new_y
-            pose[:, 2] = self._cyl_z0[i]
-            pose[:, 3] = 1.0  # quaternion w=1 (identity rotation)
-            cyl_obj.write_root_pose_to_sim(pose)
-        self._obs_t += dt
-
-    def _reset_dynamic_obstacles(self) -> None:
-        """Return all kinematic cylinders to their rest positions."""
-        for i, cyl_obj in enumerate(self._dyn_cyls):
-            pose = torch.zeros(self.num_envs, 7, device=self.device)
-            pose[:, 0] = self._cyl_x0[i]
-            pose[:, 1] = self._cyl_y0[i]
-            pose[:, 2] = self._cyl_z0[i]
-            pose[:, 3] = 1.0
-            cyl_obj.write_root_pose_to_sim(pose)
-
-
     def get_cylinder_positions(self) -> list:
-        """Returns current (x, y) of every cylinder.
-        Static cylinders return their rest position; only dynamic ones oscillate."""
-        if not self._dynamic_obs:
-            return [(float(CYLINDERS[i][0]), float(CYLINDERS[i][1]))
-                    for i in range(len(CYLINDERS))]
-        dyn_set = {idx: k for k, idx in enumerate(self._dyn_indices)}
-        positions = []
-        for i in range(len(CYLINDERS)):
-            x0 = float(CYLINDERS[i][0])
-            y0 = float(CYLINDERS[i][1])
-            if i in dyn_set:
-                k = dyn_set[i]
-                delta = self._obs_amplitude * math.sin(
-                    2.0 * math.pi * self._obs_frequency * self._obs_t + self._obs_phases[k]
-                )
-                x0, y0 = self._oscillate(self._obs_axes[k], x0, y0, delta)
-            positions.append((x0, y0))
-        return positions
-
-    def predict_cylinder_positions(self, offsets: list) -> dict:
-        """Exact future (x, y) for every dynamic cylinder at t = self._obs_t + offset,
-        for each offset in `offsets`. Uses the same closed-form sinusoid as
-        get_cylinder_positions()/_step_dynamic_obstacles(), just evaluated ahead of
-        time -- the motion law is deterministic, so this is exact, not an estimate.
-
-        Returns {cylinder_index: [(x, y), ...]} (one entry per offset, same order),
-        keyed by the index into CYLINDERS. Static cylinders are omitted (callers
-        should keep using their fixed rest position for those).
-        """
-        if not self._dynamic_obs:
-            return {}
-        preds = {}
-        for k, idx in enumerate(self._dyn_indices):
-            x0 = self._cyl_x0[k]
-            y0 = self._cyl_y0[k]
-            traj = []
-            for off in offsets:
-                t = self._obs_t + off
-                delta = self._obs_amplitude * math.sin(
-                    2.0 * math.pi * self._obs_frequency * t + self._obs_phases[k]
-                )
-                traj.append(self._oscillate(self._obs_axes[k], x0, y0, delta))
-            preds[idx] = traj
-        return preds
+        """Returns (x, y) of every (static) cylinder."""
+        return [(float(CYLINDERS[i][0]), float(CYLINDERS[i][1]))
+                for i in range(len(CYLINDERS))]
 
     def reset(self, *, seed: int | None = None, pos: tuple | None = None):
 
@@ -240,11 +114,6 @@ class Crazyflie(gym.Env):
 
         self.success_acc = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.fell_acc = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        # reset dynamic obstacles to rest positions
-        if self._dynamic_obs:
-            self._obs_t = 0.0
-            self._reset_dynamic_obstacles()
-
         # one sim step to settle
         self._sim.step()
         self.robot.update(self._sim.get_physics_dt())
@@ -256,11 +125,18 @@ class Crazyflie(gym.Env):
     def step(self, action):
 
         act = torch.as_tensor(action, device=self.device, dtype=torch.float32)
-        self.act = torch.clamp(act, -0.2, 0.2)
-        if self._dynamic_obs:
-            self._step_dynamic_obstacles(self._sim.get_physics_dt())
+        pose = torch.zeros(self.num_envs, 7, device=self.device)
+        pose[:, 0:3] = act
+        pose[:, 3:7] = self.robot.data.root_quat_w  # keep current orientation
+        self.robot.write_root_pose_to_sim(pose)
+        self.robot.write_root_velocity_to_sim(torch.zeros(self.num_envs, 6, device=self.device))
+        self.robot.set_joint_position_target(self.robot.data.joint_pos)
+        self.robot.write_data_to_sim()
+        self._sim.step()
+        self.robot.update(self._sim.get_physics_dt())
+        self.scene.update(self._sim.get_physics_dt())
 
-        _cyl_list = self.get_cylinder_positions()   # current positions (dynamic or static)
+        _cyl_list = self.get_cylinder_positions()
         if _cyl_list:
             _cyl_xy = torch.tensor(
                 [[p[0], p[1]] for p in _cyl_list], dtype=torch.float32, device=self.device
@@ -268,22 +144,6 @@ class Crazyflie(gym.Env):
             _cyl_collision_r = self._cyl_phys_radius + self.cfg.drone_radius
         else:
             _cyl_xy = None
-
-        pose = torch.zeros(self.num_envs, 7, device=self.device)
-        pose[:, 0:3] = act
-        pose[:, 3:7] = self.robot.data.root_quat_w  # keep current orientation
-        self.robot.write_root_pose_to_sim(pose)
-        self.robot.write_root_velocity_to_sim(torch.zeros(self.num_envs, 6, device=self.device))
-        self.robot.set_joint_position_target(self.robot.data.joint_pos)
-
-        self.robot.write_data_to_sim()
-        self._sim.step()
-        self.robot.update(self._sim.get_physics_dt())
-        self.scene.update(self._sim.get_physics_dt())
-
-        for _ in range(8):
-            self._sim.step()
-            self.scene.update(self._sim.get_physics_dt())
 
         pos_world = self._pos_world()
         x = pos_world[:, 0]
