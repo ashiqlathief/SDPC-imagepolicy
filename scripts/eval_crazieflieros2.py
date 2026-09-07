@@ -91,20 +91,22 @@ def sample_action_horizon(diffusion, cond, horizon, action_dim, projector=None, 
     return x[:, :, :action_dim].detach().cpu().numpy()  # (K, H, action_dim)
 
 def detect_depth_obstacles(depth_frame, pos_body_w, quat_body_w, depth_fx, depth_fy, depth_cx, depth_cy,
-                            umap_max_range, umap_bin_size, umap_t_poi, umap_t_tho, umap_bin_thresh,
+                            umap_max_range, umap_bin_size, umap_t_poi, umap_t_tho, umap_min_pixel_count,
                             depth_obstacle_radius, max_depth_obstacles):
     pos_cam_w, quat_cam_w = camera_world_pose(pos_body_w, quat_body_w)
 
     detections = detect_obstacles_umap(
         depth_frame, depth_fx, depth_fy, depth_cx, depth_cy,
         max_range_m=umap_max_range, bin_size=umap_bin_size,
-        t_poi=umap_t_poi, t_tho=umap_t_tho, bin_thresh=umap_bin_thresh,
+        t_poi=umap_t_poi, t_tho=umap_t_tho, min_pixel_count=umap_min_pixel_count,
         max_obstacles=max_depth_obstacles,
     )
     points = []
-    for pos_cam, half_w, half_h in detections:
+    for pos_cam, half_w, _half_h in detections:
         world_xyz = pos_cam_w + quat_apply(quat_cam_w, pos_cam)
-        radius = max(depth_obstacle_radius, half_w, half_h)
+        # half_h is the obstacle's VERTICAL extent, not horizontal -- see
+        # eval_crazieflie1pos.py's identical fix / [[umap_obstacle_detector_bugs]].
+        radius = max(depth_obstacle_radius, half_w)
         points.append((float(world_xyz[0]), float(world_xyz[1]), float(radius)))
     return points
 
@@ -118,7 +120,7 @@ def build_projector(horizon_H, device, static_points, drone_radius=0.0,
     constraint_list = [("lb", lb), ("ub", ub)]
 
     for (x, y, r) in static_points:
-        radius = r + drone_radius + proj_tighten
+        radius = 0.2 + drone_radius + proj_tighten
         constraint_list.append(("sphere_outside", [0, 1], [float(x), float(y)], float(radius)))
     for (x, y, zone_radius) in (keepout_zones or []):
         radius = float(zone_radius) + drone_radius + proj_tighten
@@ -170,11 +172,13 @@ IMAGE_SPECS = {
 }
 
 class Ros2HardwareRunner(Node):
-    RUN_DIR = None  # <-- REQUIRED: set to your trained run's checkpoint dir before running.
+    RUN_DIR = "isaac/logs/avoiding-crazyflie/diffusion/H8_K20_Dmodels.ImagePoseCondUNet1DTemporalCondModel_Evitp_L384/7"
+    # "isaac/logs/avoiding-crazyflie/diffusion/H8_K20_Dmodels.ImagePoseCondTransformer1DModel_Eraw_pixels_L27648/7"
+    # "isaac/logs/avoiding-crazyflie/diffusion/H8_K20_Dmodels.ImagePoseCondUNet1DTemporalCondModel_Evitp_L384/7"
     VARIANT = "diffuser"  # one of VARIANT_CFG's keys -- single projection variant to fly (no sweep on real hardware)
     POSE_TOPIC = "/mavros/local_position/pose"
     CMD_VEL_TOPIC = "/mpc/set_pose"
-    COLOR_TOPIC = "camera/camera/color/image_raw"
+    COLOR_TOPIC = "/camera/camera/color/image_raw"
     DEPTH_TOPIC = "/camera/camera/depth/image_rect_raw"
     START_DELAY = 5.0  # seconds to wait for the first pose/camera message before giving up
 
@@ -193,14 +197,18 @@ class Ros2HardwareRunner(Node):
     UMAP_BIN_SIZE = 200               # number of depth bins across UMAP_MAX_RANGE
     UMAP_T_POI = 500.0                # point-of-interest threshold
     UMAP_T_THO = 1800.0               # U-map contour threshold
-    UMAP_BIN_THRESH = 150
+    UMAP_MIN_PIXEL_COUNT = 80  # raw pixel-count floor for a U-map cell to count as a real
+                              # surface (was UMAP_BIN_THRESH=150 on a per-frame-normalized
+                              # 0-255 scale -- see depth_obstacle_estimator._umap_contours()'s
+                              # min_pixel_count docstring; this default is unvalidated
+                              # against real depth data, retune as needed)
     PROJ_TIGHTEN = 0.15               # extra margin on top of the detected radius + drone_radius
     PROJ_DT = 0.1
     DEVICE = "cuda:0"
     DRONE_RADIUS = 0.1
     CONTROL_HZ = 30
     GOAL_SUCCESS_RADIUS = 0.2     # stop-at-goal threshold (m), matches CrazyflieEnvCfg.success_radius
-    WAYPOINT_REACH_RADIUS = 0.1   # don't replan/grab a new frame until within this of the last setpoint (m)
+    WAYPOINT_REACH_RADIUS = 0.2   # don't replan/grab a new frame until within this of the last setpoint (m)
 
     def __init__(self):
         super().__init__("diffusion_policy_hardware")
@@ -386,30 +394,27 @@ class Ros2HardwareRunner(Node):
 
         pos = self.state["pos"].copy()
 
-        if self.use_pose_cond:
-            if not self._goal_reached and np.linalg.norm(pos[:3] - self.pose_target_world) <= self.GOAL_SUCCESS_RADIUS:
-                self._goal_reached = True
-                self.get_logger().info(f"[GOAL] Reached target (within {self.GOAL_SUCCESS_RADIUS}m). Holding position.")
-            if self._goal_reached:
-                self._publish_pos(pos[:3])
-                return
+        if np.linalg.norm(pos[:3] - self.pose_target_world) <= self.GOAL_SUCCESS_RADIUS: # within goal radius, hold position and stop replanning
+            self.get_logger().info(f"[GOAL] Reached target (within {self.GOAL_SUCCESS_RADIUS}m). Holding position.")
+            self._publish_pos(self.pose_target_world[:3])
+            return
         
-        if self._last_cmd_pos is not None and np.linalg.norm(pos[:3] - self._last_cmd_pos) > self.WAYPOINT_REACH_RADIUS:
+        if self._last_cmd_pos is not None and np.linalg.norm(pos[:3] - self._last_cmd_pos) > self.WAYPOINT_REACH_RADIUS:  # not yet reached so keep holding that setpoint and skip replanning
+            self._publish_pos(self._last_cmd_pos)
             return
 
         obs_rgb_t = preprocess_obs_stack(self._rgb_hist, use_depth).to(device)
         cond = {"obs_rgb": obs_rgb_t}
 
-        if self.use_pose_cond:
-            goal_rel = (self.pose_target_world - pos[:3]).astype(np.float32)
-            cond["goal_rel"] = torch.from_numpy(goal_rel).float().unsqueeze(0).to(device)
+        goal_rel = (self.pose_target_world - pos[:3]).astype(np.float32)
+        cond["goal_rel"] = torch.from_numpy(goal_rel).float().unsqueeze(0).to(device)
 
         if vcfg["use_projection"]:
             static_pts = detect_depth_obstacles(
                 self.cam_state["depth"], pos, self.state["quat"],
                 self.depth_fx, self.depth_fy, self.depth_cx, self.depth_cy,
                 self.UMAP_MAX_RANGE, self.UMAP_BIN_SIZE, self.UMAP_T_POI, self.UMAP_T_THO,
-                self.UMAP_BIN_THRESH, self.DEPTH_OBSTACLE_RADIUS, self.MAX_DEPTH_OBSTACLES,
+                self.UMAP_MIN_PIXEL_COUNT, self.DEPTH_OBSTACLE_RADIUS, self.MAX_DEPTH_OBSTACLES,
             )
             self.depth_static_pts_latest = static_pts
             print(f"[OBSTACLES] static_pts={[tuple(round(v, 3) for v in p) for p in static_pts]}")

@@ -36,7 +36,7 @@ class CrazyflieEnvCfg:
     min_z: float = 0.02
     max_z: float = 2.5
     reset_on_fail: bool = False # if True, env auto-resets inside step()
-    success_radius: float = 0.1
+    success_radius: float = 0.2
     goal_pos: tuple | None = None  # (x, y, z) world-frame goal; None = fall back to the
                                     # legacy gate_x_max line-crossing check instead of a
                                     # true point-goal (see step()).
@@ -218,7 +218,7 @@ class Crazyflie(gym.Env):
             preds[idx] = traj
         return preds
 
-    def reset(self, *, seed: int | None = None):
+    def reset(self, *, seed: int | None = None, pos: tuple | None = None):
 
         if seed is not None:
             torch.manual_seed(seed)
@@ -228,8 +228,12 @@ class Crazyflie(gym.Env):
         joint_pos, joint_vel = self.robot.data.default_joint_pos, self.robot.data.default_joint_vel
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel)
 
-        # reset root pose/vel to initial
-        self.robot.write_root_pose_to_sim(self.initial_root_state[:, :7])
+        # reset root pose/vel to initial (or an (x,y,z) override, e.g. for
+        # per-episode spawn randomization -- orientation/velocity unaffected)
+        root_pose = self.initial_root_state[:, :7].clone()
+        if pos is not None:
+            root_pose[:, 0:3] = torch.tensor(pos, dtype=root_pose.dtype, device=root_pose.device)
+        self.robot.write_root_pose_to_sim(root_pose)
         zero_root_vel = torch.zeros_like(self.initial_root_state[:, 7:])
         self.robot.write_root_velocity_to_sim(zero_root_vel)
         self.robot.reset()

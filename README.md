@@ -91,6 +91,9 @@ EOF
 
 # Re-activate to pick it up in the current shell
 conda deactivate && conda activate env_isaaclab
+source /opt/ros/humble/setup.bash
+ros2 bag play /home/ashiqali/dpcc-thesis/rosbag/sep3/diffusion_mpc__check_04_a/diffusion_mpc__check_04_0.db3 
+
 ```
 ---
 

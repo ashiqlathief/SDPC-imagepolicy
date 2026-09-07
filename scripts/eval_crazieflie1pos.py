@@ -18,14 +18,8 @@ from diffuser.sampling.policies import temporal_consistency_distances
 projection_mod.DEBUG_SLSQP = False
 from metrics_logger import MetricsLogger
 import depth_obstacle_estimator as detect_mod
-from depth_obstacle_estimator import (
-    camera_intrinsics, camera_world_pose, quat_apply, detect_obstacles_umap,
-    FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE,
-)
-detect_mod.DEBUG_DETECT = False  # print each U-map contour's raw pixel bbox/depth/area
-                                 # -- see whether oversized detections are wide-column
-                                 # blobs (walls/merged objects) or far-depth-bin ones
-                                 # (small angular size projected to a large physical one)
+from depth_obstacle_estimator import camera_world_pose, quat_apply, detect_obstacles_umap
+detect_mod.DEBUG_DETECT = False
 
 cfg = importlib.import_module("config.avoiding-crazyflie")
 CYLINDERS = cfg.CYLINDERS
@@ -40,13 +34,20 @@ DYNAMIC_OBSTACLES = None  # None = disabled. [] = move ALL cylinders laterally (
                           # 'y'). Or 'idx:axis' tokens (axis 'x'/'y'/'xy', ':axis'
                           # optional, defaults to 'y'), e.g. ["0:y", "2:x", "4:xy"].
 MAX_STEPS = 700
-TARGET_X = 2.00
+TARGET_X = 3.00
 TARGET_Y = -1.50
-TARGET_Z = 1.75
+TARGET_Z = 1.5
+
+RANDOMIZE_SPAWN_TARGET = True
+SPAWN_X_RANGE = (-5.5, -4.5)
+SPAWN_Y_RANGE = (-0.5, 0.5)
+SPAWN_Z = 0.75
+TARGET_X_RANGE = (3.5, 4.0)
+TARGET_Y_RANGE = (-1.0, 1.0)
 
 # ── Obstacle-aware projection (in-loop SLSQP) ────────────────────────────────────
-VARIANTS = [#"sdpc-r", "sdpc-c", "sdpc-t", 
-            "diffuser"]*10
+VARIANTS = ["sdpc-r", "sdpc-c", "sdpc-t", 
+            "diffuser"]*3
 VARIANT_CFG = {
     "sdpc-r": dict(num_candidates=1, selection="first", use_projection=True),
     "sdpc-c": dict(num_candidates=2, selection="minimum_projection_cost", use_projection=True),
@@ -58,10 +59,14 @@ CYL_PHYS_RADIUS = 0.2
 DEPTH_OBSTACLE_RADIUS = 0.3
 MAX_DEPTH_OBSTACLES = 5
 UMAP_MAX_RANGE = 3.0
-UMAP_BIN_SIZE = 200
+UMAP_BIN_SIZE = 100
 UMAP_T_POI = 500.0
 UMAP_T_THO = 1800.0
-UMAP_BIN_THRESH = 150
+UMAP_MIN_PIXEL_COUNT = 50  # raw pixel-count floor for a U-map cell to count as a real
+                          # surface (was UMAP_BIN_THRESH=150 on a per-frame-normalized
+                          # 0-255 scale -- see depth_obstacle_estimator._umap_contours()'s
+                          # min_pixel_count docstring for why that was replaced; this
+                          # default is unvalidated against real depth data, retune as needed)
 PROJ_TIGHTEN = 0.15
 PROJ_DT = 0.1
 FLIGHT_Z_MIN = 0.02
@@ -130,13 +135,18 @@ def detect_depth_obstacles(env, depth_fx, depth_fy, depth_cx, depth_cy):
     detections = detect_obstacles_umap(
         depth_2d, depth_fx, depth_fy, depth_cx, depth_cy,
         max_range_m=UMAP_MAX_RANGE, bin_size=UMAP_BIN_SIZE,
-        t_poi=UMAP_T_POI, t_tho=UMAP_T_THO, bin_thresh=UMAP_BIN_THRESH,
+        t_poi=UMAP_T_POI, t_tho=UMAP_T_THO, min_pixel_count=UMAP_MIN_PIXEL_COUNT,
         max_obstacles=MAX_DEPTH_OBSTACLES,
     )
     points = []
-    for pos_cam, half_w, half_h in detections:
+    for pos_cam, half_w, _half_h in detections:
         world_xyz = pos_cam_w + quat_apply(quat_cam_w, pos_cam)
-        radius = max(DEPTH_OBSTACLE_RADIUS, half_w, half_h)
+        # half_h is the obstacle's VERTICAL extent (depth-image height), not a
+        # horizontal measurement -- this radius feeds a flat XY sphere_outside
+        # keep-out circle (z is handled separately via _Z_HALFSPACES), so folding
+        # half_h in here mislabels a tall/thin pole's height as if it were its
+        # width, ballooning the keep-out radius (2026-09 fix, see [[umap_obstacle_detector_bugs]]).
+        radius = max(DEPTH_OBSTACLE_RADIUS, half_w)
         points.append((float(world_xyz[0]), float(world_xyz[1]), float(radius)))
     return points
 
@@ -148,7 +158,7 @@ def build_projector(horizon_H, device, static_points, drone_radius=0.0,
     constraint_list = [("lb", lb), ("ub", ub)]
 
     for (x, y, r) in static_points:
-        radius = r + drone_radius + PROJ_TIGHTEN
+        radius = 0.2 + drone_radius + PROJ_TIGHTEN
         constraint_list.append(("sphere_outside", [0, 1], [float(x), float(y)], float(radius)))
     for (x, y, zone_radius) in (keepout_zones or []):
         radius = float(zone_radius) + drone_radius + PROJ_TIGHTEN
@@ -241,9 +251,6 @@ def main():
         raise ValueError("Set RUN_DIR at the top of this file before running.")
 
     device = torch.device("cuda:0")
-    depth_fx, depth_fy, depth_cx, depth_cy = camera_intrinsics(
-        FPV_WIDTH, FPV_HEIGHT, FPV_FOCAL_LENGTH, FPV_HORIZONTAL_APERTURE
-    )
 
     # ── parse DYNAMIC_OBSTACLES tokens (same convention as eval_crazieflie1.py) ──
     if DYNAMIC_OBSTACLES is None:
@@ -300,6 +307,13 @@ def main():
             goal_pos=tuple(pose_target_world.tolist()),
         )
         env = Crazyflie(env_cfg)
+        env.reset()
+        _pos_warmup = env._pos_world().detach().cpu().numpy()[0]
+        env.step(_pos_warmup[None, :3])
+        _K = env.cam.data.intrinsic_matrices[0].detach().cpu().numpy()
+        depth_fx, depth_fy, depth_cx, depth_cy = float(_K[0, 0]), float(_K[1, 1]), float(_K[0, 2]), float(_K[1, 2])
+        print(f"[INFO] Real camera intrinsics (from IsaacSim camera): "
+              f"fx={depth_fx:.2f} fy={depth_fy:.2f} cx={depth_cx:.2f} cy={depth_cy:.2f}")
 
         run_name = Path(run_dir).parent.name
         horizon = int(getattr(diffusion, "horizon", 16))
@@ -341,7 +355,19 @@ def main():
                   f"(num_candidates={num_candidates}, selection={selection_strategy}, "
                   f"use_projection={use_projection}) =====")
             episode_start_time = time.time()
-            _ = env.reset(seed=ep)
+
+            spawn_pos = None
+            if RANDOMIZE_SPAWN_TARGET:
+                rng = np.random.default_rng(ep)
+                spawn_pos = (float(rng.uniform(*SPAWN_X_RANGE)), float(rng.uniform(*SPAWN_Y_RANGE)), SPAWN_Z)
+                pose_target_world = np.array([
+                    rng.uniform(*TARGET_X_RANGE), rng.uniform(*TARGET_Y_RANGE), TARGET_Z,
+                ], dtype=np.float32)
+                env.goal_pos = torch.tensor(pose_target_world, dtype=torch.float32, device=device)
+                print(f"[INFO] Randomized spawn={spawn_pos} target={pose_target_world.tolist()}")
+
+            print(f"[TARGET] ep={ep} pos={pose_target_world.tolist()}")
+            _ = env.reset(seed=ep, pos=spawn_pos)
             logger.begin_episode(variant_name, episode=ep, seed=ep)
             pos0 = env._pos_world().detach().cpu().numpy()[0]
             hold_action = np.tile(pos0[:action_dim].astype(np.float32), (env.num_envs, 1))

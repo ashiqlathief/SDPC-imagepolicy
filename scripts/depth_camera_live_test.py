@@ -2,8 +2,11 @@
 Isaac sim (boots a hovering drone, ground-truth comparison against config CYLINDERS):
 python scripts/depth_camera_live_test.py --source isaac --n_frames 300 --isaac_hover_xy 0 0 --isaac_altitude 0.5
 
-Real hardware (subscribes to an already-running depth publisher):
-python scripts/depth_camera_live_test.py --source ros2 --ros2_depth_topic /camera/camera/depth/image_raw --ros2_hardcoded_intrinsics
+Real hardware (subscribes to an already-running depth + pose publisher; always uses
+depth_obstacle_estimator's hardcoded DEPTH_FX/FY/CX/CY -- no camera_info subscription.
+Detections print in both world frame (needs --ros2_pose_topic) and camera-relative frame;
+world frame reads "(no pose yet)" for any depth frame that arrives before the first pose):
+python scripts/depth_camera_live_test.py --source ros2 --ros2_depth_topic /camera/camera/depth/image_rect_raw --ros2_pose_topic /mavros/local_position/pose
 """
 from __future__ import annotations
 import argparse
@@ -14,36 +17,66 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import depth_obstacle_estimator as detect_mod  # noqa: E402
 from depth_obstacle_estimator import (  # noqa: E402
     detect_obstacles_umap, camera_world_pose, quat_apply,
     DEPTH_FX, DEPTH_FY, DEPTH_CX, DEPTH_CY,
 )
-
-# Same defaults as eval_crazieflie1pos.py / eval_crazieflieros2.py -- this tests the
-# exact configuration actually deployed, not a fresh set of knobs.
-UMAP_MAX_RANGE = 3.0
-UMAP_BIN_SIZE = 200
+detect_mod.DEBUG_DETECT = False
+UMAP_MAX_RANGE = 5.0
+UMAP_BIN_SIZE = 100
 UMAP_T_POI = 500.0
 UMAP_T_THO = 1800.0
-UMAP_BIN_THRESH = 150
+UMAP_MIN_PIXEL_COUNT = 20  # raw pixel-count floor for a U-map cell to count as a real
+                          # surface (was UMAP_BIN_THRESH=150 on a per-frame-normalized
+                          # 0-255 scale -- see depth_obstacle_estimator._umap_contours()'s
+                          # min_pixel_count docstring; this default is unvalidated
+                          # against real depth data, retune as needed)
 DEPTH_OBSTACLE_RADIUS = 0.3
-MAX_DEPTH_OBSTACLES = 5
+MAX_DEPTH_OBSTACLES = 10
+
+EDGE_CROP_FRAC = 0.12  # fraction of frame width blanked out on each left/right edge before
+                       # detection. Stereo depth cameras (e.g. RealSense) are known-noisier
+                       # near the frame's outer columns -- reduced left/right-imager overlap
+                       # there -- visibly confirmed as speckled edge noise in a real depth
+                       # frame screenshot (2026-09-06). Blanking to 0 makes _umap_contours()
+                       # treat that margin as out-of-frame (it already drops <=0/non-finite
+                       # pixels), same as it does for genuinely out-of-range background.
+                       # Default here first; port to eval_crazieflie1pos.py/eval_crazieflieros2.py
+                       # once validated against real data.
+
+
+def _crop_depth_edges(depth, frac=EDGE_CROP_FRAC):
+    """Blank the outermost `frac` of columns on each side of a (H,W) depth frame (metres),
+    in place on a copy. See EDGE_CROP_FRAC above for why."""
+    if frac <= 0:
+        return depth
+    margin = int(depth.shape[1] * frac)
+    if margin <= 0:
+        return depth
+    depth = depth.copy()
+    depth[:, :margin] = 0.0
+    depth[:, -margin:] = 0.0
+    return depth
 
 
 def detect_depth_obstacles(depth_frame, pos_body_w, quat_body_w, fx, fy, cx, cy):
     """Identical logic to eval_crazieflie1pos.py/eval_crazieflieros2.py's same-named
     function. Returns [(x, y, radius), ...] world-frame."""
+    depth_frame = _crop_depth_edges(depth_frame)
     pos_cam_w, quat_cam_w = camera_world_pose(pos_body_w, quat_body_w)
     detections = detect_obstacles_umap(
         depth_frame, fx, fy, cx, cy,
         max_range_m=UMAP_MAX_RANGE, bin_size=UMAP_BIN_SIZE,
-        t_poi=UMAP_T_POI, t_tho=UMAP_T_THO, bin_thresh=UMAP_BIN_THRESH,
+        t_poi=UMAP_T_POI, t_tho=UMAP_T_THO, min_pixel_count=UMAP_MIN_PIXEL_COUNT,
         max_obstacles=MAX_DEPTH_OBSTACLES,
     )
     points = []
-    for pos_cam, half_w, half_h in detections:
+    for pos_cam, half_w, _half_h in detections:
         world_xyz = pos_cam_w + quat_apply(quat_cam_w, pos_cam)
-        radius = max(DEPTH_OBSTACLE_RADIUS, half_w, half_h)
+        # half_h is the obstacle's VERTICAL extent, not horizontal -- see
+        # eval_crazieflie1pos.py's identical fix / [[umap_obstacle_detector_bugs]].
+        radius = max(DEPTH_OBSTACLE_RADIUS, half_w)
         points.append((float(world_xyz[0]), float(world_xyz[1]), float(radius)))
     return points
 
@@ -79,64 +112,63 @@ def run_ros2(args):
 
     import rclpy
     from rclpy.node import Node
-    from sensor_msgs.msg import Image, CameraInfo
+    from sensor_msgs.msg import Image
+    from geometry_msgs.msg import PoseStamped
+    from rclpy.qos import qos_profile_sensor_data
+
+    _IDENTITY_QUAT = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)  # (w,x,y,z)
 
     class DepthUmapNode(Node):
-        """No real pose subscription here (unlike eval_crazieflieros2.py), so detections
-        are reported camera-relative rather than world-frame -- see module docstring."""
+        """Pose-subscribed (unlike the old camera-relative-only version): transforms each
+        detection to world frame the same way eval_crazieflieros2.py's
+        detect_depth_obstacles() does, via camera_world_pose()+quat_apply(). Prints '(no
+        pose yet)' and skips the world transform for any frame that arrives before the
+        first pose message."""
 
         def __init__(self):
             super().__init__("depth_umap_test")
             self.frame_idx = 0
-            if args.ros2_hardcoded_intrinsics:
-                self.fx, self.fy, self.cx, self.cy = DEPTH_FX, DEPTH_FY, DEPTH_CX, DEPTH_CY
-                camera_info_desc = "<hardcoded>"
-            else:
-                self.fx = self.fy = self.cx = self.cy = None
-                self.create_subscription(CameraInfo, args.ros2_camera_info_topic, self._info_cb, 10)
-                camera_info_desc = args.ros2_camera_info_topic
-            self.create_subscription(Image, args.ros2_depth_topic, self._depth_cb, 10)
-            self.get_logger().info(f"Subscribed: depth={args.ros2_depth_topic}  camera_info={camera_info_desc}")
+            self.fx, self.fy, self.cx, self.cy = DEPTH_FX, DEPTH_FY, DEPTH_CX, DEPTH_CY
+            self.pos_body_w = None
+            self.quat_body_w = _IDENTITY_QUAT.copy()
+            self.create_subscription(Image, args.ros2_depth_topic, self._depth_cb, qos_profile_sensor_data)
+            self.create_subscription(PoseStamped, args.ros2_pose_topic, self._pose_cb, qos_profile_sensor_data)
+            self.get_logger().info(f"Subscribed: depth={args.ros2_depth_topic}"f"pose={args.ros2_pose_topic}  camera_info=<hardcoded>")
 
-        def _info_cb(self, msg: "CameraInfo"):
-            # msg.k is the row-major 3x3 intrinsic matrix [fx 0 cx; 0 fy cy; 0 0 1]
-            self.fx, self.fy = msg.k[0], msg.k[4]
-            self.cx, self.cy = msg.k[2], msg.k[5]
+        def _pose_cb(self, msg: "PoseStamped"):
+            p, o = msg.pose.position, msg.pose.orientation
+            self.pos_body_w = np.array([p.x, p.y, p.z], dtype=np.float32)
+            self.quat_body_w = np.array([o.w, o.x, o.y, o.z], dtype=np.float32)
 
         def _depth_cb(self, msg: "Image"):
-            if self.fx is None:
-                return  # CameraInfo hasn't arrived yet; skip until intrinsics are known
-
-            if msg.encoding == "16UC1":
-                depth = np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.width)
-                depth = depth.astype(np.float32) * 0.001  # RealSense: raw mm -> metres
-            elif msg.encoding == "32FC1":
-                depth = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
-            else:
-                self.get_logger().warn(f"unsupported depth encoding '{msg.encoding}', skipping frame")
-                return
+            depth = np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.width)
+            depth = depth.astype(np.float32) * 0.001  # RealSense: raw mm -> metres
+            depth = _crop_depth_edges(depth)
 
             detections = detect_obstacles_umap(
                 depth, self.fx, self.fy, self.cx, self.cy,
                 max_range_m=UMAP_MAX_RANGE, bin_size=UMAP_BIN_SIZE,
-                t_poi=UMAP_T_POI, t_tho=UMAP_T_THO, bin_thresh=UMAP_BIN_THRESH,
+                t_poi=UMAP_T_POI, t_tho=UMAP_T_THO, min_pixel_count=UMAP_MIN_PIXEL_COUNT,
                 max_obstacles=MAX_DEPTH_OBSTACLES,
             )
-            print(f"\n--- frame {self.frame_idx}  {len(detections)} detection(s) (camera-relative) ---")
-            for pos_cam, half_w, half_h in detections:
-                radius = max(DEPTH_OBSTACLE_RADIUS, half_w, half_h)
-                print(f"  cam=({pos_cam[0]:+.3f},{pos_cam[1]:+.3f},{pos_cam[2]:+.3f})m  r={radius:.2f}")
+            if self.pos_body_w is not None:
+                pos_cam_w, quat_cam_w = camera_world_pose(self.pos_body_w, self.quat_body_w)
+            print(f"\n--- frame {self.frame_idx}  {len(detections)} detection(s) ---")
+            for pos_cam, half_w, _half_h in detections:
+                radius = max(DEPTH_OBSTACLE_RADIUS, half_w)
+                if self.pos_body_w is not None:
+                    world_xyz = pos_cam_w + quat_apply(quat_cam_w, pos_cam)
+                    print(f"  world=({world_xyz[0]:+.3f},{world_xyz[1]:+.3f},{world_xyz[2]:+.3f})m  "
+                          f"cam=({pos_cam[0]:+.3f},{pos_cam[1]:+.3f},{pos_cam[2]:+.3f})m  r={radius:.2f}")
+                else:
+                    print(f"  (no pose yet) cam=({pos_cam[0]:+.3f},{pos_cam[1]:+.3f},{pos_cam[2]:+.3f})m  r={radius:.2f}")
             self.frame_idx += 1
 
     rclpy.init()
     node = DepthUmapNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 # =============================================================================
@@ -186,22 +218,14 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--source", choices=["ros2", "isaac"], default="ros2")
 
-    # ros2 source (subscribes to an already-running publisher instead)
-    p.add_argument("--ros2_depth_topic", type=str,
-                    default="/camera/camera/aligned_depth_to_color/image_raw")
-    p.add_argument("--ros2_camera_info_topic", type=str,
-                    default="/camera/camera/aligned_depth_to_color/camera_info")
-    p.add_argument("--ros2_hardcoded_intrinsics", action="store_true",
-                    help="skip subscribing to --ros2_camera_info_topic and use "
-                         "depth_obstacle_estimator.DEPTH_FX/FY/CX/CY directly instead -- for "
-                         "testing against the raw (non-aligned) depth topic, e.g. "
-                         "/camera/camera/depth/image_raw, without needing its camera_info stream.")
+    p.add_argument("--ros2_depth_topic", type=str, default="/camera/camera/depth/image_rect_raw")
+    p.add_argument("--ros2_pose_topic", type=str, default="/mavros/local_position/pose",)
 
     # isaac source (boots the real Crazyflie env)
     p.add_argument("--n_frames", type=int, default=300, help="episode length, control steps")
     p.add_argument("--isaac_device", type=str, default="cuda:0")
     p.add_argument("--isaac_dt", type=float, default=0.005, help="sim physics dt (s)")
-    p.add_argument("--isaac_hover_xy", type=float, nargs=2, default=[0.0, 0.0], metavar=("X", "Y"),
+    p.add_argument("--isaac_hover_xy", type=float, nargs=2, default=[0.5, 0.0], metavar=("X", "Y"),
                     help="fixed (x, y) hover setpoint, world frame -- drone holds this position "
                          "for the whole run rather than flying anywhere. Default (0,0) is the "
                          "spawn point, facing the cylinder corridor along +x.")

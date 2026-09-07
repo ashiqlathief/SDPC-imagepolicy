@@ -4,7 +4,7 @@ from diffuser.utils import watch
 USE_DEPTH = False
 DEPTH_NEAR = 0.1   # metres
 DEPTH_FAR = 10.0    # metres
-MODEL = 'models.ImagePoseCondUNet1DTemporalCondModel'
+MODEL = 'models.ImagePoseCondTransformer1DModel'
 # other options: models.ImageCondTransformer1DModel, models.ImageCondUNet1DTemporalCondModel,
 #                models.ImagePoseCondTransformer1DModel, models.ImagePoseCondUNet1DTemporalCondModel
 
@@ -22,16 +22,16 @@ BOXES = [
 ]
 
 CYLINDERS = [
-    # # (2, 0.7),
+    # (2, 0.7),
     (2.5, 0.5),
-    # # (2, 0.0),
+    # (2, 0.0),
     (2.5, -0.5),
-    # # (2, -0.8),
-    # (0, 0.8),
+    # (2, -0.8),
+    (1, 0.8),
     # # (0.5, 0.4),
-    # (0, 0.0),
+    (1, 0.0),
     # # (0.5, -0.4),
-    # (0, -0.9),
+    (1, -0.9),
 
     # # (2, 0.7),
     # (-1, 0.5),

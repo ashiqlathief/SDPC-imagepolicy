@@ -444,15 +444,24 @@ def _contour_to_camera_detection(contour, depth_mm: np.ndarray, fx: float, fy: f
 
     # Vertical extent: scan the depth image's rows within [u_l, u_r] columns for
     # pixels whose depth-bin falls inside the contour's depth range (d_t..d_b),
-    # same restriction the original applies before taking row min/max.
+    # same restriction the original applies before taking row min/max. Uses
+    # >=/< (not >/<) so a pixel landing exactly on a bin edge still counts --
+    # matches numpy histogram's own half-open-bin convention.
     lo_mm, hi_mm = d_t * mm_per_bin, d_b * mm_per_bin
     cols = np.linspace(u_l, u_r - 1, min(20, max(u_r - u_l, 1)), dtype=int)
     band = depth_mm[:, cols]
-    row_hit = np.any((band > lo_mm) & (band < hi_mm), axis=1)
+    row_hit = np.any((band >= lo_mm) & (band < hi_mm), axis=1)
     rows = np.nonzero(row_hit)[0]
     if len(rows) == 0:
         return None
-    row_min, row_max = int(rows.min()), int(rows.max())
+    # Take the longest CONTIGUOUS run of matching rows, not the outer bounds of
+    # every matching row in the frame -- an unrelated surface elsewhere in these
+    # columns that happens to share this depth-bin range shouldn't be able to
+    # stretch half_height_m out to cover it too.
+    gaps = np.flatnonzero(np.diff(rows) > 1)
+    runs = np.split(rows, gaps + 1)
+    best_run = max(runs, key=len)
+    row_min, row_max = int(best_run[0]), int(best_run[-1])
 
     right_cam_mm = ((u_l - cx) + (u_r - cx)) * depth_forward_mm / (2.0 * fx)   # camera x (right)
     down_cam_mm = ((row_min - cy) + (row_max - cy)) * depth_forward_mm / (2.0 * fy)  # camera y (down)
@@ -469,10 +478,24 @@ def _contour_to_camera_detection(contour, depth_mm: np.ndarray, fx: float, fy: f
 
 
 def _umap_contours(depth_m: np.ndarray, fx: float, bin_size: int, max_range_m: float,
-                    t_poi: float, t_tho: float, bin_thresh: int = 15):
+                    t_poi: float, t_tho: float, min_pixel_count: int = 8):
     """Shared U-map build + contour extraction behind detect_largest_obstacle_umap()/
     detect_obstacles_umap(). Returns (contours, areas, depth_mm, mm_per_bin, W),
-    with contours/areas empty lists if nothing was found."""
+    with contours/areas empty lists if nothing was found.
+
+    min_pixel_count: a (column, depth-bin) cell counts as part of a real surface
+    once it has at least this many raw pixels. Renamed from the old `bin_thresh`
+    (2026-09 fix): that version thresholded on a per-FRAME cv2.normalize(...,
+    NORM_MINMAX) rescaling, so a single dense background surface anywhere in the
+    frame (e.g. a wall/floor visible above and below a short cylinder, spanning
+    far more rows than the cylinder itself) set the global max and could push a
+    real, closer obstacle's own peak below threshold entirely -- confirmed via
+    scripts/diag_umap_synthetic.py to be the actual cause of the reported
+    oversized/wrong-depth detections. Comparing raw counts removes that
+    cross-column competition. The default of 8 is a starting guess (a real
+    surface should produce more than a handful of stray-noise pixels) and, per
+    the module docstring's existing admission that these constants were ported
+    un-tuned, will likely need empirical retuning against real depth frames."""
     # Deliberately NOT clipped into range -- np.histogram(range=...) silently
     # DROPS out-of-range samples rather than piling them into the edge bin,
     # which is what the original algorithm relies on: a far/out-of-range
@@ -497,8 +520,10 @@ def _umap_contours(depth_m: np.ndarray, fx: float, bin_size: int, max_range_m: f
     t_pois = fx * t_tho / np.clip(dbin, 1e-6, None)
     _ = t_pois > t_poi  # kept for parity with the source; unused downstream there too
 
-    normalized = cv2.normalize(histograms, None, 0, 255, cv2.NORM_MINMAX)
-    binary = cv2.threshold(np.uint8(normalized), bin_thresh, 36, cv2.THRESH_BINARY)[1]
+    # Raw pixel-count floor, NOT frame-relative -- see min_pixel_count's docstring
+    # above for why the old cv2.normalize(..., NORM_MINMAX)-based threshold was
+    # replaced.
+    binary = (histograms >= min_pixel_count).astype(np.uint8) * 255
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     areas = [cv2.contourArea(c) for c in contours]
     return contours, areas, depth_mm, mm_per_bin, W
@@ -506,7 +531,7 @@ def _umap_contours(depth_m: np.ndarray, fx: float, bin_size: int, max_range_m: f
 
 def detect_largest_obstacle_umap(depth_m: np.ndarray, fx: float, fy: float, cx: float, cy: float,
                                   max_range_m: float = 3.0, bin_size: int = 200,
-                                  t_poi: float = 500.0, t_tho: float = 1800.0, bin_thresh: int = 15):
+                                  t_poi: float = 500.0, t_tho: float = 1800.0, min_pixel_count: int = 8):
     """depth_m: (H,W) float32 metres (planar or radial -- the original method
     doesn't distinguish; matches what _depth_cb hands it after mm->m scaling).
 
@@ -522,7 +547,7 @@ def detect_largest_obstacle_umap(depth_m: np.ndarray, fx: float, fy: float, cx: 
     detections = detect_obstacles_umap(
         depth_m, fx, fy, cx, cy,
         max_range_m=max_range_m, bin_size=bin_size, t_poi=t_poi, t_tho=t_tho,
-        bin_thresh=bin_thresh, max_obstacles=1,
+        min_pixel_count=min_pixel_count, max_obstacles=1,
     )
     return detections[0] if detections else None
 
@@ -530,7 +555,7 @@ def detect_largest_obstacle_umap(depth_m: np.ndarray, fx: float, fy: float, cx: 
 def detect_obstacles_umap(depth_m: np.ndarray, fx: float, fy: float, cx: float, cy: float,
                            max_range_m: float = 3.0, bin_size: int = 200,
                            t_poi: float = 500.0, t_tho: float = 1800.0,
-                           bin_thresh: int = 15, max_obstacles: int = 5):
+                           min_pixel_count: int = 8, max_obstacles: int = 5):
     """Same U-disparity-map + contour method as detect_largest_obstacle_umap(),
     but returns every contour found (largest-area first), up to max_obstacles,
     instead of only the single largest. Motivation: reporting just one
@@ -541,16 +566,12 @@ def detect_obstacles_umap(depth_m: np.ndarray, fx: float, fy: float, cx: float, 
     frame. Each entry is (pos_cam, half_width_m, half_height_m), same shape
     detect_largest_obstacle_umap() returns for its one detection.
 
-    bin_thresh: cv2.threshold's binarization cutoff (0-255, on the normalized
-    U-map histogram) below which a bin is "empty". The original default of 15
-    is low enough that a mostly-open corridor's scattered background/free-
-    space depth readings can clear it and connect into one giant contour
-    spanning near-camera out to max_range_m -- swamping a real, much smaller,
-    denser cylinder-surface peak. Raise this to require a denser peak (an
-    actual reflecting surface) before something counts as a contour at all.
+    min_pixel_count: minimum raw pixel count for a (column, depth-bin) cell to
+    count as part of a real surface (see _umap_contours()'s docstring for why
+    this compares raw counts rather than a per-frame-normalized value).
     """
     contours, areas, depth_mm, mm_per_bin, W = _umap_contours(
-        depth_m, fx, bin_size, max_range_m, t_poi, t_tho, bin_thresh
+        depth_m, fx, bin_size, max_range_m, t_poi, t_tho, min_pixel_count
     )
     if not contours:
         return []
