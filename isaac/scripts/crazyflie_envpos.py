@@ -9,7 +9,7 @@ import gymnasium as gym
 _parser = argparse.ArgumentParser(add_help=False)
 AppLauncher.add_app_launcher_args(_parser)
 _app_args, _ = _parser.parse_known_args()
-_app_args.headless = os.environ.get("CRAZYFLIE_ENV_HEADLESS", "1") != "0"
+_app_args.headless = os.environ.get("CRAZYFLIE_ENV_HEADLESS", "0") != "0"
 _app_args.enable_cameras = True
 app_launcher = AppLauncher(_app_args)
 simulation_app = app_launcher.app

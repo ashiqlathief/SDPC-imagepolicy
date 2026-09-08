@@ -199,7 +199,7 @@ def main():
 
     device = torch.device("cuda:0")
 
-    drone_radius = 0.15
+    drone_radius = 0.2
 
     run_dirs = [os.path.join(RUN_DIR, str(s)) for s in SEEDS] if SEEDS else [RUN_DIR]
     env = None

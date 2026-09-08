@@ -2,14 +2,15 @@ from __future__ import annotations
 import importlib
 import isaaclab.sim as sim_utils
 from isaaclab.utils import configclass
-from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.assets import ArticulationCfg, RigidObjectCfg
+from isaaclab.assets import RigidObjectCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, NVIDIA_NUCLEUS_DIR
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors.camera import CameraCfg
 from isaaclab.sim.spawners.materials import PreviewSurfaceCfg
 from isaaclab.sim.spawners.materials import MdlFileCfg
+
+from .arl_robot_1_cfg import ARL_ROBOT_1_CFG
 
 cfg = importlib.import_module("config.avoiding-crazyflie")
 
@@ -87,61 +88,15 @@ for _wall_y, _wall_rot in ((_CORR_Y, _ROT_YAW_N90), (-_CORR_Y, _ROT_YAW_P90)):
         ))
 del _wall_y, _wall_rot, _ti
 
-CRAZYFLIE = ArticulationCfg(
-        spawn=sim_utils.MultiUsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Bitcraze/Crazyflie/cf2x.usd",
-            # usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Bitcraze/Crazyflie/cf2x.usd",
-
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                max_depenetration_velocity=10.0,
-                enable_gyroscopic_forces=True,
-            ),
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                collision_enabled=True,
-            ),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=False,
-                solver_position_iteration_count=4,
-                solver_velocity_iteration_count=0,
-                sleep_threshold=0.005,
-                stabilization_threshold=0.001,
-            ),
-            copy_from_source=False,
-        ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.15),
-            joint_pos={
-                ".*": 0.0,
-            },
-            joint_vel={
-                "m1_joint": 200.0,
-                "m2_joint": -200.0,
-                "m3_joint": 200.0,
-                "m4_joint": -200.0,
-            },
-        ),
-        actuators={
-            "dummy": ImplicitActuatorCfg(
-                joint_names_expr=[".*"],
-                stiffness=0.0,
-                damping=0.0,
-            ),
-        },
-    )
-
 @configclass
 class CrazyflieSceneCfg(InteractiveSceneCfg):
-    # -------------------------
-    # Robot
-    # -------------------------
-    crazyflie = CRAZYFLIE.replace(
-        prim_path="/World/envs/env_.*/Crazyflie",
-        init_state=CRAZYFLIE.init_state.replace(pos=(CORRIDOR_X_OFFSET, -1.0, 1.0))
+    crazyflie = ARL_ROBOT_1_CFG.replace(
+        prim_path="/World/envs/env_.*/ArlRobot",
+        init_state=ARL_ROBOT_1_CFG.init_state.replace(pos=(CORRIDOR_X_OFFSET, -1.0, 1.0))
     )
 
     FPV_CAMERA_CFG = CameraCfg(
-        prim_path="/World/envs/env_.*/Crazyflie/body/fpv",
+        prim_path="/World/envs/env_.*/ArlRobot/base_link/fpv",
         update_period=1.0 / 50.0,       # update every physics step (matches sim dt)
         height=FPV_REAL_HEIGHT,
         width=FPV_REAL_WIDTH,
@@ -153,9 +108,8 @@ class CrazyflieSceneCfg(InteractiveSceneCfg):
             focus_distance=0.6,           # m   (typical focus plane)
             clipping_range=(0.4, 10.0),   # m   (D455 recommended range)
         ),
-        # Pose relative to the Crazyflie
         offset=CameraCfg.OffsetCfg(
-            pos=(0.0, 0.0, 0.02),     # move camera slightly forward and up
+            pos=(0.30, 0.0, 0.0),
             rot=(0.5, -0.5, 0.5, -0.5),   # quaternion (w,x,y,z); pointing forward in ROS convention
             convention="ros",
         ),
