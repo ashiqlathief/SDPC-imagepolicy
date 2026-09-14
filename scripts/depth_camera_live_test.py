@@ -1,13 +1,3 @@
-"""
-Isaac sim (boots a hovering drone, ground-truth comparison against config CYLINDERS):
-python scripts/depth_camera_live_test.py --source isaac --n_frames 300 --isaac_hover_xy 0 0 --isaac_altitude 0.5
-
-Real hardware (subscribes to an already-running depth + pose publisher; always uses
-depth_obstacle_estimator's hardcoded DEPTH_FX/FY/CX/CY -- no camera_info subscription.
-Detections print in both world frame (needs --ros2_pose_topic) and camera-relative frame;
-world frame reads "(no pose yet)" for any depth frame that arrives before the first pose):
-python scripts/depth_camera_live_test.py --source ros2 --ros2_depth_topic /camera/camera/depth/image_rect_raw --ros2_pose_topic /mavros/local_position/pose
-"""
 from __future__ import annotations
 import argparse
 import importlib

@@ -82,7 +82,7 @@ def _make_gif_3d(
     data = np.load(npz_path, allow_pickle=True)
 
     xyz         = data["xyz"]
-    cylinders   = data["cylinders"]
+    cylinders   = np.asarray(data.get("cylinders", np.zeros((0, 2))))
     dynamic     = bool(data.get("dynamic_obstacles", False))
     cyl_xy_traj = data.get("cyl_xy_traj", None)
     dyn_indices = data.get("dynamic_cyl_indices", np.array([], dtype=int))
@@ -254,17 +254,39 @@ def make_gif(
     data = np.load(npz_path, allow_pickle=True)
 
     xyz         = data["xyz"]           # (T, 3)
-    boxes       = data["boxes"]         # (N, 2)
-    cylinders   = data["cylinders"]     # (M, 2)
+    boxes       = np.asarray(data.get("boxes", np.zeros((0, 2))))         # (N, 2)
+    cylinders   = np.asarray(data.get("cylinders", np.zeros((0, 2))))     # (M, 2)
+    cyl_radius  = float(data.get("cyl_radius", 0.06))
     dynamic     = bool(data.get("dynamic_obstacles", False))
     cyl_xy_traj = data.get("cyl_xy_traj", None)   # (T_snap, M, 2)
     dyn_indices = data.get("dynamic_cyl_indices", np.array([], dtype=int))
+
+    # corridor geometry (diffusion_drone1.py / diffusion_dronempc.py trajectories
+    # carry their own wall extents + goal; older eval-script .npz files don't,
+    # so fall back to the fixed avoiding-crazyflie-style corridor below).
+    has_corridor_meta = "corridor_x1" in data
+    corridor_x0 = float(data["corridor_x0"]) if has_corridor_meta else 0.0
+    corridor_x1 = float(data["corridor_x1"]) if has_corridor_meta else 4.1
+    corridor_y  = float(data["corridor_y"])  if has_corridor_meta else 1.0
+    wall_th     = float(data.get("wall_thickness", 0.10))
+    flight_z_min = float(data.get("flight_z_min", 0.0))
+    flight_z_max = float(data.get("flight_z_max", 1.0))
+    goal_xyz    = np.asarray(data["goal"], dtype=np.float64) if "goal" in data else None
 
     # --depth_obstacles: every point detected over the whole episode (see
     # depth_static_accum/depth_dynamic_accum in eval_crazieflie1.py) -- a
     # fixed background scatter, not per-frame, same as that script's own plot.
     depth_static_points  = np.asarray(data.get("depth_static_points",  np.zeros((0, 2))))
     depth_dynamic_points = np.asarray(data.get("depth_dynamic_points", np.zeros((0, 2))))
+
+    # animated per-step depth detections (diffusion_dronempcdepth.py's static_pts):
+    # one (N_i, 3) array of (x,y,radius) per control step, N_i varying frame to
+    # frame -- unlike depth_static_points above, this shows only what the depth
+    # camera currently sees, not everything ever detected this episode.
+    depth_pts_traj = data.get("depth_static_pts_traj", None)
+    has_depth_pts_traj = (
+        plane == "xy" and depth_pts_traj is not None and len(depth_pts_traj) > 0
+    )
 
     # floating sphere data
     has_spheres   = bool(data.get("floating_spheres", False))
@@ -276,12 +298,13 @@ def make_gif(
 
     # candidate rollouts (chosen + unchosen), one snapshot per env step.
     # snap i corresponds to xyz[i+1] (xyz[0] is the pre-loop start position).
-    cand_traj_xy = data.get("cand_traj_xy", None)   # (N_snap, K, H+1, 2), absolute xy
-    snap_chosen  = data.get("snap_chosen",  None)   # (N_snap,)
+    cand_traj_xy = data.get("cand_traj_xy", None)   # (N_snap, K, H+1, 2or3) -- raw/unprojected model output, "models output"
+    snap_chosen  = data.get("snap_chosen",  None)    # (N_snap,)
     has_candidates = (
-        plane == "xy"
+        plane in ("xy", "xz")
         and cand_traj_xy is not None
         and np.asarray(cand_traj_xy).size > 0
+        and (plane != "xz" or np.asarray(cand_traj_xy).shape[-1] >= 3)
     )
     if has_candidates:
         cand_traj_xy = np.asarray(cand_traj_xy)
@@ -290,6 +313,22 @@ def make_gif(
         # instead of just the 1 frame it was sampled on, so you can see whether the
         # drone's actual path over the next H steps tracked the chosen candidate.
         persist_gens = max(cand_traj_xy.shape[2] - 1, 1)   # H = (H+1 waypoints) - 1
+
+    # projected/safe horizon of the chosen candidate only -- the "intermediate
+    # points" actually being planned/followed after obstacle-avoidance
+    # correction (diffusion_dronempc.py's in-loop SLSQP). Falls back to the
+    # raw candidate above when a run has no projector (diffusion_drone1.py).
+    cand_traj_xy_proj = data.get("cand_traj_xy_proj", None)   # (N_snap, H+1, 2or3)
+    has_proj_traj = (
+        plane in ("xy", "xz")
+        and cand_traj_xy_proj is not None
+        and np.asarray(cand_traj_xy_proj).size > 0
+        and (plane != "xz" or np.asarray(cand_traj_xy_proj).shape[-1] >= 3)
+    )
+    if has_proj_traj:
+        cand_traj_xy_proj = np.asarray(cand_traj_xy_proj)
+        if not has_candidates:
+            persist_gens = max(cand_traj_xy_proj.shape[1] - 1, 1)
 
     # ── halfspaces: only plot what was active during the recorded run ─────────
     if "halfspaces" in data and len(data["halfspaces"]) > 0:
@@ -336,15 +375,23 @@ def make_gif(
     if plane == "xz":
         h_idx, v_idx = 0, 2
         h_label, v_label = "x (m)", "z (m)"
-        h_lim = (-0.2, 4.2)
-        v_lim = (-0.05, 1.3)
+        if has_corridor_meta:
+            h_lim = (corridor_x0 - 0.3, corridor_x1 + wall_th + 0.3)
+            v_lim = (flight_z_min - 0.1, flight_z_max + 0.3)
+        else:
+            h_lim = (-0.2, 4.2)
+            v_lim = (-0.05, 1.3)
     else:                          # "xy" — default top-down
         h_idx, v_idx = 0, 1
         h_label, v_label = "x (m)", "y (m)"
-        h_lim = (-6.0, 4.5)
-        v_lim = (-2.25, 2.25)
+        if has_corridor_meta:
+            half = corridor_y + wall_th + 0.3
+            h_lim = (corridor_x0 - 0.3, corridor_x1 + wall_th + 0.3)
+            v_lim = (-half, half)
+        else:
+            h_lim = (-6.0, 4.5)
+            v_lim = (-2.25, 2.25)
 
-    corridor_end = 4.1
     wall_kw = dict(linewidth=1.5, edgecolor="#555555", facecolor="#cccccc",
                    alpha=0.50, zorder=1)
 
@@ -358,19 +405,29 @@ def make_gif(
     ax.grid(True, alpha=0.25, linewidth=0.6)
 
     # ── static scene geometry ─────────────────────────────────────────────────
+    wall_len = corridor_x1 - corridor_x0
     if plane == "xy":
-        ax.add_patch(Rectangle((0.0,  1.00), corridor_end, 0.10, **wall_kw))
-        ax.add_patch(Rectangle((0.0, -1.10), corridor_end, 0.10, **wall_kw))
-        ax.add_patch(Rectangle((corridor_end, -1.10), 0.10, 2.20, **wall_kw))
-        ax.plot([4.0, 4.0], [-1.0, 1.0], color="#00aa00", linewidth=2.2,
-                linestyle="-", alpha=0.85, zorder=5)
+        ax.add_patch(Rectangle((corridor_x0,  corridor_y), wall_len, wall_th, **wall_kw))
+        ax.add_patch(Rectangle((corridor_x0, -corridor_y - wall_th), wall_len, wall_th, **wall_kw))
+        ax.add_patch(Rectangle((corridor_x1, -corridor_y - wall_th), wall_th,
+                                2 * (corridor_y + wall_th), **wall_kw))
+        if goal_xyz is not None:
+            ax.plot([float(goal_xyz[0])], [float(goal_xyz[1])], marker="*", markersize=3,
+                    color="#00aa00", linestyle="none", zorder=5, label="goal")
+        else:
+            ax.plot([4.0, 4.0], [-1.0, 1.0], color="#00aa00", linewidth=2.2,
+                    linestyle="-", alpha=0.85, zorder=5)
         if halfspaces:
             _draw_halfspaces_xy(ax, halfspaces, xlim=h_lim, ylim=v_lim)
     else:  # xz — side view: draw floor, ceiling, goal post
-        ax.axhline(0.0, color="#555555", linewidth=1.2, linestyle="--", alpha=0.6)
-        ax.axhline(1.0, color="#555555", linewidth=1.2, linestyle="--", alpha=0.6)
-        ax.plot([4.0, 4.0], [0.0, 1.0], color="#00aa00", linewidth=2.2,
-                linestyle="-", alpha=0.85, zorder=5)
+        ax.axhline(flight_z_min, color="#555555", linewidth=1.2, linestyle="--", alpha=0.6)
+        ax.axhline(flight_z_max, color="#555555", linewidth=1.2, linestyle="--", alpha=0.6)
+        if goal_xyz is not None:
+            ax.plot([float(goal_xyz[0])], [float(goal_xyz[2])], marker="*", markersize=3,
+                    color="#00aa00", linestyle="none", zorder=5, label="goal")
+        else:
+            ax.plot([4.0, 4.0], [0.0, 1.0], color="#00aa00", linewidth=2.2,
+                    linestyle="-", alpha=0.85, zorder=5)
 
     # ── static box obstacles ─────────────────────────────────────────────────
     for b in boxes:
@@ -395,13 +452,13 @@ def make_gif(
             cx, cy = float(c[0]), float(c[1])
             if plane == "xy":
                 ax.add_patch(Circle(
-                    (cx, cy), 0.06,
+                    (cx, cy), cyl_radius,
                     linewidth=0.8, edgecolor="black", facecolor="#e87020",
                     alpha=0.40, zorder=2,
                 ))
             else:  # xz: cylinders are full-height columns
                 ax.add_patch(Rectangle(
-                    (cx - 0.06, 0.0), 0.12, 1.0,
+                    (cx - cyl_radius, flight_z_min), 2 * cyl_radius, flight_z_max - flight_z_min,
                     linewidth=0.8, edgecolor="black", facecolor="#e87020",
                     alpha=0.25, zorder=2,
                 ))
@@ -412,13 +469,13 @@ def make_gif(
         cx, cy = float(cylinders[i][0]), float(cylinders[i][1])
         if plane == "xy":
             p = Circle(
-                (cx, cy), 0.06,
+                (cx, cy), cyl_radius,
                 facecolor="#e87020", edgecolor="darkorange",
                 linewidth=1.0, alpha=0.85, zorder=4,
             )
         else:  # xz: dynamic cylinder shown as a tall rectangle
             p = Rectangle(
-                (cx - 0.06, 0.0), 0.12, 1.0,
+                (cx - cyl_radius, flight_z_min), 2 * cyl_radius, flight_z_max - flight_z_min,
                 facecolor="#e87020", edgecolor="darkorange",
                 linewidth=1.0, alpha=0.55, zorder=4,
             )
@@ -438,8 +495,6 @@ def make_gif(
             dyn_cyl_arrows.append((i, arrow))
 
     # ── candidate rollouts: unchosen (faint) + chosen (bold), fading with age ────
-    # gen_cand_lines[g] / gen_chosen_lines[g] hold the fan sampled `g` steps ago;
-    # g=0 is the freshest snapshot, g=persist_gens-1 is about to expire.
     if has_candidates:
         K = cand_traj_xy.shape[1]
         gen_cand_lines, gen_chosen_lines = [], []
@@ -452,14 +507,30 @@ def make_gif(
                 for _ in range(K)
             ]
             chosen_l, = ax.plot([], [], linewidth=2.0, color="#d62728",
+                                marker="o", markersize=4,
                                 alpha=alpha_chosen, zorder=5,
-                                label="chosen candidate" if g == 0 else None)
+                                label="model output (chosen)" if g == 0 else None)
             gen_cand_lines.append(lines_k)
             gen_chosen_lines.append(chosen_l)
         cand_lines = [line for gen in gen_cand_lines for line in gen] + gen_chosen_lines
     else:
         gen_cand_lines, gen_chosen_lines = [], []
         cand_lines = []
+
+    # ── projected/safe horizon of the chosen candidate -- the "intermediate
+    # points" actually being followed after obstacle-avoidance correction ────
+    if has_proj_traj:
+        gen_proj_lines = []
+        for g in range(persist_gens):
+            age_frac = g / max(persist_gens - 1, 1)
+            alpha = 0.85 * (1.0 - age_frac) + 0.05
+            proj_l, = ax.plot([], [], linewidth=2.2, color="orange", linestyle="--",
+                              alpha=alpha, zorder=5.5,
+                              label="planned path (safe)" if g == 0 else None)
+            gen_proj_lines.append(proj_l)
+        cand_lines += gen_proj_lines
+    else:
+        gen_proj_lines = []
 
     # ── --depth_obstacles: every point detected this episode ─────────────────
     if plane == "xy" and ran_with_depth:
@@ -520,12 +591,18 @@ def make_gif(
         ax.add_patch(fov_wedge)
 
     trail_line, = ax.plot([], [], linewidth=2.0, color="steelblue", alpha=0.7, zorder=6)
+    # small orange dots marking each already-visited waypoint on the trail
+    prev_points, = ax.plot([], [], "o", markersize=2, color="orange", alpha=0.7,
+                           linestyle="none", zorder=6.5, label="previous positions")
     drone_dot,  = ax.plot([], [], "o", markersize=8, color="steelblue", zorder=7)
     ax.plot(h0[0], v0[0], "o", markersize=7, color="green", zorder=8)
+    if has_depth_pts_traj:
+        depth_live_dots, = ax.plot([], [], "x", markersize=9, markeredgewidth=2.2,
+                                   color="magenta", linestyle="none", zorder=6.8,
+                                   label="depth detection (live)")
     step_text = ax.text(0.02, 0.95, "", transform=ax.transAxes,
                         fontsize=8, verticalalignment="top")
-    if show_fov or (plane == "xy" and ran_with_depth):
-        ax.legend(loc="upper right", fontsize=7, framealpha=0.8)
+    ax.legend(loc="upper right", fontsize=7, framealpha=0.8)
 
     fig.tight_layout()
 
@@ -542,18 +619,33 @@ def make_gif(
 
     all_patches = ([p for _, p in dyn_cyl_patches] + [p for _, p in sph_patches]
                    + [a for _, a in dyn_cyl_arrows] + cand_lines
-                   + ([fov_wedge] if show_fov else []))
+                   + ([fov_wedge] if show_fov else [])
+                   + ([depth_live_dots] if has_depth_pts_traj else []))
 
     def init():
         trail_line.set_data([], [])
+        prev_points.set_data([], [])
         drone_dot.set_data([], [])
+        if has_depth_pts_traj:
+            depth_live_dots.set_data([], [])
         step_text.set_text("")
-        return [trail_line, drone_dot, step_text] + all_patches
+        return [trail_line, prev_points, drone_dot, step_text] + all_patches
 
     def update(t):
         trail_line.set_data(h0[:t + 1], v0[:t + 1])
+        prev_points.set_data(h0[:t], v0[:t])   # already-visited waypoints, excluding the current one
         drone_dot.set_data([h0[t]], [v0[t]])
         step_text.set_text(f"step {t}/{T - 1}")
+
+        # depth detections: snap i -> xyz[i+1], so frame t's freshest snap is t-1
+        # (same convention as the candidate rollouts below).
+        if has_depth_pts_traj:
+            si = t - 1
+            if 0 <= si < len(depth_pts_traj) and depth_pts_traj[si].shape[0] > 0:
+                pts = depth_pts_traj[si]
+                depth_live_dots.set_data(pts[:, 0], pts[:, 1])
+            else:
+                depth_live_dots.set_data([], [])
 
         if show_fov:
             fov_wedge.set_center((h0[t], v0[t]))
@@ -566,7 +658,7 @@ def make_gif(
                 if plane == "xy":
                     patch.center = (float(cx), float(cy))
                 else:
-                    patch.set_x(float(cx) - 0.06)
+                    patch.set_x(float(cx) - cyl_radius)
 
             # direction arrow: finite-difference velocity vs. previous snapshot
             if plane == "xy" and ci > 0:
@@ -597,20 +689,31 @@ def make_gif(
             for g in range(persist_gens):
                 si_cand = si_latest - g
                 if 0 <= si_cand < cand_traj_xy.shape[0]:
-                    rollouts = cand_traj_xy[si_cand]          # (K, H+1, 2)
+                    rollouts = cand_traj_xy[si_cand]          # (K, H+1, 2or3)
                     chosen_k = int(snap_chosen[si_cand])
                     for k, line in enumerate(gen_cand_lines[g]):
                         if k == chosen_k:
                             line.set_data([], [])             # drawn separately, bold
                         else:
-                            line.set_data(rollouts[k, :, 0], rollouts[k, :, 1])
-                    gen_chosen_lines[g].set_data(rollouts[chosen_k, :, 0], rollouts[chosen_k, :, 1])
+                            line.set_data(rollouts[k, :, h_idx], rollouts[k, :, v_idx])
+                    gen_chosen_lines[g].set_data(rollouts[chosen_k, :, h_idx], rollouts[chosen_k, :, v_idx])
                 else:
                     for line in gen_cand_lines[g]:
                         line.set_data([], [])
                     gen_chosen_lines[g].set_data([], [])
 
-        return [trail_line, drone_dot, step_text] + all_patches
+        # projected/safe horizon of the chosen candidate ("intermediate points")
+        if has_proj_traj:
+            si_latest = t - 1
+            for g in range(persist_gens):
+                si_cand = si_latest - g
+                if 0 <= si_cand < cand_traj_xy_proj.shape[0]:
+                    proj = cand_traj_xy_proj[si_cand]         # (H+1, 2or3)
+                    gen_proj_lines[g].set_data(proj[:, h_idx], proj[:, v_idx])
+                else:
+                    gen_proj_lines[g].set_data([], [])
+
+        return [trail_line, prev_points, drone_dot, step_text] + all_patches
 
     # ── render & save ─────────────────────────────────────────────────────────
     anim = FuncAnimation(fig, update, frames=T, init_func=init,

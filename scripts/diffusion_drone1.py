@@ -1,4 +1,6 @@
 import argparse
+import os
+import time
 
 import numpy as np
 import torch
@@ -6,9 +8,12 @@ import torchvision.transforms.functional as TF
 
 from isaaclab.app import AppLauncher
 
+HEADLESS = True  # set True to run without the GUI window (overrides --headless)
+
 parser = argparse.ArgumentParser()
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+args_cli.headless = HEADLESS
 args_cli.enable_cameras = True
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -94,6 +99,51 @@ def preprocess_rgb(rgb_tensor: torch.Tensor) -> torch.Tensor:
     return img
 
 
+def integrate_candidates_xyz(pos0, deltas_real):
+    """deltas_real: (K,H,3) or (H,3) -- returns absolute (K,H+1,3) positions
+    integrated from pos0. Same "cand_traj_xy" convention eval_crazieflie1.py
+    used, which make_traj_gif.py already knows how to draw as a fading
+    candidate-rollout fan (the model's raw predicted horizon, "models output")."""
+    deltas_real = np.asarray(deltas_real, dtype=np.float32)
+    if deltas_real.ndim == 2:
+        deltas_real = deltas_real[None]
+    K, H, _ = deltas_real.shape
+    traj = np.zeros((K, H + 1, 3), dtype=np.float32)
+    traj[:, 0] = np.asarray(pos0, dtype=np.float32)[None, :3]
+    traj[:, 1:] = traj[:, :1] + np.cumsum(deltas_real[..., :3], axis=1)
+    return traj
+
+
+def save_trajectory_npz(traj_dir, episode_idx, traj_xyz, actions_taken, start_pos, goal_pos,
+                         next_pos=None, cand_traj_xy=None, cand_traj_xy_proj=None, snap_chosen=None, **extra):
+    """Dump one episode's executed positions/actions, same layout as the
+    traj_pos_*.npz files eval_crazieflie1pos.py writes (xyz, actions, ...).
+    next_pos (one per control step) is the single immediate next commanded
+    position -- make_traj_gif.py draws it as an orange dot. cand_traj_xy/
+    cand_traj_xy_proj/snap_chosen (also one entry per control step) carry
+    the model's predicted horizon -- "models output" + the multi-step
+    planned path -- for make_traj_gif.py's candidate-fan overlay."""
+    if len(traj_xyz) == 0:
+        return
+    path = os.path.join(traj_dir, f"traj_ep{episode_idx:04d}.npz")
+    kwargs = dict(
+        xyz=np.array(traj_xyz, dtype=np.float32),
+        actions=np.array(actions_taken, dtype=np.float32),
+        start=np.array(start_pos, dtype=np.float32),
+        goal=np.array(goal_pos, dtype=np.float32),
+        **extra,
+    )
+    if next_pos:
+        kwargs["next_pos"] = np.array(next_pos, dtype=np.float32)
+    if cand_traj_xy:
+        kwargs["cand_traj_xy"] = np.array(cand_traj_xy, dtype=np.float32)
+        kwargs["snap_chosen"] = np.array(snap_chosen, dtype=np.int64)
+    if cand_traj_xy_proj:
+        kwargs["cand_traj_xy_proj"] = np.array(cand_traj_xy_proj, dtype=np.float32)
+    np.savez(path, **kwargs)
+    print(f"[TRAJ] saved: {path}")
+
+
 def main():
     sim_cfg = sim_utils.SimulationCfg(dt=1/30, device=args_cli.device)
     sim = SimulationContext(sim_cfg)
@@ -148,16 +198,43 @@ def main():
     print("[INFO] Simulation + camera + diffusion ready.")
     print(f"[INFO] Start: {start_pos.cpu().numpy()}  →  Goal: {goal_pos.cpu().numpy()}")
 
+    traj_dir = os.path.join(RUN_DIR, "trajectories", time.strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(traj_dir, exist_ok=True)
+    print(f"[INFO] trajectories -> {traj_dir}")
+    traj_xyz = []
+    actions_taken = []
+    next_pos_list = []       # per-step single next commanded position (pre z-clamp)
+    cand_traj_xy_list = []   # per-step model horizon rollout ("models output" / "intermediate points")
+    snap_chosen_list = []
+    episode_idx = 0
+    # corridor geometry, for make_traj_gif.py to draw the walls/limits to scale
+    traj_meta = dict(
+        corridor_x0=_CORR_X0, corridor_x1=_CORR_X1, corridor_y=_CORR_Y,
+        wall_thickness=WALL_THICKNESS, flight_z_min=0.4, flight_z_max=2.0,
+    )
+
     obs_history = []
     sim_dt = sim.get_physics_dt()
     count = 0
     debug_print_every = 1
 
-    MAX_STEP = 0.2  # metres per control step; retune if it clips legitimate motion
+    MAX_STEP = 0.9
 
     while simulation_app.is_running():
         # -------- Reset --------
-        if count % 300 == 0:
+        if count % 100 == 0:
+            if traj_xyz:
+                save_trajectory_npz(traj_dir, episode_idx, traj_xyz, actions_taken,
+                                     start_pos.cpu().numpy(), goal_pos.cpu().numpy(),
+                                     next_pos=next_pos_list,
+                                     cand_traj_xy=cand_traj_xy_list, snap_chosen=snap_chosen_list,
+                                     **traj_meta)
+                traj_xyz = []
+                actions_taken = []
+                next_pos_list = []
+                cand_traj_xy_list = []
+                snap_chosen_list = []
+                episode_idx += 1
             count = 0
             robot.write_joint_state_to_sim(robot.data.default_joint_pos, robot.data.default_joint_vel)
             robot.reset()
@@ -200,6 +277,12 @@ def main():
             current_np = current_pos.detach().cpu().numpy()
             new_pos = current_np + delta
 
+            traj_xyz.append(current_np.copy())
+            actions_taken.append(delta.copy())
+            next_pos_list.append(new_pos.copy())  # single-step commanded next position
+            cand_traj_xy_list.append(integrate_candidates_xyz(current_np, deltas_real))  # (1,H+1,3)
+            snap_chosen_list.append(0)
+
             desired_pos = torch.tensor(new_pos, device=args_cli.device, dtype=torch.float32)
 
             # Height safety
@@ -227,6 +310,11 @@ def main():
         robot.update(sim_dt)
 
         count += 1
+
+    save_trajectory_npz(traj_dir, episode_idx, traj_xyz, actions_taken,
+                         start_pos.cpu().numpy(), goal_pos.cpu().numpy(),
+                         next_pos=next_pos_list,
+                         cand_traj_xy=cand_traj_xy_list, snap_chosen=snap_chosen_list, **traj_meta)
 
 
 if __name__ == "__main__":
