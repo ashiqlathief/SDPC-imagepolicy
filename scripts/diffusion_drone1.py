@@ -8,7 +8,7 @@ import torchvision.transforms.functional as TF
 
 from isaaclab.app import AppLauncher
 
-HEADLESS = True  # set True to run without the GUI window (overrides --headless)
+HEADLESS = False  # set True to run without the GUI window (overrides --headless)
 
 parser = argparse.ArgumentParser()
 AppLauncher.add_app_launcher_args(parser)
@@ -150,8 +150,8 @@ def main():
     sim.set_camera_view(eye=[-10.48034, -1.2583, 4.51853], target=[0.0, 0.0, 1.0])
 
     # Start & Goal
-    start_pos = torch.tensor([-4.0, 0.0, 1.0], device=args_cli.device)
-    goal_pos  = torch.tensor([ 2.0, 1.0, 1.0], device=args_cli.device)
+    start_pos = torch.tensor([-4.0, 0.0, 0.5], device=args_cli.device)
+    goal_pos  = torch.tensor([ 4.0, 1.0, 1.0], device=args_cli.device)
     desired_pos = start_pos.clone()
 
     # Ground + light
@@ -171,8 +171,7 @@ def main():
 
     robot_cfg = ARL_ROBOT_1_CFG.replace(prim_path="/World/ArlRobot")
     robot_cfg.init_state.pos = (start_pos[0].item(), start_pos[1].item(), start_pos[2].item())
-    robot_cfg.spawn.func("/World/ArlRobot", robot_cfg.spawn, translation=robot_cfg.init_state.pos)
-    robot = Articulation(robot_cfg)
+    robot = Articulation(robot_cfg)  # spawns "/World/ArlRobot" itself via cfg.spawn.func
 
     camera_cfg = CameraCfg(
         prim_path="/World/ArlRobot/base_link/front_camera",

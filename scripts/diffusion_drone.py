@@ -216,8 +216,7 @@ def main():
     # Robot
     robot_cfg = CRAZYFLIE_CFG.replace(prim_path="/World/Crazyflie")
     robot_cfg.init_state.pos = (start_pos[0].item(), start_pos[1].item(), start_pos[2].item())
-    robot_cfg.spawn.func("/World/Crazyflie", robot_cfg.spawn, translation=robot_cfg.init_state.pos)
-    robot = Articulation(robot_cfg)
+    robot = Articulation(robot_cfg)  # spawns "/World/Crazyflie" itself via cfg.spawn.func
 
     # Camera
     camera_cfg = CameraCfg(

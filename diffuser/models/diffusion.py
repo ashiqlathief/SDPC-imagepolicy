@@ -197,6 +197,7 @@ class GaussianDiffusion(nn.Module):
 
         if return_diffusion: diffusion = [x]
         costs = {}
+        step_times = []  # per-denoising-step wall-clock seconds (network forward + any in-loop guidance)
 
         # Denoising process
         last_timestep = -repeat_last if repeat_last > 0 and projector is not None else 0
@@ -208,11 +209,12 @@ class GaussianDiffusion(nn.Module):
                 t <= projector.diffusion_timestep_threshold * self.n_timesteps and
                 (projector.gradient or getattr(projector, 'inloop_slsqp', False))
             )
+            _t0 = time.perf_counter()
             if inloop_active:
                 x = self.p_sample(x, cond, timesteps, returns, projector=projector, constraints=constraints)
             else:
                 x = self.p_sample(x, cond, timesteps, returns)
-            
+
             if _is_hard_conditioning(cond):
                 x = apply_conditioning(x, cond, self.action_dim, goal_dim=self.goal_dim)
 
@@ -234,11 +236,16 @@ class GaussianDiffusion(nn.Module):
                 x = apply_conditioning(x, cond, self.action_dim, goal_dim=self.goal_dim)
             # x = apply_conditioning(x, cond, self.action_dim, goal_dim=self.goal_dim)
 
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+            step_times.append(time.perf_counter() - _t0)
+
             if return_diffusion: diffusion.append(x)
 
         infos = {}
         if return_diffusion: infos['diffusion'] = torch.stack(diffusion, dim=1)
         infos['projection_costs'] = costs
+        infos['step_times'] = step_times  # list of per-denoising-step wall-clock seconds, in loop order (t=T-1..0)
 
         return x, infos
 

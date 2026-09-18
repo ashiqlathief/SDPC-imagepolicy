@@ -277,8 +277,7 @@ def main():
 
     robot_cfg = ARL_ROBOT_1_CFG.replace(prim_path="/World/ArlRobot")
     robot_cfg.init_state.pos = (start_pos[0].item(), start_pos[1].item(), start_pos[2].item())
-    robot_cfg.spawn.func("/World/ArlRobot", robot_cfg.spawn, translation=robot_cfg.init_state.pos)
-    robot = Articulation(robot_cfg)
+    robot = Articulation(robot_cfg)  # spawns "/World/ArlRobot" itself via cfg.spawn.func
 
     camera_cfg = CameraCfg(
         prim_path="/World/ArlRobot/base_link/front_camera",

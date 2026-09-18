@@ -86,7 +86,7 @@ base = {
         'diffusion': 'models.GaussianDiffusion',
         'encoder_type': ENCODER_TYPE,   # derived from MODEL above -- see comment there
         'horizon': 8,
-        'n_obs_steps': 2,
+        'n_obs_steps': 1,
         'image_cond_dim': IMAGE_COND_DIM,   # derived from MODEL above -- see comment there
         'pose_cond_dim': 64,
         'n_diffusion_steps': 20,
