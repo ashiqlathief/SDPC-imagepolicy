@@ -191,3 +191,5 @@ A `rclpy` node (`Ros2HardwareRunner`) that runs the *same* trained diffusion pol
 | `depth_camera_live_test.py` | Runs the detector against a live depth feed |
 | `diag_umap_synthetic.py` | Pure numpy/opencv unit test of the detector's size/radius math against a synthetic depth frame |
 | `diag_umap_visualize.py` | Renders detected bounding boxes onto real depth+color frames pulled from a rosbag |
+
+and uses the obstacle perception uses this paper "Robust Vision-based Obstacle Avoidance for Micro Aerial Vehicles in Dynamic Environments" as reference.
