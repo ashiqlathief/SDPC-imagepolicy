@@ -1,59 +1,26 @@
 # SDPC (Safe Diffusion Policy with Constraint)
 
-Trajectory-level diffusion policy for robot control with hard constraint enforcement via projection. Tested on:
+## How SDPC works
 
-- **Crazyflie quadrotor** in NVIDIA Isaac Lab (image-conditioned, Transformer or UNet denoiser)
+Standard diffusion policies sample trajectories by iteratively denoising random noise. SDPC adds a **projection step** inside the denoising loop:
 
-## 🚧 Status: Work in Progress
+1. Diffusion model proposes a trajectory at each noise level, conditioned on the image history (and, for pose-conditioned models, the relative goal vector)
+2. `Projector` (`diffuser/sampling/projection.py`) solves a constrained optimisation (SLSQP) to project the trajectory onto the feasible set — obstacle avoidance (against ground-truth or depth-perceived obstacle positions), altitude bounds, corridor bounds
+3. The projected trajectory is passed to the next denoising step
 
-This project is being developed as part of a master's thesis at Paderborn University. Expect frequent changes. Not all features are fully implemented or documented yet.
+Hard constraints are enforced at inference time without retraining.
 
 ---
 
-## Repository structure
+## Models
 
-```
-dpcc-thesis/
-├── config/
-│   └── avoiding-crazyflie.py     # Experiment config (obstacles, halfspaces, model hyperparams)
-├── diffuser/
-│   ├── datasets/
-│   │   ├── crazyflie.py          # CrazyflieImageDataset
-│   │   ├── normalization.py
-│   │   └── sequence.py
-│   ├── models/
-│   │   ├── diffusion.py          # GaussianDiffusion
-│   │   ├── image_cond_transformer.py  # ImageCondTransformer1DModel
-│   │   ├── image_cond_unet.py    # ImageCondUNet1DTemporalCondModel
-│   │   ├── unet1d_temporal_cond.py
-│   │   └── vit_obs_encoder.py    # ViTObsEncoder
-│   ├── sampling/
-│   │   ├── policies.py           # Candidate sampling, selection strategies
-│   │   └── projection.py        # SLSQP-based Projector
-│   └── utils/
-│       ├── constraints_helpers.py
-│       ├── training.py
-│       └── ...
-├── isaac/
-│   ├── dataset/
-│   │   └── avoiding_crazyflie/   # Recorded Crazyflie demonstration data
-│   │   ├── avoiding_dataset.py
-│   │   └── base_dataset.py
-│   ├── logs/
-│   │   └── avoiding-crazyflie/   # Training run outputs and eval results
-│   └── scripts/
-│       ├── crazyflie_env.py      # CrazyflieEnv (Isaac Lab gym env)
-│       ├── crazyflie_env_cfg.py  # CrazyflieEnvCfg dataclass
-│       ├── plotall.py            # Plot all variant trajectories on one XY figure
-│       ├── table.py              # Generate LaTeX results table from saved npz files
-│       └── view_traj.py          # Trajectory plot + metrics for one trajectories* folder
-├── scripts/
-│   ├── train.py                  # Training entry point
-│   ├── eval_crazieflie.py        # Evaluation across all projection variants
-│   ├── make_traj_gif.py          # Animate a saved .npz trajectory as a GIF
-│   └── metrics_logger.py         # Per-episode metrics and summary saving
-└── requirements.txt
-```
+| Model | File | Description |
+|---|---|---|
+| `GaussianDiffusion` | `diffuser/models/diffusion.py` | Diffusion process wrapper |
+| `ImageCondTransformer1DModel` / `ImagePoseCondTransformer1DModel` | `diffuser/models/image_cond_transformer.py` | DiT-style transformer denoiser with image conditioning, optionally goal/pose-conditioned |
+| `ImageCondUNet1DTemporalCondModel` / `ImagePoseCondUNet1DTemporalCondModel` | `diffuser/models/image_cond_unet.py` | UNet denoiser with image conditioning, optionally goal/pose-conditioned |
+| `UNet1DTemporalCondModel` | `diffuser/models/unet1d_temporal_cond.py` | State-conditioned UNet denoiser |
+| `ViTObsEncoder` | `diffuser/models/vit_obs_encoder.py` | ViT image encoder for observation conditioning |
 
 ---
 
@@ -66,7 +33,13 @@ dpcc-thesis/
 https://isaac-sim.github.io/IsaacLab/main/source/setup/installation
 ```
 
-**2. Activate the Isaac Lab conda environment and install extra packages:**
+**2. Pull the robot asset submodule** (NTNU-ARL's `lmf2` quadcopter USD [ntnu-arl/robot_model](https://github.com/ntnu-arl/robot_model)):
+```bash
+git submodule update --init --recursive
+```
+If you cloned this repo without `--recurse-submodules`, run the command above once afterward; `robot_model/` stays empty (and every script importing `arl_robot_1_cfg.py` fails at startup) until you do.
+
+**3. Activate the Isaac Lab conda environment and install extra packages:**
 ```bash
 conda activate env_isaaclab
 
@@ -77,29 +50,11 @@ pip install -r requirement.txt
 export PYTHONPATH=$PWD:$PYTHONPATH
 ```
 
-**3. (Optional) Enable ROS2 for `scripts/depth_camera_live_test.py`:**
-
-ROS2 (Humble) isn't installed system-wide (there is no `/opt/ros/humble`) — it ships bundled inside the `isaacsim-ros2` pip package already installed in `env_isaaclab`, built against this env's Python 3.11. Point the env at it with a one-time conda activation hook so `import rclpy` works whenever `env_isaaclab` is active:
-
-```bash
-mkdir -p $CONDA_PREFIX/etc/conda/activate.d
-cat > $CONDA_PREFIX/etc/conda/activate.d/ros2_humble.sh <<'EOF'
-export ISAAC_ROS2_HUMBLE="$CONDA_PREFIX/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/humble"
-export PYTHONPATH="$ISAAC_ROS2_HUMBLE/rclpy:$PYTHONPATH"
-export LD_LIBRARY_PATH="$ISAAC_ROS2_HUMBLE/lib:$LD_LIBRARY_PATH"
-EOF
-
-# Re-activate to pick it up in the current shell
-conda deactivate && conda activate env_isaaclab
-source /opt/ros/humble/setup.bash
-ros2 bag play /home/ashiqali/dpcc-thesis/rosbag/sep3/diffusion_mpc__check_04_a/diffusion_mpc__check_04_0.db3 
-
-```
 ---
 
 ## Data Collection
 
-`isaac/scripts/quadcopter.py` runs a Crazyflie drone in IsaacLab using a cascaded PID controller, navigating to random targets while recording FPV camera images and state data. Episodes are saved as `.pkl`/`.npz` files and a Zarr store under `isaac/dataset/avoiding_crazyflie/data/`.
+`isaac/scripts/quadcopter.py` runs the quadcopter in IsaacLab using a cascaded PID controller, navigating to random targets while recording FPV camera images and state data. Episodes are saved as `.pkl`/`.npz` files and, via `isaac/scripts/zarr_episode_writer.py`, an appendable Zarr store under `isaac/dataset/avoiding_crazyflie/data/`.
 
 ### Running
 
@@ -130,7 +85,7 @@ Any standard IsaacLab/AppLauncher flags (e.g. `--device cuda:0`) also work.
 
 ### Auto-save behaviour
 
-The script saves and resets automatically whenever the drone holds within **5 cm** of its target for at least 1 simulation step. A new random target is then sampled and the episode restarts — no manual intervention needed for continuous data collection.
+The script saves and resets automatically whenever the drone holds within **5 cm** of its target for at least 1 simulation step. A new random target is then sampled and the episode restarts. No manual intervention is needed for continuous data collection.
 
 ### Output files
 
@@ -142,32 +97,6 @@ For each environment `N`, the script writes:
 | `env_NNN_XXXXX_images.npz` | Stacked RGB (and optionally depth) arrays |
 | `env_NNN.zarr/` | Appendable Zarr store used for diffusion policy training |
 
-### Dataset utilities
-
-Helper scripts in `isaac/dataset/avoiding_crazyflie/` for inspecting and visualising collected data:
-
-| Script | What it does |
-|--------|-------------|
-| `checkepisode.py` | Scans all `.pkl` files in the data directory and prints episode count and length statistics (total episodes, mean/std/min/max timesteps per episode) |
-| `zarr_quadcopter_dataset.py` | Opens a Zarr store, prints array shapes and episode stats, and generates XY, XZ, and 3D scatter plots of all recorded trajectories |
-| `make_dataset_video.py` | Renders a side-by-side MP4 video: FPV camera feed on the left, top-down XY map with live drone position and trajectory tail on the right |
-| `vid.py` | Renders a compact MP4 video of the FPV feed with a pose readout (x/y/z) and a progress bar footer |
-| `test_pkl.py` | One-liner debug script — loads a single `.pkl` file and prints its raw contents |
-
-```bash
-# Check episode stats across all .pkl files
-python isaac/dataset/avoiding_crazyflie/checkepisode.py
-
-# Plot trajectories from a Zarr store
-python isaac/dataset/avoiding_crazyflie/zarr_quadcopter_dataset.py
-
-# Render a side-by-side FPV + map video
-python isaac/dataset/avoiding_crazyflie/make_dataset_video.py --zarr <path/to/env_000.zarr> --out out.mp4
-
-# Render a compact FPV-only video
-python isaac/dataset/avoiding_crazyflie/vid.py --zarr <path/to/env_000.zarr> --out out.mp4
-```
-
 ---
 
 ## Training
@@ -177,145 +106,74 @@ conda activate env_isaaclab
 python scripts/train.py
 ```
 
-Config: `config/avoiding-crazyflie.py`  
-Checkpoints saved to: `isaac/logs/avoiding-crazyflie/`
-
-### Configuration
-
-Everything about the environment layout and training hyperparameters lives here.
-
-#### Obstacle layout
-
-| Variable | Description |
-|---|---|
-| `CYLINDERS` | List of `(x, y)` positions for vertical cylinder obstacles in the corridor |
-| `BOXES` | List of `(x, y)` positions for box obstacles (currently empty) |
-| `SPHERES` | List of `(x, y, z)` rest positions for floating sphere obstacles (commented out by default) |
-| `SPHERE_RADIUS` | Physical radius of each sphere in metres; effective exclusion zone = `SPHERE_RADIUS + drone_radius` |
-
-#### Corridor halfspaces
-
-`CORRIDOR_HALFSPACES` defines diagonal boundary constraints in the XY plane as line segments with a side (`'above'` or `'below'`). These are only enforced at eval time when `--use_halfspaces` is passed.
-
-```python
-# format: [p1, p2, side]  where p1/p2 are [x, y] endpoints of the boundary line
-[np.array([0.0, 0.75]), np.array([4.0, 0.15]), 'below'],   # upper diagonal
-[np.array([0.0, -0.75]), np.array([4.0, -0.15]), 'above'],  # lower diagonal
-```
-
-#### Depth sensing
-
-| Variable | Default | Description |
-|---|---|---|
-| `USE_DEPTH` | `False` | Switch to RGBD input; must match how the dataset was collected |
-| `DEPTH_NEAR` | `0.1` m | Near clip for depth normalisation |
-| `DEPTH_FAR` | `10.0` m | Far clip for depth normalisation |
-
-#### Training hyperparameters (`base['diffusion']`)
-
-| Key | Default | Description |
-|---|---|---|
-| `model` | `ImageCondUNet1DTemporalCondModel` | Denoiser architecture — also supports `ImageCondTransformer1DModel` |
-| `encoder_type` | `vitp` | Image encoder: `vit`, `vitp`, `cnn`, or `raw_pixels` |
-| `horizon` | `16` | Number of action steps predicted per diffusion sample |
-| `n_obs_steps` | `2` | Number of past observations fed as conditioning |
-| `n_diffusion_steps` | `20` | Denoising steps at inference |
-| `image_cond_dim` | `512` | Latent dim of image encoder output (`27648` for raw pixels at 96×96×3, `512` for ViT-P) |
-| `stride` | `2` | Frame subsampling factor — how many raw sim frames between consecutive action steps |
-| `dt` | `0.005` s | Raw sim physics timestep at which data was collected |
-| `batch_size` | `8` | Training batch size |
-| `learning_rate` | `1e-4` | Adam learning rate |
-| `n_train_steps` | `1e5` | Total gradient steps |
-
-> **`stride` and `dt` together define the effective control rate:**
-> `control_dt = stride × dt`.
-> With the defaults (`stride=2`, `dt=0.005`), the model acts every **10 ms**.
-> The experiment folder name encodes these as `DT<stride>` and `DT<dt>` e.g. `DT2` and `DT0.005`.
-> If you change `stride` or `dt`, re-collect data at the matching rate or the actions will be scaled incorrectly.
-
 ---
 
 ## Evaluation
 
-### Run all projection variants
+Evaluation is split across several scripts depending on target (simulation vs. real hardware) and how thoroughly the loop actually runs (offline smoke test vs. full episode rollout).
+
+### Offline smoke tests (no Isaac Sim, no env)
+
+These load a trained checkpoint and run a handful of denoising steps against synthetic/random input, to sanity-check that a checkpoint loads and the projection math runs, without booting a simulator:
+
+```bash
+python scripts/eval_diffusion.py         # one unconditioned denoise on random noise
+python scripts/eval_diffusionmpc.py      # SDPC-R/C/T + projection against a hardcoded obstacle list
+python scripts/eval_diffusionmpc_depth.py  # same, obstacles detected from a synthetic depth frame
+```
+
+Each hardcodes `RUN_DIR` at the top of the file and edit it to point at your trained checkpoint directory (e.g. `isaac/logs/avoiding-crazyflie/diffusion/<exp_name>/<seed>`).
+
+### Standalone alternative eval scripts (need Isaac Sim)
+
+`scripts/diffusion_drone1.py`, `scripts/diffusion_dronempc.py`, and `scripts/diffusion_dronempcdepth.py` are self-contained Isaac Lab scripts that build the ARL lmf2 environment inline (via `isaac/scripts/env_cfg.py`/`arl_robot_1_cfg.py`) rather than going through the `crazyflie_envpos.py` Gym env used by `scripts/eval_crazieflie1pos.py`. They progressively add SLSQP-projector MPC (`diffusion_dronempc.py`) and then depth-perceived obstacles (`diffusion_dronempcdepth.py`) on top of a plain policy rollout (`diffusion_drone1.py`). Each hardcodes `RUN_DIR` at the top of the file, same as the smoke tests above.
 
 ```bash
 conda activate env_isaaclab
-python scripts/eval_crazieflie.py --run_dir isaac/logs/avoiding-crazyflie/diffusion/<exp_name>/<seed>
+
+python scripts/diffusion_drone1.py        # plain policy rollout, GUI window (HEADLESS=False)
+python scripts/diffusion_dronempc.py      # + SLSQP-projector MPC, GUI window (HEADLESS=False)
+python scripts/diffusion_dronempcdepth.py # + depth-perceived obstacles, headless (HEADLESS=True)
 ```
 
-Saves per-episode `.npz` trajectories, XY plots, and a summary table under the `--run_dir`.
+Each file's own `HEADLESS` constant near the top overrides `--headless` — flip it there, not via the CLI, to switch between windowed and headless.
 
-#### CLI arguments
-
-| Argument | Default | Description |
-|---|---|---|
-| `--run_dir` | *(required)* | Path to a trained experiment's seed directory (e.g. `.../DT2_DEPTHFalse/9`). If `--seeds` is also passed, this is instead the experiment directory one level up (e.g. `.../DT2_DEPTHFalse`) |
-| `--seeds` | off | Evaluate multiple seeds from the same experiment in one process, reusing a single Isaac Sim instance instead of relaunching per seed, e.g. `--seeds 7 8 10` looks up `<run_dir>/7`, `<run_dir>/8`, `<run_dir>/10` |
-| `--max_steps` | `1500` | Maximum environment steps per episode |
-| `--action_scale` | `5.0` | Scalar multiplier applied to unnormalised actions |
-| `--episodes` | `1` | Number of episodes to roll per variant |
-| `--dynamic_obstacles` | off | Enable sinusoidal cylinder motion. Pass with no values for all cylinders on y-axis, or `idx:axis` tokens e.g. `--dynamic_obstacles 0:y 2:x 4:xy` |
-| `--floating_spheres` | off | Enable floating 3-D sphere obstacles |
-| `--dt` | auto | Override the control timestep (read from dataset metadata by default; see note below) |
-| `--use_halfspaces` | off | Enforce corridor halfspace constraints from `CORRIDOR_HALFSPACES` in config |
-| `--record_video` | off | Save `.mp4` video for each variant |
-| `--camera` | `spectator` | Camera view(s) to record: `spectator`, `chase`, `fpv` (pass multiple) |
-| `--record_variants` | all | Subset of variant names to record when `--record_video` is set |
-| `--video_fps` | `20` | Playback fps for saved videos |
-
-
-#### Hardcoded constants (edit in `scripts/eval_crazieflie.py` → `main()`)
-
-| Variable | Value | Description |
-|---|---|---|
-| `device` | `cuda:0` | Torch device |
-| `drone_radius` | `0.08` m | Minkowski expansion for obstacle constraints and env collision check |
-| `obs_amplitude` | `0.35` m | Oscillation amplitude for dynamic cylinders |
-| `obs_frequency` | `0.25` Hz | Oscillation frequency for dynamic cylinders |
-| `sphere_amplitude` | `0.20` m | Per-axis oscillation amplitude for floating spheres |
-| `sphere_frequency` | `0.20` Hz | Base oscillation frequency for floating spheres |
-
-#### Projection variants
-
-Variants are listed in `projection_variants` at the top of `scripts/eval_crazieflie.py`. Each maps to a config (num candidates, selection strategy, projection mode, tighten amount) via `variant_cfg()`. To run a subset, comment out unwanted entries in that list.
-
-### Visualisation tools
+### Full simulation evaluation
 
 ```bash
-# Plot all variants from a trajectories* folder
-python isaac/scripts/plotall.py <path/to/trajectories*>
-
-# Interactive trajectory plot + metrics table
-python isaac/scripts/view_traj.py <path/to/trajectories*>
-
-# Animate a single .npz trajectory as a GIF
-python scripts/make_traj_gif.py <path/to/traj_*.npz>
-
-# Generate LaTeX results table
-python isaac/scripts/table.py <path/to/trajectories*>
+conda activate env_isaaclab
+python scripts/eval_crazieflie1pos.py
 ```
 
----
+Runs a full episode rollout per variant in IsaacLab (`isaac/scripts/crazyflie_envpos.py`), for every entry in the `VARIANTS` list (`sdpc-r`, `sdpc-c`, `sdpc-t`, `diffuser`, repeated across random spawn/target pairs when `RANDOMIZE_SPAWN_TARGET=True`). Saves per-episode `.npz` trajectories, XY/Z plots, and a metrics summary (`metrics_logger.MetricsLogger`) under `<run_dir>/trajectories*/`, `<run_dir>/plots*/`, and `<run_dir>/results/`.
 
-## How SDPC works
+There is no CLI for this script and configuration is a block of module-level constants at the top of the file:
 
-Standard diffusion policies sample trajectories by iteratively denoising random noise. SDPC adds a **projection step** inside the denoising loop:
+| Variable | Description |
+|---|---|
+| `RUN_DIR`, `SEEDS` | Checkpoint directory and which seed subfolder(s) to evaluate |
+| `MAX_STEPS` | Max control steps per episode before giving up |
+| `VARIANTS` / `VARIANT_CFG` | Which projection variants to run and how many episodes of each |
+| `OBSTACLE_SOURCE` | `"ground_truth"` (reads `env.get_cylinder_positions()`) or `"depth"` (obstacles perceived from the onboard depth camera via `depth_obstacle_estimator.detect_obstacles_umap()`) |
+| `RANDOMIZE_SPAWN_TARGET`, `SPAWN_X_RANGE`/`SPAWN_Y_RANGE`, `TARGET_X_RANGE`/`TARGET_Y_RANGE` | Per-episode randomised start/goal sampling |
+| `PROJ_TIGHTEN`, `FLIGHT_Z_MIN`/`FLIGHT_Z_MAX` | Projector safety margin and altitude bounds |
 
-1. Diffusion model proposes a trajectory at each noise level
-2. `Projector` (`diffuser/sampling/projection.py`) solves a constrained optimisation (SLSQP) to project the trajectory onto the feasible set — obstacle avoidance, corridor bounds, dynamics
-3. The projected trajectory is passed to the next denoising step
+### Real-hardware evaluation (ROS2 / MAVROS)
 
-Hard constraints are enforced at inference time without retraining.
+```bash
+conda activate env_isaaclab
+source /opt/ros/humble/setup.bash
+python scripts/eval_crazieflieros2.py
+```
 
----
+A `rclpy` node (`Ros2HardwareRunner`) that runs the *same* trained diffusion policy + projector on a physical Crazyflie: subscribes to MAVROS pose (`/mavros/local_position/pose`) and a RealSense color/depth stream (`/camera/camera/...`), publishes position setpoints to `/mpc/set_pose`, and (if the chosen variant uses projection) perceives obstacles from the live depth stream the same way the sim path does. Configuration (`RUN_DIR`, `VARIANT`, topic names, camera intrinsics, control rate) is set via class attributes at the top of `Ros2HardwareRunner` — only a single variant is flown per run (no sweep, unlike the sim script).
 
-## Models
+### Depth-obstacle perception tools
 
-| Model | File | Description |
-|---|---|---|
-| `GaussianDiffusion` | `diffuser/models/diffusion.py` | Diffusion process wrapper |
-| `ImageCondTransformer1DModel` | `diffuser/models/image_cond_transformer.py` | Transformer denoiser with image conditioning |
-| `ImageCondUNet1DTemporalCondModel` | `diffuser/models/image_cond_unet.py` | UNet denoiser with image conditioning |
-| `UNet1DTemporalCondModel` | `diffuser/models/unet1d_temporal_cond.py` | State-conditioned UNet denoiser |
-| `ViTObsEncoder` | `diffuser/models/vit_obs_encoder.py` | ViT image encoder for observation conditioning |
+`scripts/depth_obstacle_estimator.py` implements the obstacle detector shared by both eval paths above: a U-disparity-map + contour method (`detect_obstacles_umap()`) that turns a depth frame into a list of `(x, y, radius)` world-frame obstacle estimates. Companion tools for developing/debugging it, none of which need a live drone:
+
+| Script | What it does |
+|--------|-------------|
+| `depth_camera_live_test.py` | Runs the detector against a live depth feed |
+| `diag_umap_synthetic.py` | Pure numpy/opencv unit test of the detector's size/radius math against a synthetic depth frame |
+| `diag_umap_visualize.py` | Renders detected bounding boxes onto real depth+color frames pulled from a rosbag |

@@ -1,0 +1,3 @@
+[submodule "robot_model"]
+	path = robot_model
+	url = https://github.com/ntnu-arl/robot_model.git
