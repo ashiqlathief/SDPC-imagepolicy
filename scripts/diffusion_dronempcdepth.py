@@ -27,7 +27,7 @@ from isaaclab.sim import SimulationContext
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.sim.spawners.materials import PreviewSurfaceCfg
 
-from isaac.scripts.arl_robot_1_cfg import ARL_ROBOT_1_CFG
+from isaac.scripts.arl_robot__cfg import ARL_ROBOT__CFG
 import diffuser.utils as utils
 import diffuser.sampling.projection as projection_mod
 from diffuser.sampling.projection import Projector
@@ -130,7 +130,7 @@ CYL_HEIGHT = 2.0
 OBS_AMPLITUDE = 0.5    # metres
 OBS_FREQUENCY = 0.2   # Hz
 
-# ── Obstacle-aware projection (depth camera, same wiring as eval_crazieflie1pos.py) ──
+# ── Obstacle-aware projection (depth camera, same wiring as eval_craziefliepos.py) ──
 OBSTACLE_SOURCE = "depth"  # "ground_truth" = STATIC_OBSTACLES directly, "depth" = detect_depth_obstacles() below
 DEPTH_OBSTACLE_RADIUS = 0.15
 DEPTH_OBSTACLE_FORGET_MARGIN = 0.3  # metres behind the drone (along corridor +x) before a
@@ -394,7 +394,7 @@ def main():
             cyl_cfg.func(f"/World/Obstacles/Cyl{i:02d}", cyl_cfg, translation=(x, y, CYL_HEIGHT / 2.0))
     cyl_objs = {idx: obj for (idx, _x0, _y0, _axis, obj) in dynamic_cyls}  # {index: RigidObject}
 
-    robot_cfg = ARL_ROBOT_1_CFG.replace(prim_path="/World/ArlRobot")
+    robot_cfg = ARL_ROBOT__CFG.replace(prim_path="/World/ArlRobot")
     robot_cfg.init_state.pos = (start_pos[0].item(), start_pos[1].item(), start_pos[2].item())
     robot = Articulation(robot_cfg)  # spawns "/World/ArlRobot" itself via cfg.spawn.func
 

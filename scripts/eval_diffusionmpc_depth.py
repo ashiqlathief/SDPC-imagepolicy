@@ -60,7 +60,7 @@ def make_synthetic_depth_frame():
 
 
 def detect_depth_obstacles_dummy(pos_body_w, quat_body_w):
-    """Same math as eval_crazieflie1pos.py's detect_depth_obstacles(), just fed
+    """Same math as eval_craziefliepos.py's detect_depth_obstacles(), just fed
     a synthetic depth frame and a dummy drone pose instead of a live env."""
     depth_2d = make_synthetic_depth_frame()
     pos_cam_w, quat_cam_w = camera_world_pose(pos_body_w, quat_body_w)

@@ -105,7 +105,7 @@ def detect_depth_obstacles(depth_frame, pos_body_w, quat_body_w, depth_fx, depth
     for pos_cam, half_w, _half_h in detections:
         world_xyz = pos_cam_w + quat_apply(quat_cam_w, pos_cam)
         # half_h is the obstacle's VERTICAL extent, not horizontal -- see
-        # eval_crazieflie1pos.py's identical fix / [[umap_obstacle_detector_bugs]].
+        # eval_craziefliepos.py's identical fix / [[umap_obstacle_detector_bugs]].
         radius = max(depth_obstacle_radius, half_w)
         points.append((float(world_xyz[0]), float(world_xyz[1]), float(radius)))
     return points

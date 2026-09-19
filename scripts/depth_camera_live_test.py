@@ -32,7 +32,7 @@ EDGE_CROP_FRAC = 0.12  # fraction of frame width blanked out on each left/right 
                        # frame screenshot (2026-09-06). Blanking to 0 makes _umap_contours()
                        # treat that margin as out-of-frame (it already drops <=0/non-finite
                        # pixels), same as it does for genuinely out-of-range background.
-                       # Default here first; port to eval_crazieflie1pos.py/eval_crazieflieros2.py
+                       # Default here first; port to eval_craziefliepos.py/eval_crazieflieros2.py
                        # once validated against real data.
 
 
@@ -51,7 +51,7 @@ def _crop_depth_edges(depth, frac=EDGE_CROP_FRAC):
 
 
 def detect_depth_obstacles(depth_frame, pos_body_w, quat_body_w, fx, fy, cx, cy):
-    """Identical logic to eval_crazieflie1pos.py/eval_crazieflieros2.py's same-named
+    """Identical logic to eval_craziefliepos.py/eval_crazieflieros2.py's same-named
     function. Returns [(x, y, radius), ...] world-frame."""
     depth_frame = _crop_depth_edges(depth_frame)
     pos_cam_w, quat_cam_w = camera_world_pose(pos_body_w, quat_body_w)
@@ -65,7 +65,7 @@ def detect_depth_obstacles(depth_frame, pos_body_w, quat_body_w, fx, fy, cx, cy)
     for pos_cam, half_w, _half_h in detections:
         world_xyz = pos_cam_w + quat_apply(quat_cam_w, pos_cam)
         # half_h is the obstacle's VERTICAL extent, not horizontal -- see
-        # eval_crazieflie1pos.py's identical fix / [[umap_obstacle_detector_bugs]].
+        # eval_craziefliepos.py's identical fix / [[umap_obstacle_detector_bugs]].
         radius = max(DEPTH_OBSTACLE_RADIUS, half_w)
         points.append((float(world_xyz[0]), float(world_xyz[1]), float(radius)))
     return points

@@ -26,7 +26,7 @@ from isaaclab.sim import SimulationContext
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.sim.spawners.materials import PreviewSurfaceCfg
 
-from isaac.scripts.arl_robot_1_cfg import ARL_ROBOT_1_CFG
+from isaac.scripts.arl_robot__cfg import ARL_ROBOT__CFG
 import diffuser.utils as utils
 import diffuser.sampling.projection as projection_mod
 from diffuser.sampling.projection import Projector
@@ -275,7 +275,7 @@ def main():
         )
         cyl_cfg.func(f"/World/Obstacles/Cyl{i:02d}", cyl_cfg, translation=(x, y, CYL_HEIGHT / 2.0))
 
-    robot_cfg = ARL_ROBOT_1_CFG.replace(prim_path="/World/ArlRobot")
+    robot_cfg = ARL_ROBOT__CFG.replace(prim_path="/World/ArlRobot")
     robot_cfg.init_state.pos = (start_pos[0].item(), start_pos[1].item(), start_pos[2].item())
     robot = Articulation(robot_cfg)  # spawns "/World/ArlRobot" itself via cfg.spawn.func
 

@@ -10,8 +10,6 @@ Standard diffusion policies sample trajectories by iteratively denoising random 
 
 Hard constraints are enforced at inference time without retraining.
 
----
-
 ## Models
 
 | Model | File | Description |
@@ -21,8 +19,6 @@ Hard constraints are enforced at inference time without retraining.
 | `ImageCondUNet1DTemporalCondModel` / `ImagePoseCondUNet1DTemporalCondModel` | `diffuser/models/image_cond_unet.py` | UNet denoiser with image conditioning, optionally goal/pose-conditioned |
 | `UNet1DTemporalCondModel` | `diffuser/models/unet1d_temporal_cond.py` | State-conditioned UNet denoiser |
 | `ViTObsEncoder` | `diffuser/models/vit_obs_encoder.py` | ViT image encoder for observation conditioning |
-
----
 
 ## Installation
 
@@ -37,7 +33,7 @@ https://isaac-sim.github.io/IsaacLab/main/source/setup/installation
 ```bash
 git submodule update --init --recursive
 ```
-If you cloned this repo without `--recurse-submodules`, run the command above once afterward; `robot_model/` stays empty (and every script importing `arl_robot_1_cfg.py` fails at startup) until you do.
+If you cloned this repo without `--recurse-submodules`, run the command above once afterward; `robot_model/` stays empty (and every script importing `arl_robot__cfg.py` fails at startup) until you do.
 
 **3. Activate the Isaac Lab conda environment and install extra packages:**
 ```bash
@@ -106,7 +102,25 @@ conda activate env_isaaclab
 python scripts/train.py
 ```
 
----
+### Pretrained checkpoint
+
+A trained checkpoint is published on Hugging Face at [`ashiqali98/SDPC_diffusionmodel`](https://huggingface.co/ashiqali98/SDPC_diffusionmodel). It's the flat contents of one `<exp_name>/7/` run directory: `dataset_config.pkl`, `model_config.pkl`, `diffusion_config.pkl`, `trainer_config.pkl`, `losses.pkl`, `state_best.pt` and exactly what `diffuser.utils.load_diffusion()` expects to find at `RUN_DIR`.
+
+```bash
+# Make sure the hf CLI is installed
+curl -LsSf https://hf.co/cli/install.sh | bash
+
+# Download straight into the RUN_DIR every eval script defaults to
+hf download ashiqali98/SDPC_diffusionmodel \
+  --local-dir isaac/logs/avoiding-crazyflie/diffusion/H8_K20_Dmodels.ImagePoseCondUNet1DTemporalCondModel_Evitp_L384/7
+```
+
+Downloading anywhere else works too and just point each script's `RUN_DIR` constant at wherever you put it. `git clone` (with [`git-xet`](https://hf.co/docs/hub/git-xet) installed) is the alternative if you'd rather not use the `hf` CLI:
+
+```bash
+curl -sSfL https://hf.co/git-xet/install.sh | sh
+git clone https://huggingface.co/ashiqali98/SDPC_diffusionmodel
+```
 
 ## Evaluation
 
@@ -126,12 +140,12 @@ Each hardcodes `RUN_DIR` at the top of the file and edit it to point at your tra
 
 ### Standalone alternative eval scripts (need Isaac Sim)
 
-`scripts/diffusion_drone1.py`, `scripts/diffusion_dronempc.py`, and `scripts/diffusion_dronempcdepth.py` are self-contained Isaac Lab scripts that build the ARL lmf2 environment inline (via `isaac/scripts/env_cfg.py`/`arl_robot_1_cfg.py`) rather than going through the `crazyflie_envpos.py` Gym env used by `scripts/eval_crazieflie1pos.py`. They progressively add SLSQP-projector MPC (`diffusion_dronempc.py`) and then depth-perceived obstacles (`diffusion_dronempcdepth.py`) on top of a plain policy rollout (`diffusion_drone1.py`). Each hardcodes `RUN_DIR` at the top of the file, same as the smoke tests above.
+`scripts/diffusion_drone.py`, `scripts/diffusion_dronempc.py`, and `scripts/diffusion_dronempcdepth.py` are self-contained Isaac Lab scripts that build the ARL lmf2 environment inline (via `isaac/scripts/env_cfg.py`/`arl_robot__cfg.py`) rather than going through the `crazyflie_envpos.py` Gym env used by `scripts/eval_craziefliepos.py`. They progressively add SLSQP-projector MPC (`diffusion_dronempc.py`) and then depth-perceived obstacles (`diffusion_dronempcdepth.py`) on top of a plain policy rollout (`diffusion_drone.py`). Each hardcodes `RUN_DIR` at the top of the file, same as the smoke tests above.
 
 ```bash
 conda activate env_isaaclab
 
-python scripts/diffusion_drone1.py        # plain policy rollout, GUI window (HEADLESS=False)
+python scripts/diffusion_drone.py        # plain policy rollout, GUI window (HEADLESS=False)
 python scripts/diffusion_dronempc.py      # + SLSQP-projector MPC, GUI window (HEADLESS=False)
 python scripts/diffusion_dronempcdepth.py # + depth-perceived obstacles, headless (HEADLESS=True)
 ```
@@ -142,7 +156,7 @@ Each file's own `HEADLESS` constant near the top overrides `--headless` — flip
 
 ```bash
 conda activate env_isaaclab
-python scripts/eval_crazieflie1pos.py
+python scripts/eval_craziefliepos.py
 ```
 
 Runs a full episode rollout per variant in IsaacLab (`isaac/scripts/crazyflie_envpos.py`), for every entry in the `VARIANTS` list (`sdpc-r`, `sdpc-c`, `sdpc-t`, `diffuser`, repeated across random spawn/target pairs when `RANDOMIZE_SPAWN_TARGET=True`). Saves per-episode `.npz` trajectories, XY/Z plots, and a metrics summary (`metrics_logger.MetricsLogger`) under `<run_dir>/trajectories*/`, `<run_dir>/plots*/`, and `<run_dir>/results/`.

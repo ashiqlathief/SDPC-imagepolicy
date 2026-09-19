@@ -5,12 +5,12 @@ from isaaclab.assets import ArticulationCfg
 
 from diffuser.utils.path import project_path
 
-ARL_ROBOT_1_USD_PATH = project_path("robot_model", "arl_robot_1", "arl_robot_1.usd")
+ARL_ROBOT__USD_PATH = project_path("robot_model", "arl_robot_1", "arl_robot_1.usd")
 
-ARL_ROBOT_1_CFG = ArticulationCfg(
+ARL_ROBOT__CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
-        usd_path=ARL_ROBOT_1_USD_PATH,
+        usd_path=ARL_ROBOT__USD_PATH,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             max_depenetration_velocity=10.0,

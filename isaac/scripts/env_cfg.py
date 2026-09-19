@@ -10,7 +10,7 @@ from isaaclab.sensors.camera import CameraCfg
 from isaaclab.sim.spawners.materials import PreviewSurfaceCfg
 from isaaclab.sim.spawners.materials import MdlFileCfg
 
-from .arl_robot_1_cfg import ARL_ROBOT_1_CFG
+from .arl_robot__cfg import ARL_ROBOT__CFG
 
 cfg = importlib.import_module("config.avoiding-crazyflie")
 
@@ -90,9 +90,9 @@ del _wall_y, _wall_rot, _ti
 
 @configclass
 class CrazyflieSceneCfg(InteractiveSceneCfg):
-    crazyflie = ARL_ROBOT_1_CFG.replace(
+    crazyflie = ARL_ROBOT__CFG.replace(
         prim_path="/World/envs/env_.*/ArlRobot",
-        init_state=ARL_ROBOT_1_CFG.init_state.replace(pos=(CORRIDOR_X_OFFSET, -1.0, 1.0))
+        init_state=ARL_ROBOT__CFG.init_state.replace(pos=(CORRIDOR_X_OFFSET, -1.0, 1.0))
     )
 
     FPV_CAMERA_CFG = CameraCfg(
